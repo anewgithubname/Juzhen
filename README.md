@@ -52,11 +52,25 @@ logM 2 by 2
 0.461017 0.571807 
 0.981484 1.28033 
 ```
+You can verify the result using MATLAB:
+```matlab
+>> A = [1,2,3;4,5,6];
+B = [.1,.2;.3,.4;.5,.6];
+>> (log(exp(A*B)+1.0)./5.0)
 
+ans =
+
+    0.4610    0.5718
+    0.9815    1.2803
+
+>> 
+```
 ## Advanced Examples:
 See more examples on:
-1. [Binary Logistic Regression using a linear model](example/logisticregression_simple.cpp).
-2. Classifying MNIST digits using one hidden layer neural net (on [CPU](example/logisticregression_MNIST.cpp)/[GPU](example/logisticregression_MNIST_GPU.cpp)).
+1. [helloworld-cpu](example/helloworld.cpp)
+2. [helloworld-gpu](example/helloworld_gpu.cpp)
+3. [Binary Logistic Regression using a linear model](example/logisticregression_simple.cpp).
+4. Classifying MNIST digits using one hidden layer neural net (on [CPU](example/logisticregression_MNIST.cpp)/[GPU](example/logisticregression_MNIST_GPU.cpp)).
 
 ## Compile and Run Examples:
 1. Helloworld CPU
