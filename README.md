@@ -117,6 +117,6 @@ B.zeros();
     - Tested on CUDA 11.5, Windows 11. 
     - Tested it on Native Windows and WSL2. Results are the same. 
 ## Benchmark on some CPUs/GPUs
-Benchmark using MNIST example, time collected by the built-in profilinge tool. 
+Benchmark using MNIST example, time collected by the built-in profiling tool. 
 
 ![](benchmark.png)
