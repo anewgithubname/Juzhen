@@ -98,7 +98,7 @@ See more examples on:
 - MacOS (CPU)
 - Windows (CPU/GPU*), you will need to install Visual Studio 2019 to compile the code. 
 ## Passing by Reference
-2. Matrix are always passed by reference. For example: 
+Matrices are always passed by reference. For example: 
 ```c++
 Matrix<float> A = {"A",{{1,2},{3,4},{5,6}}};
 auto B = A;  
