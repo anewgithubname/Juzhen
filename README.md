@@ -55,7 +55,7 @@ logM 2 by 2
 You can verify the result using MATLAB:
 ```matlab
 >> A = [1,2,3;4,5,6];
-B = [.1,.2;.3,.4;.5,.6];
+>> B = [.1,.2;.3,.4;.5,.6];
 >> (log(exp(A*B)+1.0)./5.0)
 
 ans =
@@ -93,3 +93,30 @@ See more examples on:
     make logi-gpu
     bin/logi-gpu.out
     ```
+## Supported Platform
+- Linux (CPU/GPU)
+- MacOS (CPU)
+- Windows (CPU/GPU*), you will need to install Visual Studio 2019 to compile the code. 
+## Passing by Reference
+2. Matrix are always passed by reference. For example: 
+```c++
+Matrix<float> A = {"A",{{1,2},{3,4},{5,6}}};
+auto B = A;  
+B.zeros();
+// now both A and B are zero matrices. 
+```
+If you want a copy of ```A``` to be stored in ```B```, do the following
+```c++
+Matrix<float> A = {"A",{{1,2},{3,4},{5,6}}};
+auto B = A*1.0;  
+B.zeros();
+// A remains the old value. 
+```
+## Known Issues
+1. GPU computation on Windows is ~2.5 time slower than on Linux. I am not sure the cause of this. 
+    - Tested on CUDA 11.5, Windows 11. 
+    - Tested it on Native Windows and WSL2. Results are the same. 
+## Benchmark on some CPUs/GPUs
+Benchmark using MNIST example, time collected by the built-in profilinge tool. 
+
+![](benchmark.png)
