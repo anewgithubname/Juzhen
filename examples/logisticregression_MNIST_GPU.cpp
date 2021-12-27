@@ -17,15 +17,15 @@
     along with this program.  If not, see <https://www.gnu.org/licenses/>.
  */
 
-#include "juzhen.hpp"
+#include "jamac.hpp"
 #include <math.h>
 #define MatrixI Matrix<int> 
-#define MatrixD Matrix<float>  
-#define PROFILING
+#define MatrixF Matrix<float>  
+// #define PROFILING
 
 // convert label Y matrix (1 X n) to one-hot encoding. 
-MatrixD one_hot(const MatrixI &Y, int k){
-    MatrixD Y_one_hot("One_hot", k, Y.num_col());
+MatrixF one_hot(const MatrixI &Y, int k){
+    MatrixF Y_one_hot("One_hot", k, Y.num_col());
     Y_one_hot.zeros();
 
     for(int i = 0; i < Y.num_col(); i++){
@@ -36,7 +36,7 @@ MatrixD one_hot(const MatrixI &Y, int k){
 }
 
 // Logistic Regression
-int main() {
+int main() { GPUMemoryDeleter md1; MemoryDeleter<float> md2; MemoryDeleter<int> md3; //will release the memory for us when the function exits
     //init cublas
     cublasStatus_t stat;
     cublasHandle_t handle;
@@ -47,7 +47,7 @@ int main() {
     }
     // load data
     int n = 60000, d = 28*28, k = 10;
-    MatrixD X("X",d,n); 
+    MatrixF X("X",d,n); 
     X.read("X.matrix"); X = X.T();
     cout << "size of X: " << X.num_row() << " " << X.num_col() << endl;
 
@@ -55,7 +55,7 @@ int main() {
     labels.read("Y.matrix"); labels = labels.T();
     cout << "size of labels: " << labels.num_row() << " " << labels.num_col() << endl;
 
-    MatrixD Y = one_hot(labels, k);
+    MatrixF Y = one_hot(labels, k);
     cout << "size of Y: " << Y.num_row() << " " << Y.num_col() << endl;
 
     cuMatrix cuX(handle, X);
@@ -79,25 +79,29 @@ int main() {
     cuMatrix O_1nb(handle, "ones", 1, nb); O_1nb.ones();
 
     auto t1 = Clock::now(); auto t2 = Clock::now();
-    #ifdef PROFILING
+#ifdef PROFILING
     Profiler p1("batching"), p2("computing"), p3("updating");
-    #endif
+#endif
     // training, run gradient descent
-    for (int i = 0; i <= 10000; i++){            
+    for (int i = 0; i <= 10000; i++){
+#ifdef PROFILING            
+        cudaDeviceSynchronize(); // without this, the following profiling is not accurate.
+#endif
+
         int batch_id = (i%n_batch);
         // select batches 
-        #ifdef PROFILING 
+#ifdef PROFILING 
         p1.start(); 
-        #endif
+#endif
         cuMatrix X_i(handle, X.columns(nb*batch_id, nb*(batch_id+1)));
         cuMatrix Y_i(handle, Y.columns(nb*batch_id, nb*(batch_id+1)));
-        #ifdef PROFILING
+#ifdef PROFILING
         p1.end(); 
-        #endif
+#endif
 
-        #ifdef PROFILING 
+#ifdef PROFILING 
         p2.start();
-        #endif
+#endif
         // W1X_i + b1, saving to a temp var
         auto f1 = W1 * X_i + b1 * O_1nb;
         // activation function
@@ -122,13 +126,13 @@ int main() {
                    g_b1 +=  hadmd(d_tanh_f1,W2.T()*pred)*O_1nb.T()/nb;
         // computing b2 gradient using chain rule
         auto g_b2 = - Y_i*O_1nb.T()/nb + pred*O_1nb.T()/nb;
-        #ifdef PROFILING
+#ifdef PROFILING
         p2.end();
-        #endif
+#endif
 
-        #ifdef PROFILING
+#ifdef PROFILING
         p3.start();
-        #endif
+#endif
         
         // gradient descent, g_W1, g_W2, g_b1, g_b2 are sacrificed for speed.
         W1 -= .01*std::move(g_W1);
@@ -136,12 +140,12 @@ int main() {
         b1 -= .01*std::move(g_b1);
         b2 -= .01*std::move(g_b2);
 
-        #ifdef PROFILING
+#ifdef PROFILING
         p3.end();
-        #endif
+#endif
         // getchar();
         if (i % 500 == 0){
-            //// print out training status
+            // print out training status
             cout << "Iteration: " << i << endl;
             cuMatrix O_1n(handle, "ones", 1, n); O_1n.ones();
             cuMatrix && f = W2*tanh(W1*cuX+b1*O_1n) + b2*O_1n;
@@ -155,7 +159,7 @@ int main() {
 
     // loading test data
     int nt = 10000;
-    MatrixD Xt("Xt",d,nt); 
+    MatrixF Xt("Xt",d,nt); 
     Xt.read("T.matrix"); Xt = Xt.T();
     cout<<"size of Xt: "<<Xt.num_row()<<" "<<Xt.num_col()<<endl;
 
@@ -163,14 +167,14 @@ int main() {
     labels_t.read("YT.matrix"); labels_t = labels_t.T();
     cout<<"size of labels_t: "<<labels_t.num_row()<<" "<<labels_t.num_col()<<endl;
 
-    MatrixD O_1nt("ones", 1, nt); O_1nt.ones();
+    MatrixF O_1nt("ones", 1, nt); O_1nt.ones();
 
-    MatrixD && hostW1 = W1.to_host();
-    MatrixD && hostW2 = W2.to_host();
-    MatrixD && hostb1 = b1.to_host();
-    MatrixD && hostb2 = b2.to_host();
+    auto hostW1 = W1.to_host();
+    auto hostW2 = W2.to_host();
+    auto hostb1 = b1.to_host();
+    auto hostb2 = b2.to_host();
     // prediction
-    MatrixD && ft = exp(hostW2*tanh(hostW1*Xt+hostb1*O_1nt) + hostb2*O_1nt);
+    auto ft = exp(hostW2*tanh(hostW1*Xt+hostb1*O_1nt) + hostb2*O_1nt);
     MatrixI pred("pred",1,nt);
 
     // compute test accuracy

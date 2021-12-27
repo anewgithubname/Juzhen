@@ -20,6 +20,10 @@
 */
 
 #include "cudam.h"
+// #define PROFILING
+
+list<mem_space<float>> cuMatrix::alive_gpu_mems;
+list<mem_space<float>> cuMatrix::dead_gpu_mems;
 
 cuMatrix::cuMatrix(GPU_handle handle, const Matrix<float>& M)
 {
@@ -28,18 +32,25 @@ cuMatrix::cuMatrix(GPU_handle handle, const Matrix<float>& M)
     this->numrow = M.numrow;
     this->numcol = M.numcol;
     this->transpose = M.transpose;
-    float *p;
-    cudaError_t custat = cudaMalloc(&p, numcol * numrow* sizeof(float));
-    if (custat != cudaSuccess) {
-        printf ("device memory allocation failed");
-    }
+    float * p = cuMatrix::allocate(numcol * numrow);
+    elements = shared_ptr<float[]>(p, [](auto p) {
+        cuMatrix::free(p);
+    });
 
-    elements = shared_ptr<float[]>(p, cuArrayDeleter());
+#ifdef PROFILING
+    static Profiler profiler("Copying from Host to GPU"); 
+    if(M.num_col() == 128 && M.num_row() == 28*28)
+        profiler.start();
+#endif
+    cudaError_t stat = cudaMemcpy(elements.get(), M.elements.get(), numcol * numrow * sizeof(float), cudaMemcpyHostToDevice);
+    
+#ifdef PROFILING
+    if(M.num_col() == 128 && M.num_row() == 28*28)
+        profiler.end();
+#endif
 
-    GPU_status stat = cublasSetMatrix(numrow, numcol, sizeof(float), M.elements.get(), 
-                                      numrow, elements.get(), numrow);
-    if (stat != CUBLAS_STATUS_SUCCESS) {
-        printf ("data download failed");
+    if (stat != cudaSuccess) {
+        printf ("host to device memory copy failed\n");
     }
 }
 
@@ -50,13 +61,15 @@ cuMatrix::cuMatrix(GPU_handle handle, const char *name, int numrow, int numcol, 
     this->numcol = numcol;
     this->numrow = numrow;
     transpose = trans;
-    float *p;
-    cudaError_t custat = cudaMalloc(&p, numcol * numrow* sizeof(float));
-    if (custat != cudaSuccess) {
-        printf ("device memory allocation failed");
-    }
-    
-    elements.reset(p, cuArrayDeleter());
+    float *p = cuMatrix::allocate(numcol * numrow);
+    //cudaError_t custat = cudaMalloc(&p, numcol * numrow* sizeof(float));
+    //if (custat != cudaSuccess) {
+    //    printf ("device memory allocation failed");
+    //}
+    //
+    elements.reset(p, [](auto p) {
+        cuMatrix::free(p);
+        });
 
     zeros();
 }

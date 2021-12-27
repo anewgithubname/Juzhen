@@ -24,8 +24,8 @@
 
 typedef vector<int> idxlist;
 
-int time_in_ms(Clock::time_point start, Clock::time_point end) {
-    return chrono::duration_cast<chrono::milliseconds>(end - start).count();
+double time_in_ms(Clock::time_point start, Clock::time_point end) {
+    return chrono::duration_cast<chrono::microseconds>(end - start).count()/1000.0;
 }
 
 idxlist seq(int start, int end) {

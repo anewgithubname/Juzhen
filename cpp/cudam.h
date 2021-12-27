@@ -30,20 +30,59 @@
 
 typedef cublasHandle_t GPU_handle;
 typedef cublasStatus_t GPU_status;
-
-struct cuArrayDeleter
-{
-    void operator()(float p[]) const
-    {
-        // cout << "Cuda object freed." << endl;
-        cudaFree(p);
-    }
-};
-
+struct GPUMemoryDeleter;
 
 class cuMatrix : public Matrix<float> {
     GPU_handle handle;
 
+    static list<mem_space<float>> alive_gpu_mems;
+    static list<mem_space<float>> dead_gpu_mems;
+    static float* allocate(int size) {
+        // static Profiler p("allocator_GPU"); p.start();
+        // search for space in the freed space.
+        for (auto it = dead_gpu_mems.begin(); it != dead_gpu_mems.end(); it++) {
+            if (it->size == size) {
+                //cout << "Found GPU space in freed space: " << size << " address: "<< it->ptr << endl;
+                float* ptr = it->ptr;
+                mem_space<float> mem; mem.ptr = it->ptr;  mem.size = it->size;
+                alive_gpu_mems.push_back(mem);
+                dead_gpu_mems.erase(it);
+                return ptr;
+            }
+        }
+        // no space available, allocate new space
+        float* ptr = NULL; 
+        cudaError_t custat = cudaMalloc(&ptr, size * sizeof(float));
+        if (custat != cudaSuccess) {
+            printf ("device memory allocation failed");
+        }
+        //cout << "No GPU space available, allocate new space: " << size << " address: " << ptr << endl;
+        mem_space<float> space = { ptr, size };
+        alive_gpu_mems.push_back(space);
+        return ptr;
+        // p.end();
+    }
+
+    static void free(float* ptr) {
+        // static Profiler p("deleter_GPU"); p.start();
+        int size = -1;
+        for (auto it = alive_gpu_mems.begin(); it != alive_gpu_mems.end(); it++) {
+            if (it->ptr == ptr) {
+                size = it->size;
+            }
+        }
+        //cout << "freeing GPU " << ptr << " size: " << size << endl; 
+        mem_space<float> mem = { ptr, size };
+        dead_gpu_mems.push_back(mem);
+
+        for (auto it = alive_gpu_mems.begin(); it != alive_gpu_mems.end(); it++) {
+            if (it->ptr == ptr) {
+                alive_gpu_mems.erase(it);
+                return;
+            }
+        }
+        // p.end();
+    }
     cuMatrix(GPU_handle handle, const char *name, int numrow, int numcol, int trans, shared_ptr<float[]> elements)
     :Matrix<float>(name, numrow, numcol, trans, elements){this->handle = handle;}
     cuMatrix(GPU_handle handle, const char* name, int numrow, int numcol, int trans);
@@ -104,6 +143,22 @@ public:
     friend cuMatrix hadmd(const cuMatrix& M1, const cuMatrix& M2);
     friend cuMatrix hadmd(const cuMatrix &M1, cuMatrix &&M2);
     friend cuMatrix hadmd(cuMatrix &&M1, const cuMatrix &M2);
+    friend GPUMemoryDeleter;
+};
+
+struct GPUMemoryDeleter{
+    ~GPUMemoryDeleter(){
+        long size = 0; 
+        for(auto it = cuMatrix::alive_gpu_mems.begin(); it != cuMatrix::alive_gpu_mems.end(); it++){
+            cudaFree(it->ptr);
+            size += it->size;
+        }
+        for(auto it = cuMatrix::dead_gpu_mems.begin(); it != cuMatrix::dead_gpu_mems.end(); it++){
+            cudaFree(it->ptr);
+            size += it->size;
+        }
+        cout << "Total GPU memory released: " << size*sizeof(float)/1024.0/1024.0 << " MB." << endl;
+    }
 };
 
 cuMatrix sum(const cuMatrix &M, int dim);

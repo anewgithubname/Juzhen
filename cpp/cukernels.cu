@@ -242,14 +242,16 @@ void copy(cuMatrix &dest, const cuMatrix &src)
     dest.transpose = src.transpose;
 
     dest.elements.reset();
-    float *p;
-    cudaError_t stats = cudaMalloc(&p, numElem * sizeof(float));
-    if (stats != cudaSuccess)
-    {
-        printf("Error allocating memory on GPU\n");
-        exit(1);
-    }
-    dest.elements = shared_ptr<float[]>(p, cuArrayDeleter());
+    float *p = cuMatrix::allocate(numElem);
+    //cudaError_t stats = cudaMalloc(&p, numElem * sizeof(float));
+    //if (stats != cudaSuccess)
+    //{
+    //    printf("Error allocating memory on GPU\n");
+    //    exit(1);
+    //}
+    dest.elements = shared_ptr<float[]>(p, [](auto p) {
+        cuMatrix::free(p);
+        });
 
     copyKernel<<<blocksPerGrid, threadsPerBlock>>>(dest.elements.get(), src.elements.get(), numElem);
 }

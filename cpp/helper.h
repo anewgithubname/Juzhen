@@ -33,7 +33,7 @@ typedef chrono::high_resolution_clock Clock;
 
 typedef vector<int> idxlist;
 
-int time_in_ms(Clock::time_point start, Clock::time_point end);
+double time_in_ms(Clock::time_point start, Clock::time_point end);
 idxlist seq(int start, int end);
 idxlist seq(int end);
 idxlist shuffle(int start, int end);
@@ -82,7 +82,7 @@ class Profiler {
     private:
         Clock::time_point t1;
         Clock::time_point t2;
-        int cumulative_time = 0;
+        double cumulative_time = 0;
         string s="";
         bool started = false;
 };

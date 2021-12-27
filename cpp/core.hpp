@@ -32,7 +32,7 @@
 #include <iostream>
 #include <random>
 #include <string.h>
-
+#include <list>
 #ifdef INTEL_MKL //do we use Intel mkL special funcs? doesn't seem to have much impact on perf.
 #include <mkl.h>
 #else
@@ -40,16 +40,34 @@
 #endif
 #include "helper.h"
 
+// #define PROFILING
+
+// template <class D>
+// struct ArrayDeleter
+// {
+//     void operator()(D p) const noexcept
+//     {
+// #ifdef PROFILING 
+//         static Profiler pdeleter("deleter"); // profiler for cuArrayDeleter
+//         pdeleter.start();
+// #endif
+//         // you can trace the deconstruction of matrices here
+//         // cout << "Call delete from function object." << endl;
+//         delete []p;
+// #ifdef PROFILING
+//         pdeleter.end();
+// #endif
+//     }
+// };
+
 template <class D>
-struct ArrayDeleter
-{
-    void operator()(D p) const noexcept
-    {
-        // you can trace the deconstruction of matrices here
-        // cout << "Call delete from function object." << endl;
-        delete []p;
-    }
+struct mem_space{
+    D* ptr;
+    int size;
 };
+
+template <class D>
+struct MemoryDeleter;
 
 template <class D>
 class Matrix
@@ -58,10 +76,54 @@ protected:
     int numcol;
     int numrow;
     bool transpose;
-    // TODO: perhaps not using shared_ptr here, use unique pointer for better performance.
+
     shared_ptr<D[]> elements;
-    string name;
-    
+    static list<mem_space<D>> alive_mems;
+    static list<mem_space<D>> dead_mems;
+
+    static D* allocate(int size){
+        // static Profiler p("allocator"); p.start();
+        // search for space in the freed space.
+        for(auto it = dead_mems.begin(); it != dead_mems.end(); it++){
+            if(it->size == size){
+                //cout << "Found space in freed space: " << size << " address: "<< it->space << endl;
+                D* ptr = it->ptr;
+                mem_space<D> mem; mem.ptr = it->ptr;  mem.size = it->size;
+                alive_mems.push_back(mem);
+                dead_mems.erase(it);
+                return ptr;
+            }
+        }
+        // no space available, allocate new space
+        D* ptr = new D[size];
+        //cout << "No space available, allocate new space: " << size << " address: " << ptr << endl;
+        mem_space<D> space = {ptr, size};
+        alive_mems.push_back(space);
+        return ptr;
+        // p.end();
+    }
+
+    static void free(D* ptr){
+        // static Profiler p("deleter"); p.start();
+        int size = -1; 
+        for (auto it = alive_mems.begin(); it != alive_mems.end(); it++) {
+            if (it->ptr == ptr) {
+                size = it->size;
+            }
+        }
+        //cout << "freeing " << ptr << " size: " << size << endl; 
+        mem_space<D> mem = {ptr, size};
+        dead_mems.push_back(mem);
+
+        for(auto it = alive_mems.begin(); it != alive_mems.end(); it++){
+            if(it->ptr == ptr){
+                alive_mems.erase(it);
+                return;
+            }
+        }
+        // p.end();
+    }
+    string name;    
     Matrix(const char *name, int numrow, int numcol, int trans, shared_ptr<D[]> elements){
         this->name = name; 
         this->numrow = numrow;
@@ -154,6 +216,28 @@ public:
     template <class Data> 
     friend Matrix<Data> hadmd(const Matrix<Data> &M1, const Matrix<Data> &M2);
     friend class cuMatrix;
+    friend class MemoryDeleter<D>;
+};
+
+template <class D>
+list<mem_space<D>> Matrix<D>::alive_mems;
+template <class D>
+list<mem_space<D>> Matrix<D>::dead_mems;
+
+template <class D>
+struct MemoryDeleter{
+    ~MemoryDeleter(){
+        long size = 0; 
+        for(auto it = Matrix<D>::alive_mems.begin(); it != Matrix<D>::alive_mems.end(); it++){
+            delete []it->ptr;
+            size += it->size;
+        }
+        for(auto it = Matrix<D>::dead_mems.begin(); it != Matrix<D>::dead_mems.end(); it++){
+            delete []it->ptr;
+            size += it->size;
+        }
+        cout << "Total memory released: " << size*sizeof(D)/1024.0/1024.0 << " MB." << endl;
+    }
 };
 
 template <class D>
@@ -163,7 +247,10 @@ Matrix<D>::Matrix(const char *name, int numrow, int numcol, int trans){
     this->numrow = numrow;
     transpose = trans;
     //TODO: Not nice using reset, should change
-    elements.reset(new D[numcol * numrow], ArrayDeleter<D[]>());
+    elements.reset(Matrix<D>::allocate(numrow*numcol), [](auto p) {
+           Matrix<D>::free(p);
+        //    delete []p;
+        });
 }
 
 template<class D>
@@ -174,7 +261,10 @@ Matrix<D>::Matrix(const char *name, vector<vector<double>> elems){
     transpose = 0;
     
     //TODO: Not nice using reset, should change
-    elements.reset(new D[numcol * numrow], ArrayDeleter<D[]>());
+    elements.reset(Matrix<D>::allocate(numrow*numcol), [](auto p) {
+           Matrix<D>::free(p);
+        //    delete []p;
+        });
 
     // double for loop may have some performance issues, 
     // but should be OK for small matrices. 

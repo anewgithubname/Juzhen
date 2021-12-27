@@ -2,7 +2,7 @@
 #include "juzhen.hpp"
 using namespace std;
 
-int main(){
+int main(){ GPUMemoryDeleter md1; MemoryDeleter<float> md2;
     // cuda initialization
     cublasStatus_t stat;
     cublasHandle_t handle;

@@ -17,15 +17,15 @@
     along with this program.  If not, see <https://www.gnu.org/licenses/>.
  */
 
-#include "juzhen.hpp"
+#include "jamac.hpp"
 #include <math.h>
 #define MatrixI Matrix<int> 
-#define MatrixD Matrix<float> 
+#define MatrixF Matrix<float> 
 #define PROFILING
 
 // convert label Y matrix (1 X n) to one-hot encoding. 
-MatrixD one_hot(const MatrixI &Y, int k){
-    MatrixD Y_one_hot("One_hot", k, Y.num_col());
+MatrixF one_hot(const MatrixI &Y, int k){
+    MatrixF Y_one_hot("One_hot", k, Y.num_col());
     Y_one_hot.zeros();
 
     for(int i = 0; i < Y.num_col(); i++){
@@ -36,10 +36,10 @@ MatrixD one_hot(const MatrixI &Y, int k){
 }
 
 // Logistic Regression
-int main(){
+int main(){ MemoryDeleter<float> md1; MemoryDeleter<int> md2; //will release the memory for us when the function exits
     // load data
     int n = 60000, d = 28*28, k = 10;
-    MatrixD X("X",d,n); 
+    MatrixF X("X",d,n); 
     X.read("X.matrix"); X = std::move(X.T());
     cout << "size of X: " << X.num_row() << " " << X.num_col() << endl;
 
@@ -47,29 +47,29 @@ int main(){
     labels.read("Y.matrix"); labels = std::move(labels.T());
     cout << "size of labels: " << labels.num_row() << " " << labels.num_col() << endl;
 
-    MatrixD Y = one_hot(labels, k);
+    MatrixF Y = one_hot(labels, k);
     cout << "size of Y: " << Y.num_row() << " " << Y.num_col() << endl;
 
     //initialize parameters
     int m = 28*28*3;
-    MatrixD W1("W1",m,d); // first layer coefficient, m x d
+    MatrixF W1("W1",m,d); // first layer coefficient, m x d
     W1.randn(0,.1);
-    MatrixD W2("W2",k,m); // second layer coefficient, k x m
+    MatrixF W2("W2",k,m); // second layer coefficient, k x m
     W2.randn(0,.1);
-    MatrixD b1("b1",m,1); // first layer bias, m x 1
+    MatrixF b1("b1",m,1); // first layer bias, m x 1
     b1.randn(0,.1);
-    MatrixD b2("b2",k,1); // second layer bias k x 1
+    MatrixF b2("b2",k,1); // second layer bias k x 1
     b2.randn(0,.1);
 
-    MatrixD O_k1("ones", k, 1); O_k1.ones();
+    MatrixF O_k1("ones", k, 1); O_k1.ones();
 
     // set up batch size
     int nb = 128; int n_batch = n/nb;
-    MatrixD O_1nb("ones", 1, nb); O_1nb.ones();
+    MatrixF O_1nb("ones", 1, nb); O_1nb.ones();
 
     auto t1 = Clock::now(); auto t2 = Clock::now();
-    MatrixD O_1n("ones", 1, n); O_1n.ones();
-    MatrixD && f = W2*tanh(W1*X+b1*O_1n) + b2*O_1n;
+    MatrixF O_1n("ones", 1, n); O_1n.ones();
+    MatrixF && f = W2*tanh(W1*X+b1*O_1n) + b2*O_1n;
     cout <<"obj " << -sum(sum(hadmd(Y,f),0) -log(sum(exp(f),0)),1)/n << endl;
     
     #ifdef PROFILING
@@ -78,19 +78,19 @@ int main(){
     // training, run gradient descent
     for (int i = 0; i <= 10000; i++){            
         // select batches 
-        #ifdef PROFILING 
+#ifdef PROFILING 
         p1.start(); 
-        #endif
+#endif
         int batch_id = (i%n_batch);
-        MatrixD && X_i = X.columns(nb*batch_id, nb*(batch_id+1));
-        MatrixD && Y_i = Y.columns(nb*batch_id, nb*(batch_id+1));
-        #ifdef PROFILING
+        MatrixF && X_i = X.columns(nb*batch_id, nb*(batch_id+1));
+        MatrixF && Y_i = Y.columns(nb*batch_id, nb*(batch_id+1));
+#ifdef PROFILING
         p1.end(); 
-        #endif
+#endif
         
-        #ifdef PROFILING 
+#ifdef PROFILING 
         p2.start();
-        #endif
+#endif
         // W1X_i + b1, saving to a temp var
         auto f1 = W1*X_i+b1*O_1nb;
         // activation function
@@ -115,28 +115,28 @@ int main(){
                    g_b1 +=  hadmd(d_tanh_f1,W2.T()*pred)*O_1nb.T()/nb;
         // computing b2 gradient using chain rule
         auto g_b2 = - Y_i*O_1nb.T()/nb + pred*O_1nb.T()/nb;
-        #ifdef PROFILING
+#ifdef PROFILING
         p2.end();
-        #endif
+#endif
 
-        #ifdef PROFILING
+#ifdef PROFILING
         p3.start();
-        #endif
+#endif
         // gradient descent, g_W1, g_W2, g_b1, g_b2 are sacrificed for speed.
         W1 -= .01f*std::move(g_W1);
         W2 -= .01f*std::move(g_W2);
         b1 -= .01f*std::move(g_b1);
         b2 -= .01f*std::move(g_b2);
-        #ifdef PROFILING
+#ifdef PROFILING
         p3.end();
-        #endif
+#endif
 
 
         if (i % 500 == 0){
             // print out training status
             cout << "Iteration: " << i << endl;
-            MatrixD O_1n("ones", 1, n); O_1n.ones();
-            MatrixD && f = W2*tanh(W1*X+b1*O_1n) + b2*O_1n;
+            MatrixF O_1n("ones", 1, n); O_1n.ones();
+            MatrixF && f = W2*tanh(W1*X+b1*O_1n) + b2*O_1n;
             cout <<"obj " << -sum(sum(hadmd(Y,f),0) -log(sum(exp(f),0)),1)/n << endl;
             t2 = Clock::now();
             cout << time_in_ms(t1,t2) << " ms" << endl;
@@ -147,7 +147,7 @@ int main(){
 
     // load test data
     int nt = 10000;
-    MatrixD Xt("Xt",d,nt); 
+    MatrixF Xt("Xt",d,nt); 
     Xt.read("T.matrix"); Xt = std::move(Xt.T());
     cout<<"size of Xt: "<<Xt.num_row()<<" "<<Xt.num_col()<<endl;
 
@@ -155,9 +155,9 @@ int main(){
     labels_t.read("YT.matrix"); labels_t = std::move(labels_t.T());
     cout<<"size of labels_t: "<<labels_t.num_row()<<" "<<labels_t.num_col()<<endl;
 
-    MatrixD O_1nt("ones", 1, nt); O_1nt.ones();
+    MatrixF O_1nt("ones", 1, nt); O_1nt.ones();
     // prediction
-    MatrixD && ft = exp(W2*tanh(W1*Xt+b1*O_1nt) + b2*O_1nt);
+    MatrixF && ft = exp(W2*tanh(W1*Xt+b1*O_1nt) + b2*O_1nt);
     MatrixI pred("pred",1,nt);
 
     // compute test accuracy

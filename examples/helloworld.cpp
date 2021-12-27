@@ -2,7 +2,8 @@
 #include "juzhen.hpp"
 using namespace std;
 
-int main(){
+int main(){MemoryDeleter<float> md1; 
+
     Matrix<float> A = {"A", {{1,2,3},{4,5,6}}};
     cout << A << endl;
     Matrix<float> B = {"B", {{.1,.2},{.3,.4},{.5,.6}}};

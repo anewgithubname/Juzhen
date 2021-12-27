@@ -93,7 +93,7 @@ See more examples on:
     make logi-gpu
     bin/logi-gpu.out
     ```
-## Supported Platform
+## Supported Platforms
 - Linux (CPU/GPU)
 - MacOS (CPU)
 - Windows (CPU/GPU*), you will need to install Visual Studio 2019 to compile the code. 
