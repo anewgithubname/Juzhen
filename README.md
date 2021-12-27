@@ -112,10 +112,18 @@ auto B = A*1.0;
 B.zeros();
 // A remains the old value. 
 ```
+## Garbage Collection
+The allocated memory spaces will not be automatically released, so later computations can directly claim those spaces without calling expensive memory allocation functions. To release memory, please remember to add a line at the begining of the scope: 
+```
+MemoryDeleter<T> md1; 
+```
+where ```T``` is the type of your matrix and ```GPUMemoryDeleter md1;``` if you are using GPU computation. 
+
 ## Known Issues
 1. GPU computation on Windows is ~2.5 time slower than on Linux. I am not sure the cause of this. 
     - Tested on CUDA 11.5, Windows 11. 
     - Tested it on Native Windows and WSL2. Results are the same. 
+2. Currently, Juzhen only supports single precision float point CBLAS/cuBLAS, although it is very easy to modify the source code and add supports for other types of data. 
 ## Benchmark on some CPUs/GPUs
 Benchmark using MNIST example, time collected by the built-in profiling tool. 
 
