@@ -9,7 +9,7 @@ You can simply do matrix operations on CPU:
 #include "juzhen.hpp"
 using namespace std;
 
-int main(){
+int main(){ MemoryDeleter<float> md1; 
     Matrix<float> A = {"A", {{1,2,3},{4,5,6}}};
     cout << A << endl;
     Matrix<float> B = {"B", {{.1,.2},{.3,.4},{.5,.6}}};
@@ -24,7 +24,7 @@ or on GPU:
 #include "juzhen.hpp"
 using namespace std;
 
-int main(){
+int main(){ GPUMemoryDeleter md1; MemoryDeleter<float> md2;
     // cuBLAS initialization ...
 
     // suppose "handle" is cuBLAS handle.
