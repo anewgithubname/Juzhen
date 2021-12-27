@@ -67,10 +67,10 @@ ans =
 ```
 ## Advanced Examples:
 See more examples on:
-1. [helloworld-cpu](example/helloworld.cpp)
-2. [helloworld-gpu](example/helloworld_gpu.cpp)
-3. [Binary Logistic Regression using a linear model](example/logisticregression_simple.cpp).
-4. Classifying MNIST digits using one hidden layer neural net (on [CPU](example/logisticregression_MNIST.cpp)/[GPU](example/logisticregression_MNIST_GPU.cpp)).
+1. [helloworld-cpu](examples/helloworld.cpp)
+2. [helloworld-gpu](examples/helloworld_gpu.cpp)
+3. [Binary Logistic Regression using a linear model](examples/logisticregression_simple.cpp).
+4. Classifying MNIST digits using one hidden layer neural net (on [CPU](examples/logisticregression_MNIST.cpp)/[GPU](examples/logisticregression_MNIST_GPU.cpp)).
 
 ## Compile and Run Examples:
 1. Helloworld CPU
