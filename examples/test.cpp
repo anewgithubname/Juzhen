@@ -300,7 +300,11 @@ void cuda_dre(){
 }
 #endif
 
-int main(){
+int main(){ 
+#ifndef CPU_ONLY
+    GPUMemoryDeleter md1; 
+#endif
+    MemoryDeleter<float> md2;
     printf("cpu_matrixaccess\n");
     cpu_matrixaccess();
 

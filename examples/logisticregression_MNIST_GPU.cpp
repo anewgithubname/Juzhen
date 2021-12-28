@@ -17,11 +17,11 @@
     along with this program.  If not, see <https://www.gnu.org/licenses/>.
  */
 
-#include "jamac.hpp"
+#include "juzhen.hpp"
 #include <math.h>
 #define MatrixI Matrix<int> 
 #define MatrixF Matrix<float>  
-// #define PROFILING
+#define PROFILING
 
 // convert label Y matrix (1 X n) to one-hot encoding. 
 MatrixF one_hot(const MatrixI &Y, int k){

@@ -390,8 +390,8 @@ Matrix<D> Matrix<D>::inv()
     {
         // NSLog(@"Error 1");
         cout << "Error 1" << endl;
-        free(pivot);
-        free(workspace);
+        ::free(pivot);
+        ::free(workspace);
         exit(1);
     }
 
@@ -402,13 +402,13 @@ Matrix<D> Matrix<D>::inv()
     {
         // NSLog(@"Error 2");
         cout << "Error 2" << endl;
-        free(pivot);
-        free(workspace);
+        ::free(pivot);
+        ::free(workspace);
         exit(1);
     }
 
-    free(pivot);
-    free(workspace);
+    ::free(pivot);
+    ::free(workspace);
 
     return inv;
 }
