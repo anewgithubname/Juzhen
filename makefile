@@ -58,16 +58,16 @@ logi-bin:
 	# 		-L/opt/intel/oneapi/mkl/2021.4.0/lib
 testing: 
 	# Compile without MKL
-	clang++ -I cpp/ -D CPU_ONLY -Rpass-analysis=loop-vectorize -Ofast -std=c++20 -c cpp/helper.cpp
-	clang++ -I cpp/ -D CPU_ONLY -Rpass-analysis=loop-vectorize -std=c++20 -Ofast examples/test.cpp -o bin/test.out helper.o \
+	clang++ -I cpp/ -D CPU_ONLY -Ofast -std=c++20 -c cpp/helper.cpp
+	clang++ -I cpp/ -D CPU_ONLY -std=c++20 -Ofast examples/test.cpp -o bin/test.out helper.o \
 			-I /Library/Developer/CommandLineTools/SDKs/MacOSX.sdk/System/Library/Frameworks/Accelerate.framework/Versions/Current/Frameworks/vecLib.framework/Headers/ \
 			-framework Accelerate
 	# # Compile using MKL
 	# icc -I cpp/ -D INTEL_MKL -D CPU_ONLY -qmkl -std=c++20 -O3 -march=coffeelake -std=c++20 -c cpp/helper.cpp 
 	# icc -I cpp/ -D INTEL_MKL -D CPU_ONLY -qmkl -std=c++20 -O3 -march=coffeelake examples/test.cpp -o bin/test.out helper.o 
 helloworld:
-	clang++ -I cpp/ -D CPU_ONLY -Rpass-analysis=loop-vectorize -Ofast -std=c++20 -c cpp/helper.cpp
-	clang++ -I cpp/ -D CPU_ONLY -Rpass-analysis=loop-vectorize -std=c++20 -Ofast examples/helloworld.cpp -o bin/helloworld.out helper.o \
+	clang++ -I cpp/ -D CPU_ONLY -Ofast -std=c++20 -c cpp/helper.cpp
+	clang++ -I cpp/ -D CPU_ONLY -std=c++20 -Ofast examples/helloworld.cpp -o bin/helloworld.out helper.o \
 			-I /Library/Developer/CommandLineTools/SDKs/MacOSX.sdk/System/Library/Frameworks/Accelerate.framework/Versions/Current/Frameworks/vecLib.framework/Headers/ \
 			-framework Accelerate
 endif
