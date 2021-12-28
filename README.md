@@ -86,12 +86,17 @@ See more examples on:
     make helloworld-gpu
     bin/helloworld-gpu.out
     ```
-3. MNIST CPU
+3. Simple Logistic Regression
+    ```
+    make logi-bin
+    bin/logi-bin.out
+    ```
+4. MNIST CPU
     ```
     make logi-cpu
     bin/logi.out
     ```
-4. MNIST GPU
+5. MNIST GPU
     ```
     make logi-gpu
     bin/logi-gpu.out
