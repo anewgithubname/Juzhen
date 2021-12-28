@@ -2,6 +2,7 @@
 
 ![GitHub](https://img.shields.io/github/license/anewgithubname/Juzhen?style=for-the-badge)
 ![GitHub last commit](https://img.shields.io/github/last-commit/anewgithubname/Juzhen?style=for-the-badge)
+![GitHub release (latest by date)](https://img.shields.io/github/downloads/anewgithubname/Juzhen/v0.0.1-alpha/total?style=for-the-badge)
 
 Juzhen is a meta language for C++ matrix operations. It provides a higher level interface for lower-level numerical calculation software like [CBLAS](http://www.netlib.org/blas/), [LAPACK](http://www.netlib.org/lapack/), [MKL](https://en.wikipedia.org/wiki/Math_Kernel_Library) or [CUDA](https://en.wikipedia.org/wiki/CUDA). 
 
