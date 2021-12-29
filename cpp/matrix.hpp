@@ -173,7 +173,7 @@ Matrix<D> tanh(Matrix<D> &&M)
     for (int i = 0; i < numelems; i++)
         M.elements[i] = tanh(M.elements[i]);
 
-    return M;
+    return std::move(M);
 }
 template <class D>
 Matrix<D> d_tanh(const Matrix<D> &M)
@@ -195,17 +195,7 @@ Matrix<D> d_tanh(Matrix<D> && M)
     for (int i = 0; i < numelems; i++)
         M.elements[i] = 1- tanh(M.elements[i])*tanh(M.elements[i]);
 
-    return M;
-}
-
-template <class D>
-Matrix<D> square(Matrix<D> M)
-{
-    Matrix<D> squareM("squareM", M.numrow, M.numcol, M.transpose);
-    for (int i = 0; i < M.num_row() * M.num_col(); i++)
-        squareM.elements[i] = M.elements[i] * M.elements[i];
-
-    return squareM;
+    return std::move(M);
 }
 
 template <class D>
@@ -233,7 +223,7 @@ Matrix<D> hadmd(const Matrix<D> &M1, Matrix<D> &&M2)
 #pragma ivdep
         for (int i=0; i< numrow; i++)
             M2.elem(i, j) *= M1.elem(i, j);
-    return M2;
+    return std::move(M2);
 }
 //rvalue overload
 template <class D>
@@ -245,7 +235,7 @@ Matrix<D> hadmd(Matrix<D> &&M1, const Matrix<D> &M2)
 #pragma ivdep
         for (int i=0; i< numrow; i++)
             M1.elem(i, j) *= M2.elem(i, j);
-    return M1;
+    return std::move(M1);
 }
 
 //operator overloads
@@ -278,13 +268,13 @@ Matrix<D> operator+(const Matrix<D> &lM, const Matrix<D> &rM)
 template <class D>
 Matrix<D> operator+(Matrix<D> &&lM, const Matrix<D> &rM)
 {
-    return lM+=rM;
+    return std::move(lM+=rM);
 }
 //rvalue version of operator +
 template <class D>
 Matrix<D> operator+(Matrix<D> &&lM, Matrix<D> &&rM)
 {
-    return rM+=lM;
+    return std::move(lM += rM);
 }
 template <class D>
 Matrix<D> operator+(const Matrix<D> &lM, const D &r)
@@ -347,7 +337,7 @@ Matrix<D> operator/(Matrix<D> &&lM, Matrix<D> &&rM)
             lM.elem(i, j) /= rM.elem(i, j);
         }
     }
-    return lM;
+    return std::move(lM);
 }
 template <class D>
 Matrix<D> operator/(const D &l, const Matrix<D> &rM)
@@ -369,7 +359,7 @@ Matrix<D> operator/(const D &l, Matrix<D> &&rM)
     for (int i = 0; i < numelems; i++)
         rM.elements[i] = l / rM.elements[i];
 
-    return rM;
+    return std::move(rM);
 }
 template <class D>
 Matrix<D> operator/(const Matrix<D> &lM, const double &r)
@@ -407,11 +397,11 @@ Matrix<D> operator*(const D &l, Matrix<D> &&rM)
     for (int i = 0; i < numelems; i++)
         rM.elements[i] *= l;
 
-    return rM;
+    return std::move(rM);
 
 }
 template <class D>
-Matrix<D> operator+=(Matrix<D> &lM, const D &r)
+Matrix<D>& operator+=(Matrix<D> &lM, const D &r)
 {
     int numcol = lM.num_col();
     int numrow = lM.num_row();

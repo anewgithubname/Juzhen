@@ -3,22 +3,26 @@
 ![GitHub](https://img.shields.io/github/license/anewgithubname/Juzhen?style=for-the-badge)
 ![GitHub last commit](https://img.shields.io/github/last-commit/anewgithubname/Juzhen?style=for-the-badge)
 
-Juzhen is a meta language for C++ matrix operations. It provides a higher level interface for lower-level numerical calculation software like [CBLAS](http://www.netlib.org/blas/), [LAPACK](http://www.netlib.org/lapack/), [MKL](https://en.wikipedia.org/wiki/Math_Kernel_Library) or [CUDA](https://en.wikipedia.org/wiki/CUDA). 
+Juzhen is a set of C++ APIs for matrix operations. It provides a higher level interface for lower-level numerical calculation software like [CBLAS](http://www.netlib.org/blas/) and [CUDA](https://en.wikipedia.org/wiki/CUDA). 
 
 ## Example
-You can simply do matrix operations on CPU:
+You can perform matrix operations like this:
 ```c++
 #include <iostream> 
 #include "juzhen.hpp"
 using namespace std;
 
-int main(){ MemoryDeleter<float> md1; 
+MemoryDeleter<float> md1; // it will automatically release all allocated memory
+
+int main(){ 
+    // declare matrices like you would in MATLAB or Numpy.
     Matrix<float> A = {"A", {{1,2,3},{4,5,6}}};
     cout << A << endl;
     Matrix<float> B = {"B", {{.1,.2},{.3,.4},{.5,.6}}};
     cout << B << endl << endl;
 
     cout << log(exp(A*B)+1.0f)/5.0f << endl;
+    // no need to release memory by hand. 
 }
 ```
 or on GPU:
@@ -27,7 +31,10 @@ or on GPU:
 #include "juzhen.hpp"
 using namespace std;
 
-int main(){ GPUMemoryDeleter md1; MemoryDeleter<float> md2;
+MemoryDeleter<float> md2;
+GPUMemoryDeleter md1; // GPU memory needs its own deleter. 
+
+int main(){ 
     // cuBLAS initialization ...
 
     // suppose "handle" is cuBLAS handle.
@@ -68,8 +75,31 @@ ans =
 
 >> 
 ```
-## Advanced Examples:
-See more examples on:
+
+Juzhen (CPU API) also supports matrix slicing: 
+```c++
+#include <iostream> 
+using namespace std;
+
+#include "cpp/juzhen.hpp"
+
+int main() {MemoryDeleter<float> md;
+    Matrix<float> A = { "A", {{1,2,3},{4,5,6}} };
+    cout << A.columns(0, 2).inv() << endl;
+}
+```
+The code above is the same as the following MATLAB code: 
+```matlab
+>> A = [1,2,3;4,5,6];
+>> inv(A(:,1:2))
+
+ans =
+
+   -1.6667    0.6667
+    1.3333   -0.3333
+```
+
+## Examples Code:
 1. [helloworld-cpu](examples/helloworld.cpp)
 2. [helloworld-gpu](examples/helloworld_gpu.cpp)
 3. [Binary Logistic Regression using a linear model](examples/logisticregression_simple.cpp).

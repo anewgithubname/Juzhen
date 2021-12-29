@@ -23,9 +23,8 @@
 #define CUDAM_HPP
 
 #include "core.hpp"
-#include <cuda_runtime.h>
-#include "cublas_v2.h"
 #include "cuda.h"
+#include "cublas_v2.h"
 #include <curand.h>
 
 typedef cublasHandle_t GPU_handle;
@@ -93,6 +92,68 @@ public:
     cuMatrix(GPU_handle handle, const Matrix<float>& M);
     cuMatrix(GPU_handle handle, const char* name, int numrow, int numcol):cuMatrix(handle, name, numrow, numcol, 0) {};
 
+    cuMatrix(const cuMatrix &M) {
+        cout << "cuda copy constructor called" << endl;
+        this->handle = M.handle;
+        this->name = "copy of" + M.name;
+        this->numrow = M.num_row();
+        this->numcol = M.num_col();
+        this->transpose = 0;
+        elements = shared_ptr<float[]>(
+                cuMatrix::allocate(numcol * numrow), [](auto p) {
+                    cuMatrix::free(p);
+                });
+
+        cudaError_t custat = cudaMemcpy(elements.get(), M.elements.get(), numcol * numrow * sizeof(float), cudaMemcpyDeviceToDevice);
+        if (custat != cudaSuccess) {
+            printf ("device memory copy failed");
+        }
+
+    }
+
+    cuMatrix(cuMatrix &&M) noexcept{
+        //cout << "move constructor called" << endl;
+        this->handle = M.handle;
+        this->name = M.name;
+        this->numrow = M.numrow;
+        this->numcol = M.numcol;
+        this->transpose = M.transpose;
+        this->elements = M.elements;
+    }
+
+    cuMatrix &operator=(const cuMatrix &M){
+        if(this == &M) return *this;
+        cout << "cuda copy assignment called" << endl;
+        this->handle = M.handle;
+        this->name = "copy of" + M.name;
+        this->numrow = M.num_row();
+        this->numcol = M.num_col();
+        this->transpose = 0;
+        elements = shared_ptr<float[]>(
+                cuMatrix::allocate(numcol * numrow), [](auto p) {
+                    cuMatrix::free(p);
+                });
+
+        cudaError_t custat = cudaMemcpy(elements.get(), M.elements.get(), numcol * numrow * sizeof(float), cudaMemcpyDeviceToDevice);
+        if (custat != cudaSuccess) {
+            printf ("device memory copy failed");
+        }
+
+        return *this;
+    }
+
+    cuMatrix &operator=(const cuMatrix &&M) noexcept{
+        if(this == &M) return *this;
+        cout << "move assignment called" << endl;
+        this->handle = M.handle;
+        this->name = M.name;
+        this->numrow = M.numrow;
+        this->numcol = M.numcol;
+        this->transpose = M.transpose;
+        elements = M.elements;
+        return *this;
+    }
+
     //matrix filler
     void ones();
     void zeros();
@@ -123,8 +184,8 @@ public:
 
     //our friends
     friend cuMatrix operator*(const float& l, cuMatrix&& rM);
-    friend cuMatrix operator+=(cuMatrix &lM, const cuMatrix &rM);
-    friend cuMatrix operator-=(cuMatrix &lM, const cuMatrix &rM);
+    friend cuMatrix& operator+=(cuMatrix &lM, const cuMatrix &rM);
+    friend cuMatrix& operator-=(cuMatrix &lM, const cuMatrix &rM);
     friend cuMatrix operator/(const float &l, const cuMatrix &rM);
     friend cuMatrix operator/(const cuMatrix &lM, const cuMatrix &rM);
     friend cuMatrix operator/(cuMatrix &&lM, const float &r);
@@ -137,7 +198,7 @@ public:
     friend cuMatrix d_tanh(const cuMatrix &M);
     friend cuMatrix d_tanh(cuMatrix &&M);
     friend void copy(cuMatrix &dest, const cuMatrix &src);
-    friend cuMatrix fill(cuMatrix &M, float a);
+    friend cuMatrix& fill(cuMatrix &M, float a);
     friend cuMatrix hstack(vector<cuMatrix> matrices);
     friend const cuMatrix vstack(vector<cuMatrix> matrices);
     friend cuMatrix hadmd(const cuMatrix& M1, const cuMatrix& M2);
@@ -176,8 +237,8 @@ cuMatrix operator-(const cuMatrix &lM, const cuMatrix &rM);
 cuMatrix operator-(cuMatrix&lM, const float &r);
 cuMatrix operator-(const float &l, const cuMatrix &rM);
 cuMatrix operator-(const cuMatrix &rM);
-cuMatrix operator+=(cuMatrix &lM, const cuMatrix &rM);
-cuMatrix operator-=(cuMatrix &lM, const cuMatrix &rM);
+cuMatrix& operator+=(cuMatrix &lM, const cuMatrix &rM);
+cuMatrix& operator-=(cuMatrix &lM, const cuMatrix &rM);
 cuMatrix exp(const cuMatrix &M);
 cuMatrix exp(cuMatrix &&M);
 cuMatrix log(const cuMatrix &M);
@@ -186,7 +247,7 @@ cuMatrix tanh(cuMatrix &&M);
 cuMatrix d_tanh(cuMatrix &&M);
 cuMatrix d_tanh(const cuMatrix &M);
 cuMatrix hadmd(const cuMatrix &M1, const cuMatrix &M2);
-cuMatrix fill(cuMatrix &M, float a);
+cuMatrix& fill(cuMatrix &M, float a);
 void copy(cuMatrix &dest, const cuMatrix &src);
 cuMatrix hstack(vector<cuMatrix> matrices);
 const cuMatrix vstack(vector<cuMatrix> matrices);

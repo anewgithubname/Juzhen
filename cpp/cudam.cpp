@@ -260,7 +260,7 @@ cuMatrix operator*(const float& l, cuMatrix&& rM)
     if (stat != CUBLAS_STATUS_SUCCESS) {
         printf("axpy failed");
     }
-    return rM;
+    return std::move(rM);
 }
 cuMatrix operator/(const cuMatrix &lM, const float &r)
 {
@@ -276,7 +276,7 @@ cuMatrix operator/(cuMatrix &&lM, const float &r)
     if (stat != CUBLAS_STATUS_SUCCESS) {
         printf ("axpy failed");
     }
-    return lM;
+    return std::move(lM);
 }
 cuMatrix operator+(const cuMatrix &lM, const cuMatrix &rM)
 {
@@ -307,7 +307,7 @@ cuMatrix operator-(const cuMatrix &rM)
 {
     return rM.add(0, -1.0);
 }
-cuMatrix operator+=(cuMatrix &lM, const cuMatrix &rM)
+cuMatrix& operator+=(cuMatrix &lM, const cuMatrix &rM)
 {
     cublasOperation_t transA = CUBLAS_OP_N;
     cublasOperation_t transB = rM.transpose ? CUBLAS_OP_T : CUBLAS_OP_N;
@@ -323,7 +323,7 @@ cuMatrix operator+=(cuMatrix &lM, const cuMatrix &rM)
     return lM;
 }
 
-cuMatrix operator-=(cuMatrix &lM, const cuMatrix &rM)
+cuMatrix& operator-=(cuMatrix &lM, const cuMatrix &rM)
 {
     // cout << "-=" << endl;
     cublasOperation_t transA = CUBLAS_OP_N;

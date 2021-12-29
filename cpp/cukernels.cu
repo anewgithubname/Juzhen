@@ -18,10 +18,8 @@
     You should have received a copy of the GNU General Public License
     along with this program.  If not, see <https://www.gnu.org/licenses/>.
 */
-
-#include <cuda_runtime.h>
-#include "cublas_v2.h"
 #include "cuda.h"
+#include "cublas_v2.h"
 #include "cudam.h"
 
 __global__ void fillKernel(float *d_out, float val, int numElements)
@@ -149,7 +147,7 @@ __global__ void inplaceD_tanhKernel(float *vec, int numElements)
     }
 }
 
-cuMatrix fill(cuMatrix &M, float a){
+cuMatrix& fill(cuMatrix &M, float a){
     int numElem = M.num_row() * M.num_col();
     int threadsPerBlock = 1024;
     int blocksPerGrid = (numElem + threadsPerBlock - 1) / threadsPerBlock;
@@ -164,7 +162,7 @@ cuMatrix exp(cuMatrix &&M)
     int threadsPerBlock = 1024;
     int blocksPerGrid = (numElem + threadsPerBlock - 1) / threadsPerBlock;
     inplaceExpKernel<<<blocksPerGrid, threadsPerBlock>>>(M.elements.get(), numElem);
-    return M;
+    return std::move(M);
 }
 
 cuMatrix exp(const cuMatrix &M)
@@ -206,7 +204,7 @@ cuMatrix tanh(cuMatrix &&M)
     int threadsPerBlock = 1024;
     int blocksPerGrid = (numElem + threadsPerBlock - 1) / threadsPerBlock;
     inPlaceTanhKernel<<<blocksPerGrid, threadsPerBlock>>>(M.elements.get(), numElem);
-    return M;
+    return std::move(M);
 }
 
 cuMatrix d_tanh(const cuMatrix &M)
@@ -228,7 +226,7 @@ cuMatrix d_tanh(cuMatrix &&M)
     int threadsPerBlock = 1024;
     int blocksPerGrid = (numElem + threadsPerBlock - 1) / threadsPerBlock;
     inplaceD_tanhKernel<<<blocksPerGrid, threadsPerBlock>>>(M.elements.get(), numElem);
-    return M;
+    return std::move(M);
 }
 
 void copy(cuMatrix &dest, const cuMatrix &src)
@@ -342,7 +340,7 @@ cuMatrix hadmd(const cuMatrix &M1, cuMatrix &&M2)
     int threadsPerBlock = 1024;
     int blocksPerGrid = (numElem + threadsPerBlock - 1) / threadsPerBlock;
     productKernel<<<blocksPerGrid, threadsPerBlock>>>(M2.elements.get(), M1.elements.get(), numElem);
-    return M2;
+    return std::move(M2);
 }
 //rvalue hadmd
 cuMatrix hadmd(cuMatrix &&M1, const cuMatrix &M2)
@@ -363,7 +361,7 @@ cuMatrix hadmd(cuMatrix &&M1, const cuMatrix &M2)
     int threadsPerBlock = 1024;
     int blocksPerGrid = (numElem + threadsPerBlock - 1) / threadsPerBlock;
     productKernel<<<blocksPerGrid, threadsPerBlock>>>(M1.elements.get(), M2.elements.get(), numElem);
-    return M1;
+    return std::move(M1);
 }
 
 cuMatrix operator/(const float &l, const cuMatrix &rM)

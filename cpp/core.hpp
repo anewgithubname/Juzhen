@@ -76,6 +76,7 @@ protected:
     int numcol;
     int numrow;
     bool transpose;
+    string name;    
 
     shared_ptr<D[]> elements;
     static list<mem_space<D>> alive_mems;
@@ -123,7 +124,7 @@ protected:
         }
         // p.end();
     }
-    string name;    
+
     Matrix(const char *name, int numrow, int numcol, int trans, shared_ptr<D[]> elements){
         this->name = name; 
         this->numrow = numrow;
@@ -142,6 +143,54 @@ public:
     Matrix() : numcol(0), numrow(0), elements(nullptr), transpose(0), name("uninit") {}
     Matrix(const char *name, int numrow, int numcol): Matrix(name, numrow, numcol, 0) {}
     Matrix(const char *name, vector<vector<double>> elems);
+
+    Matrix(const Matrix &M){
+        cout << "Copy constructor called." << endl;
+        numcol = M.num_col();
+        numrow = M.num_row();
+        transpose = 0;
+        elements.reset(Matrix<D>::allocate(numrow*numcol), [](auto p) {
+           Matrix<D>::free(p);
+        });
+
+        memcpy(elements.get(), M.elements.get(), numrow*numcol*sizeof(D));
+        name = "copy of " + M.name;
+    }
+
+    Matrix(Matrix &&M) noexcept{
+        //cout << "move constructor called." << endl;
+        this->numcol = M.numcol;
+        this->numrow = M.numrow;
+        this->transpose = M.transpose;
+        this->elements = M.elements;
+        this->name =  M.name;
+    }
+
+    Matrix<D> &operator=(const Matrix<D> &M){
+        cout << "Copy assignment called." << endl;
+        if(this == &M) return *this;
+        numcol = M.num_col();
+        numrow = M.num_row();
+        transpose = 0;
+        elements.reset(Matrix<D>::allocate(numrow*numcol), [](auto p) {
+           Matrix<D>::free(p);
+        });
+
+        memcpy(elements.get(), M.elements.get(), numrow*numcol*sizeof(D));
+        name = "copy of " + M.name;
+        return *this;
+    }
+
+    Matrix<D> &operator=(const Matrix<D> &&M) noexcept{
+        //cout << "move assignment called." << endl;
+        if(this == &M) return *this;
+        this->numcol = M.numcol;
+        this->numrow = M.numrow;
+        this->transpose = M.transpose;
+        this->elements = M.elements;
+        this->name =  M.name;
+        return *this;
+    }
 
     // access matrix info
     inline D elem(int i, int j) const { return elements[idx(i, j)]; }
@@ -301,6 +350,7 @@ D Matrix<D>::norm() const
 {
     D norm = 0;
     int numelems = num_row() * num_col();
+#pragma clang loop vectorize(enable)
 #pragma ivdep
     for (int i = 0; i < numelems; i++)
         norm += elements[i] * elements[i];
