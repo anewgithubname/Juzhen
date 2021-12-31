@@ -239,7 +239,7 @@ Elapsed time is 0.759065 seconds.
 
 ## Known Issues
 1. GPU computation only supports single precision calculation. 
-2. Currently, Hadamard multiplication does not support in place transpose. 
+2. Currently, Hadamard multiplication does not support in place transpose on GPU. 
 ## Benchmark on some CPUs/GPUs
 Benchmark using MNIST example, time collected by the built-in profiling tool. 
 
