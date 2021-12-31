@@ -22,6 +22,7 @@
 #define MatrixI Matrix<int> 
 #define MatrixF Matrix<float>  
 #define PROFILING
+using namespace std;
 
 // convert label Y matrix (1 X n) to one-hot encoding. 
 MatrixF one_hot(const MatrixI &Y, int k){

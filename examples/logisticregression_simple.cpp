@@ -17,7 +17,7 @@
     along with this program.  If not, see <https://www.gnu.org/licenses/>.
  */
 #include "juzhen.hpp"
-
+using namespace std;
 int main(){ MemoryDeleter<float> md1; //will release the memory for us when the function exits
     //creating dataset
     int n = 5000, d = 2;

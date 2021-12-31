@@ -22,8 +22,22 @@
 #include "cudam.h"
 // #define PROFILING
 
+using namespace std;
 list<mem_space<float>> cuMatrix::alive_gpu_mems;
 list<mem_space<float>> cuMatrix::dead_gpu_mems;
+
+GPUMemoryDeleter::~GPUMemoryDeleter(){
+    long size = 0; 
+    for(auto it = cuMatrix::alive_gpu_mems.begin(); it != cuMatrix::alive_gpu_mems.end(); it++){
+        cudaFree(it->ptr);
+        size += it->size;
+    }
+    for(auto it = cuMatrix::dead_gpu_mems.begin(); it != cuMatrix::dead_gpu_mems.end(); it++){
+        cudaFree(it->ptr);
+        size += it->size;
+    }
+    std::cout << "Total GPU memory released: " << size*sizeof(float)/1024.0/1024.0 << " MB." << std::endl;
+}
 
 cuMatrix::cuMatrix(GPU_handle handle, const Matrix<float>& M)
 {
@@ -72,6 +86,70 @@ cuMatrix::cuMatrix(GPU_handle handle, const char *name, int numrow, int numcol, 
         });
 
     zeros();
+}
+
+cuMatrix::cuMatrix(const cuMatrix& M){
+    std::cout << "cuda copy constructor called" << std::endl;
+    this->handle = M.handle;
+    this->name = "copy of" + M.name;
+    this->numrow = M.numrow;
+    this->numcol = M.numcol;
+    this->transpose = M.transpose;
+    elements = std::shared_ptr<float[]>(
+            cuMatrix::allocate(numcol * numrow), [](auto p) {
+                cuMatrix::free(p);
+            });
+
+    cudaError_t custat = cudaMemcpy(elements.get(), M.elements.get(), numcol * numrow * sizeof(float), cudaMemcpyDeviceToDevice);
+    if (custat != cudaSuccess) {
+        printf ("device memory copy failed");
+    }
+
+}
+
+cuMatrix::cuMatrix(cuMatrix &&M) noexcept{
+    // cout << "cuda move constructor called" << endl;
+    this->handle = M.handle;
+    this->name = M.name;
+    this->numrow = M.numrow;
+    this->numcol = M.numcol;
+    this->transpose = M.transpose;
+    this->elements = M.elements;
+    M.elements = nullptr;
+}
+
+cuMatrix & cuMatrix::operator=(const cuMatrix &M){
+    if(this == &M) return *this;
+    std::cout << "cuda copy assignment called" << std::endl;
+    this->handle = M.handle;
+    this->name = "copy of " + M.name;
+    this->numrow = M.numrow;
+    this->numcol = M.numcol;
+    this->transpose = M.transpose;
+    elements = std::shared_ptr<float[]>(
+            cuMatrix::allocate(numcol * numrow), [](auto p) {
+                cuMatrix::free(p);
+            });
+
+    cudaError_t custat = cudaMemcpy(elements.get(), M.elements.get(), numcol * numrow * sizeof(float), cudaMemcpyDeviceToDevice);
+    if (custat != cudaSuccess) {
+        printf ("device memory copy failed");
+    }
+
+    return *this;
+}
+
+cuMatrix &cuMatrix::operator=(cuMatrix &&M) noexcept{
+    if(this == &M) return *this;
+    // cout << "cuda move assignment called" << endl;
+    this->handle = M.handle;
+    this->name = M.name;
+    this->numrow = M.numrow;
+    this->numcol = M.numcol;
+    this->transpose = M.transpose;
+    elements = M.elements;
+    M.elements = nullptr;
+    return *this;
 }
 
 void cuMatrix::ones()
@@ -129,7 +207,7 @@ Matrix<float> cuMatrix::to_host() const
     GPU_status stat = cublasGetMatrix(numrow, numcol, sizeof(float), elements.get(), 
                     numrow, ret.elements.get(), numrow);
     if (stat != CUBLAS_STATUS_SUCCESS) {
-        printf ("data upload failed");
+        printf ("data upload failed\n");
     }
     return ret;
 }
@@ -225,6 +303,7 @@ cuMatrix sum(const cuMatrix &M, int dim)
     return sumM;
 }
 ostream & operator <<(ostream &os, const cuMatrix &M){
+    using namespace std;
     // write obj to stream
     os << M.get_name()<< " " << M.num_row() << " by " << M.num_col();
     Matrix<float> hostM = M.to_host();

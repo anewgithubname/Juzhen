@@ -1,14 +1,13 @@
 #include "juzhen.hpp"
-
+using namespace std;
 #define MatRef const Matrix<float> & 
 void cpu_matrixaccess(){
     {
         cout << "basic hstack" << endl;
-        Matrix<float> && A = {"A", {{1,2,3},{4,5,6}}};
-        Matrix<float> && B = {"B", {{7,8},{9,8},{7,6}}};
+        Matrix<float> A = {"A", {{1,2,3},{4,5,6}}};
+        Matrix<float> B = {"B", {{7,8},{9,8},{7,6}}};
     
-        vector<Matrix<float>> matrices = {A.T(),B,A.T(),B,A.T(),B};
-        cout << hstack(matrices) <<endl << endl;
+        cout << hstack(std::vector<Matrix<float>>({A.T(),B,A.T(),B,A.T(),B})) <<endl << endl;
     }
     {
         cout << "big vstack" << endl;
@@ -151,10 +150,10 @@ void cuda_basic(){
     {
         cuMatrix A(handle, Matrix<float>("A",{{1,2,3},{4,5,6}}));
         cuMatrix B(handle, Matrix<float>("B",{{1,4},{2,5},{3,6}}));
-        vector<cuMatrix> matrices{A,B.T()};
-        cout <<hstack(matrices).to_host()<<endl;
 
-        matrices = {A, B.T()};
+        cout <<hstack(vector<cuMatrix>({A,B.T()})).to_host()<<endl;
+
+        auto matrices = {A, B.T()};
         cout <<vstack(matrices).to_host()<<endl;
 
         auto t1 = Clock::now();

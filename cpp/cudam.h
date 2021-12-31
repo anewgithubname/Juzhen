@@ -34,8 +34,8 @@ struct GPUMemoryDeleter;
 class cuMatrix : public Matrix<float> {
     GPU_handle handle;
 
-    static list<mem_space<float>> alive_gpu_mems;
-    static list<mem_space<float>> dead_gpu_mems;
+    static std::list<mem_space<float>> alive_gpu_mems;
+    static std::list<mem_space<float>> dead_gpu_mems;
     static float* allocate(int size) {
         // static Profiler p("allocator_GPU"); p.start();
         // search for space in the freed space.
@@ -82,7 +82,8 @@ class cuMatrix : public Matrix<float> {
         }
         // p.end();
     }
-    cuMatrix(GPU_handle handle, const char *name, int numrow, int numcol, int trans, shared_ptr<float[]> elements)
+    cuMatrix(GPU_handle handle, const char *name, int numrow, int numcol, int trans, 
+             std::shared_ptr<float[]> elements)
     :Matrix<float>(name, numrow, numcol, trans, elements){this->handle = handle;}
     cuMatrix(GPU_handle handle, const char* name, int numrow, int numcol, int trans);
 
@@ -92,67 +93,10 @@ public:
     cuMatrix(GPU_handle handle, const Matrix<float>& M);
     cuMatrix(GPU_handle handle, const char* name, int numrow, int numcol):cuMatrix(handle, name, numrow, numcol, 0) {};
 
-    cuMatrix(const cuMatrix &M) {
-        cout << "cuda copy constructor called" << endl;
-        this->handle = M.handle;
-        this->name = "copy of" + M.name;
-        this->numrow = M.num_row();
-        this->numcol = M.num_col();
-        this->transpose = 0;
-        elements = shared_ptr<float[]>(
-                cuMatrix::allocate(numcol * numrow), [](auto p) {
-                    cuMatrix::free(p);
-                });
-
-        cudaError_t custat = cudaMemcpy(elements.get(), M.elements.get(), numcol * numrow * sizeof(float), cudaMemcpyDeviceToDevice);
-        if (custat != cudaSuccess) {
-            printf ("device memory copy failed");
-        }
-
-    }
-
-    cuMatrix(cuMatrix &&M) noexcept{
-        //cout << "move constructor called" << endl;
-        this->handle = M.handle;
-        this->name = M.name;
-        this->numrow = M.numrow;
-        this->numcol = M.numcol;
-        this->transpose = M.transpose;
-        this->elements = M.elements;
-    }
-
-    cuMatrix &operator=(const cuMatrix &M){
-        if(this == &M) return *this;
-        cout << "cuda copy assignment called" << endl;
-        this->handle = M.handle;
-        this->name = "copy of" + M.name;
-        this->numrow = M.num_row();
-        this->numcol = M.num_col();
-        this->transpose = 0;
-        elements = shared_ptr<float[]>(
-                cuMatrix::allocate(numcol * numrow), [](auto p) {
-                    cuMatrix::free(p);
-                });
-
-        cudaError_t custat = cudaMemcpy(elements.get(), M.elements.get(), numcol * numrow * sizeof(float), cudaMemcpyDeviceToDevice);
-        if (custat != cudaSuccess) {
-            printf ("device memory copy failed");
-        }
-
-        return *this;
-    }
-
-    cuMatrix &operator=(const cuMatrix &&M) noexcept{
-        if(this == &M) return *this;
-        cout << "move assignment called" << endl;
-        this->handle = M.handle;
-        this->name = M.name;
-        this->numrow = M.numrow;
-        this->numcol = M.numcol;
-        this->transpose = M.transpose;
-        elements = M.elements;
-        return *this;
-    }
+    cuMatrix(const cuMatrix &M);
+    cuMatrix(cuMatrix &&M) noexcept;
+    cuMatrix &operator=(const cuMatrix &M);
+    cuMatrix &operator=(cuMatrix &&M) noexcept;
 
     //matrix filler
     void ones();
@@ -199,31 +143,22 @@ public:
     friend cuMatrix d_tanh(cuMatrix &&M);
     friend void copy(cuMatrix &dest, const cuMatrix &src);
     friend cuMatrix& fill(cuMatrix &M, float a);
-    friend cuMatrix hstack(vector<cuMatrix> matrices);
-    friend const cuMatrix vstack(vector<cuMatrix> matrices);
+    friend cuMatrix hstack(std::vector<cuMatrix> &matrices);
+    friend cuMatrix hstack(std::vector<cuMatrix> &&matrices);
+    friend const cuMatrix vstack(std::vector<cuMatrix> &matrices);
+    friend const cuMatrix vstack(std::vector<cuMatrix> &&matrices);
     friend cuMatrix hadmd(const cuMatrix& M1, const cuMatrix& M2);
-    friend cuMatrix hadmd(const cuMatrix &M1, cuMatrix &&M2);
-    friend cuMatrix hadmd(cuMatrix &&M1, const cuMatrix &M2);
+    // friend cuMatrix hadmd(const cuMatrix &M1, cuMatrix &&M2);
+    // friend cuMatrix hadmd(cuMatrix &&M1, const cuMatrix &M2);
     friend GPUMemoryDeleter;
 };
 
 struct GPUMemoryDeleter{
-    ~GPUMemoryDeleter(){
-        long size = 0; 
-        for(auto it = cuMatrix::alive_gpu_mems.begin(); it != cuMatrix::alive_gpu_mems.end(); it++){
-            cudaFree(it->ptr);
-            size += it->size;
-        }
-        for(auto it = cuMatrix::dead_gpu_mems.begin(); it != cuMatrix::dead_gpu_mems.end(); it++){
-            cudaFree(it->ptr);
-            size += it->size;
-        }
-        cout << "Total GPU memory released: " << size*sizeof(float)/1024.0/1024.0 << " MB." << endl;
-    }
+    ~GPUMemoryDeleter();
 };
 
 cuMatrix sum(const cuMatrix &M, int dim);
-ostream & operator <<(ostream &os, const cuMatrix &M);
+std::ostream & operator <<(std::ostream &os, const cuMatrix &M);
 cuMatrix operator*(const cuMatrix &lM, const cuMatrix &rM);
 cuMatrix operator*(const cuMatrix &lM, const float &r);
 cuMatrix operator*(const float &l, const cuMatrix &rM);
@@ -249,7 +184,9 @@ cuMatrix d_tanh(const cuMatrix &M);
 cuMatrix hadmd(const cuMatrix &M1, const cuMatrix &M2);
 cuMatrix& fill(cuMatrix &M, float a);
 void copy(cuMatrix &dest, const cuMatrix &src);
-cuMatrix hstack(vector<cuMatrix> matrices);
-const cuMatrix vstack(vector<cuMatrix> matrices);
+cuMatrix hstack(std::vector<cuMatrix> &matrices);
+cuMatrix hstack(std::vector<cuMatrix> &&matrices);
+const cuMatrix vstack(std::vector<cuMatrix> &matrices);
+const cuMatrix vstack(std::vector<cuMatrix> &&matrices);
 
 #endif

@@ -21,6 +21,7 @@
 #include "cuda.h"
 #include "cublas_v2.h"
 #include "cudam.h"
+using namespace std;
 
 __global__ void fillKernel(float *d_out, float val, int numElements)
 {
@@ -254,7 +255,7 @@ void copy(cuMatrix &dest, const cuMatrix &src)
     copyKernel<<<blocksPerGrid, threadsPerBlock>>>(dest.elements.get(), src.elements.get(), numElem);
 }
 
-cuMatrix hstack(vector<cuMatrix> matrices)
+cuMatrix hstack(vector<cuMatrix> &matrices)
 {
     int num_row = matrices[0].num_row();
     int num_col = 0;
@@ -289,7 +290,11 @@ cuMatrix hstack(vector<cuMatrix> matrices)
     return result;
 }
 
-const cuMatrix vstack(vector<cuMatrix> matrices)
+cuMatrix hstack(vector<cuMatrix> &&matrices){
+    return hstack(matrices);
+}
+
+const cuMatrix vstack(vector<cuMatrix>& matrices)
 {
 
    for (int i = 0; i < matrices.size(); i++)
@@ -300,13 +305,18 @@ const cuMatrix vstack(vector<cuMatrix> matrices)
    return hstack(matrices).T();
 }
 
-cuMatrix hadmd(const cuMatrix &M1, const cuMatrix &M2)
+const cuMatrix vstack(vector<cuMatrix>&& matrices)
 {
+    return vstack(matrices);
+}
+
+cuMatrix hadmd(const cuMatrix &M1, const cuMatrix &M2)
+{   
     cuMatrix result(M1.handle, "hadmd", M1.numrow, M1.numcol, M1.transpose);
 
     //if M2 has a different transposition flag, transpose M2 and store it in result. 
     cublasOperation_t transM2 = (M2.transpose != M1.transpose) ? CUBLAS_OP_T : CUBLAS_OP_N;
-    float s1 = 1.0, s2 = 1.0;
+    float s1 = 1.0, s2 = 0.0;
     GPU_status stat = cublasSgeam(result.handle, transM2, CUBLAS_OP_N, M1.numrow, M1.numcol,
                                   &s1, M2.elements.get(), M2.numrow,
                                   &s2, result.elements.get(), result.numrow, result.elements.get(), result.numrow);
@@ -321,48 +331,48 @@ cuMatrix hadmd(const cuMatrix &M1, const cuMatrix &M2)
     productKernel<<<blocksPerGrid, threadsPerBlock>>>(result.elements.get(), M1.elements.get(), numElem);
     return result;
 }
-//rvalue hadmd
-cuMatrix hadmd(const cuMatrix &M1, cuMatrix &&M2)
-{
-    // cout << "rvalue hadmd" << endl;
-    //if M2 has a different transposition flag, transpose M2 and store it in result. 
-    cublasOperation_t transM2 = (M2.transpose != M1.transpose) ? CUBLAS_OP_T : CUBLAS_OP_N;
-    float s1 = 1.0, s2 = 0.0;
-    GPU_status stat = cublasSgeam(M1.handle, transM2, CUBLAS_OP_N, M1.numrow, M1.numcol,
-                                  &s1, M2.elements.get(), M2.numrow,
-                                  &s2, M2.elements.get(), M2.numrow, M2.elements.get(), M2.numrow);
-    if (stat != CUBLAS_STATUS_SUCCESS)
-    {
-        printf("tranpose failed");
-    }
+// //rvalue hadmd
+// cuMatrix hadmd(const cuMatrix &M1, cuMatrix &&M2)
+// {
+//     cout << "rvalue hadmd" << endl;
+//     //if M2 has a different transposition flag, transpose M2 and store it in result. 
+//     cublasOperation_t transM2 = (M2.transpose != M1.transpose) ? CUBLAS_OP_T : CUBLAS_OP_N;
+//     float s1 = 1.0, s2 = 0.0;
+//     GPU_status stat = cublasSgeam(M1.handle, transM2, CUBLAS_OP_N, M1.numrow, M1.numcol,
+//                                   &s1, M2.elements.get(), M2.numrow,
+//                                   &s2, M2.elements.get(), M2.numrow, M2.elements.get(), M2.numrow);
+//     if (stat != CUBLAS_STATUS_SUCCESS)
+//     {
+//         printf("tranpose failed");
+//     }
 
-    int numElem = M1.numrow * M1.numcol;
-    int threadsPerBlock = 1024;
-    int blocksPerGrid = (numElem + threadsPerBlock - 1) / threadsPerBlock;
-    productKernel<<<blocksPerGrid, threadsPerBlock>>>(M2.elements.get(), M1.elements.get(), numElem);
-    return std::move(M2);
-}
-//rvalue hadmd
-cuMatrix hadmd(cuMatrix &&M1, const cuMatrix &M2)
-{
-    // cout << "rvalue hadmd" << endl;
-    //if M2 has a different transposition flag, transpose M1 and store it in result. 
-    cublasOperation_t transM1 = (M2.transpose != M1.transpose) ? CUBLAS_OP_T : CUBLAS_OP_N;
-    float s1 = 1.0, s2 = 0.0;
-    GPU_status stat = cublasSgeam(M2.handle, transM1, CUBLAS_OP_N, M2.numrow, M2.numcol,
-                                  &s1, M1.elements.get(), M1.numrow,
-                                  &s2, M1.elements.get(), M1.numrow, M1.elements.get(), M1.numrow);
-    if (stat != CUBLAS_STATUS_SUCCESS)
-    {
-        printf("tranpose failed");
-    }
+//     int numElem = M1.numrow * M1.numcol;
+//     int threadsPerBlock = 1024;
+//     int blocksPerGrid = (numElem + threadsPerBlock - 1) / threadsPerBlock;
+//     productKernel<<<blocksPerGrid, threadsPerBlock>>>(M2.elements.get(), M1.elements.get(), numElem);
+//     return std::move(M2);
+// }
+// //rvalue hadmd
+// cuMatrix hadmd(cuMatrix &&M1, const cuMatrix &M2)
+// {
+//     cout << "rvalue hadmd" << endl;
+//     //if M2 has a different transposition flag, transpose M1 and store it in result. 
+//     cublasOperation_t transM1 = (M2.transpose != M1.transpose) ? CUBLAS_OP_T : CUBLAS_OP_N;
+//     float s1 = 1.0, s2 = 0.0;
+//     GPU_status stat = cublasSgeam(M2.handle, transM1, CUBLAS_OP_N, M2.numrow, M2.numcol,
+//                                   &s1, M1.elements.get(), M1.numrow,
+//                                   &s2, M1.elements.get(), M1.numrow, M1.elements.get(), M1.numrow);
+//     if (stat != CUBLAS_STATUS_SUCCESS)
+//     {
+//         printf("tranpose failed");
+//     }
 
-    int numElem = M1.numrow * M1.numcol;
-    int threadsPerBlock = 1024;
-    int blocksPerGrid = (numElem + threadsPerBlock - 1) / threadsPerBlock;
-    productKernel<<<blocksPerGrid, threadsPerBlock>>>(M1.elements.get(), M2.elements.get(), numElem);
-    return std::move(M1);
-}
+//     int numElem = M1.numrow * M1.numcol;
+//     int threadsPerBlock = 1024;
+//     int blocksPerGrid = (numElem + threadsPerBlock - 1) / threadsPerBlock;
+//     productKernel<<<blocksPerGrid, threadsPerBlock>>>(M1.elements.get(), M2.elements.get(), numElem);
+//     return std::move(M1);
+// }
 
 cuMatrix operator/(const float &l, const cuMatrix &rM)
 {

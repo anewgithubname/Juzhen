@@ -40,26 +40,6 @@
 #endif
 #include "helper.h"
 
-// #define PROFILING
-
-// template <class D>
-// struct ArrayDeleter
-// {
-//     void operator()(D p) const noexcept
-//     {
-// #ifdef PROFILING 
-//         static Profiler pdeleter("deleter"); // profiler for cuArrayDeleter
-//         pdeleter.start();
-// #endif
-//         // you can trace the deconstruction of matrices here
-//         // cout << "Call delete from function object." << endl;
-//         delete []p;
-// #ifdef PROFILING
-//         pdeleter.end();
-// #endif
-//     }
-// };
-
 template <class D>
 struct mem_space{
     D* ptr;
@@ -76,18 +56,18 @@ protected:
     int numcol;
     int numrow;
     bool transpose;
-    string name;    
+    std::string name;    
 
-    shared_ptr<D[]> elements;
-    static list<mem_space<D>> alive_mems;
-    static list<mem_space<D>> dead_mems;
+    std::shared_ptr<D[]> elements;
+    static std::list<mem_space<D>> alive_mems;
+    static std::list<mem_space<D>> dead_mems;
 
     static D* allocate(int size){
         // static Profiler p("allocator"); p.start();
         // search for space in the freed space.
         for(auto it = dead_mems.begin(); it != dead_mems.end(); it++){
             if(it->size == size){
-                //cout << "Found space in freed space: " << size << " address: "<< it->space << endl;
+                //std::cout << "Found space in freed space: " << size << " address: "<< it->space << std::endl;
                 D* ptr = it->ptr;
                 mem_space<D> mem; mem.ptr = it->ptr;  mem.size = it->size;
                 alive_mems.push_back(mem);
@@ -97,7 +77,7 @@ protected:
         }
         // no space available, allocate new space
         D* ptr = new D[size];
-        //cout << "No space available, allocate new space: " << size << " address: " << ptr << endl;
+        //std::cout << "No space available, allocate new space: " << size << " address: " << ptr << std::endl;
         mem_space<D> space = {ptr, size};
         alive_mems.push_back(space);
         return ptr;
@@ -112,7 +92,7 @@ protected:
                 size = it->size;
             }
         }
-        //cout << "freeing " << ptr << " size: " << size << endl; 
+        //std::cout << "freeing " << ptr << " size: " << size << std::endl; 
         mem_space<D> mem = {ptr, size};
         dead_mems.push_back(mem);
 
@@ -125,7 +105,7 @@ protected:
         // p.end();
     }
 
-    Matrix(const char *name, int numrow, int numcol, int trans, shared_ptr<D[]> elements){
+    Matrix(const char *name, int numrow, int numcol, int trans, std::shared_ptr<D[]> elements){
         this->name = name; 
         this->numrow = numrow;
         this->numcol = numcol;
@@ -142,55 +122,12 @@ public:
     // constructors 
     Matrix() : numcol(0), numrow(0), elements(nullptr), transpose(0), name("uninit") {}
     Matrix(const char *name, int numrow, int numcol): Matrix(name, numrow, numcol, 0) {}
-    Matrix(const char *name, vector<vector<double>> elems);
+    Matrix(const char *name, std::vector<std::vector<double>> elems);
 
-    Matrix(const Matrix &M){
-        cout << "Copy constructor called." << endl;
-        numcol = M.num_col();
-        numrow = M.num_row();
-        transpose = 0;
-        elements.reset(Matrix<D>::allocate(numrow*numcol), [](auto p) {
-           Matrix<D>::free(p);
-        });
-
-        memcpy(elements.get(), M.elements.get(), numrow*numcol*sizeof(D));
-        name = "copy of " + M.name;
-    }
-
-    Matrix(Matrix &&M) noexcept{
-        //cout << "move constructor called." << endl;
-        this->numcol = M.numcol;
-        this->numrow = M.numrow;
-        this->transpose = M.transpose;
-        this->elements = M.elements;
-        this->name =  M.name;
-    }
-
-    Matrix<D> &operator=(const Matrix<D> &M){
-        cout << "Copy assignment called." << endl;
-        if(this == &M) return *this;
-        numcol = M.num_col();
-        numrow = M.num_row();
-        transpose = 0;
-        elements.reset(Matrix<D>::allocate(numrow*numcol), [](auto p) {
-           Matrix<D>::free(p);
-        });
-
-        memcpy(elements.get(), M.elements.get(), numrow*numcol*sizeof(D));
-        name = "copy of " + M.name;
-        return *this;
-    }
-
-    Matrix<D> &operator=(const Matrix<D> &&M) noexcept{
-        //cout << "move assignment called." << endl;
-        if(this == &M) return *this;
-        this->numcol = M.numcol;
-        this->numrow = M.numrow;
-        this->transpose = M.transpose;
-        this->elements = M.elements;
-        this->name =  M.name;
-        return *this;
-    }
+    Matrix(const Matrix &M);
+    Matrix(Matrix &&M) noexcept;
+    Matrix<D> &operator=(const Matrix<D> &M);
+    Matrix<D> &operator=(Matrix<D> &&M) noexcept;
 
     // access matrix info
     inline D elem(int i, int j) const { return elements[idx(i, j)]; }
@@ -198,7 +135,7 @@ public:
     inline int num_col() const { return transpose ? numrow : numcol; }
     inline int num_row() const { return transpose ? numcol : numrow; }
     inline int get_transpose() const { return transpose; }
-    string get_name() const { return name; }
+    std::string get_name() const { return name; }
 
     // Matrix Fillers
     virtual void zeros(){
@@ -251,9 +188,9 @@ public:
     template <class Data>
     friend Matrix<Data> square(Matrix<Data> M);
     template <class Data>
-    friend Matrix<Data> hstack(vector<Matrix<Data>> matrices);
+    friend Matrix<Data> hstack(const std::vector<Matrix<Data>> &matrices);
     template <class Data>
-    friend Matrix<Data> vstack(vector<Matrix<Data>> matrices);
+    friend Matrix<Data> vstack(const std::vector<Matrix<Data>> &matrices);
     template <class Data>
     friend Matrix<Data> operator*(const Data &l, Matrix<Data> &&rM);
     template <class Data>
@@ -262,6 +199,8 @@ public:
     friend Matrix<Data> operator/(const Data &l, Matrix<Data> &&rM);
     template <class Data>
     friend Matrix<Data> operator/(Matrix<Data>&& lM, const Data& r);
+    template <class Data>
+    friend Matrix<Data> operator/(const Matrix<Data> &lM, const Matrix<Data> &rM);
     template <class Data> 
     friend Matrix<Data> hadmd(const Matrix<Data> &M1, const Matrix<Data> &M2);
     friend class cuMatrix;
@@ -269,9 +208,9 @@ public:
 };
 
 template <class D>
-list<mem_space<D>> Matrix<D>::alive_mems;
+std::list<mem_space<D>> Matrix<D>::alive_mems;
 template <class D>
-list<mem_space<D>> Matrix<D>::dead_mems;
+std::list<mem_space<D>> Matrix<D>::dead_mems;
 
 template <class D>
 struct MemoryDeleter{
@@ -285,7 +224,7 @@ struct MemoryDeleter{
             delete []it->ptr;
             size += it->size;
         }
-        cout << "Total memory released: " << size*sizeof(D)/1024.0/1024.0 << " MB." << endl;
+        std::cout << "Total memory released: " << size*sizeof(D)/1024.0/1024.0 << " MB." << std::endl;
     }
 };
 
@@ -303,7 +242,7 @@ Matrix<D>::Matrix(const char *name, int numrow, int numcol, int trans){
 }
 
 template<class D>
-Matrix<D>::Matrix(const char *name, vector<vector<double>> elems){
+Matrix<D>::Matrix(const char *name, std::vector<std::vector<double>> elems){
     this->name = name;
     numrow = elems.size();
     numcol = elems.front().size();
@@ -325,6 +264,60 @@ Matrix<D>::Matrix(const char *name, vector<vector<double>> elems){
     }
 }
 
+template <class D>
+Matrix<D>::Matrix(const Matrix<D> &M){
+    std::cout << "copying " << M.name << std::endl;
+    numcol = M.numcol;
+    numrow = M.numrow;
+    transpose = M.transpose;
+    elements.reset(Matrix<D>::allocate(numrow*numcol), [](auto p) {
+        Matrix<D>::free(p);
+    });
+
+    memcpy(elements.get(), M.elements.get(), numrow*numcol*sizeof(D));
+    name = "copy of " + M.name;
+}
+
+template <class D>
+Matrix<D>::Matrix(Matrix<D> &&M) noexcept{
+    //std::cout << "move constructor called." << std::endl;
+    this->numcol = M.numcol;
+    this->numrow = M.numrow;
+    this->transpose = M.transpose;
+    this->elements = M.elements;
+    M.elements = nullptr;
+    this->name =  M.name;
+}
+
+template <class D>
+Matrix<D> &Matrix<D>::operator=(const Matrix<D> &M){
+    std::cout << "Copy assignment called." << std::endl;
+    if(this == &M) return *this;
+    numcol = M.numcol;
+    numrow = M.numrow;
+    transpose = M.transpose;
+    elements.reset(Matrix<D>::allocate(numrow*numcol), [](auto p) {
+        Matrix<D>::free(p);
+    });
+
+    memcpy(elements.get(), M.elements.get(), numrow*numcol*sizeof(D));
+    name = "copy of " + M.name;
+    return *this;
+}
+
+template <class D>
+Matrix<D> &Matrix<D>::operator=(Matrix<D> &&M) noexcept{
+    //std::cout << "move assignment called." << std::endl;
+    if(this == &M) return *this;
+    this->numcol = M.numcol;
+    this->numrow = M.numrow;
+    this->transpose = M.transpose;
+    this->elements = M.elements;
+    M.elements = nullptr;
+    this->name =  M.name;
+    return *this;
+}
+
 template<class D>
 void Matrix<D>::ones(){
     int numelems = num_row() * num_col();
@@ -337,6 +330,7 @@ void Matrix<D>::ones(){
 template<class D>
 void Matrix<D>::randn(double mean, double std)
 {
+    using namespace std;
     random_device rd;
     mt19937 gen(rd());
     normal_distribution<> d(mean, std);
@@ -361,7 +355,7 @@ D Matrix<D>::norm() const
 template<class D>
 const Matrix<D> Matrix<D>::T() const 
 {
-    string newname = name+"_T";
+    std::string newname = name+"_T";
     Matrix<D> MT(newname.c_str(), numrow, numcol, !transpose, elements);
     return MT;
 }
@@ -408,9 +402,8 @@ Matrix<D> Matrix<D>::dot(const Matrix<D> &B) const
     CBLAS_TRANSPOSE transA = transpose ? CblasTrans : CblasNoTrans;
     CBLAS_TRANSPOSE transB = B.transpose ? CblasTrans : CblasNoTrans;
 
-    cblas_sgemm(CblasColMajor, transA, transB,
-                num_row(), B.num_col(), num_col(), 1.0f, elements.get(), numrow,
-                B.elements.get(), B.numrow, 1.0f, C.elements.get(), C.numrow);
+    gemm(transA, transB, num_row(), B.num_col(), num_col(), 1.0f, elements.get(), numrow,
+                        B.elements.get(), B.numrow, 1.0f, C.elements.get(), C.numrow);
     return C;
 }
 
@@ -434,24 +427,24 @@ Matrix<D> Matrix<D>::inv()
     D *workspace = (D *)malloc(Nwork * sizeof(D));
 
     /*  LU factorisation */
-    sgetrf_(&N, &N, inv.elements.get(), &N, pivot, &error);
+    getrf_(&N, &N, inv.elements.get(), &N, pivot, &error);
 
     if (error != 0)
     {
         // NSLog(@"Error 1");
-        cout << "Error 1" << endl;
+        std::cout << "Error 1" << std::endl;
         ::free(pivot);
         ::free(workspace);
         exit(1);
     }
 
     /*  matrix inversion */
-    sgetri_(&N, inv.elements.get(), &N, pivot, workspace, &Nwork, &error);
+    getri_(&N, inv.elements.get(), &N, pivot, workspace, &Nwork, &error);
 
     if (error != 0)
     {
         // NSLog(@"Error 2");
-        cout << "Error 2" << endl;
+        std::cout << "Error 2" << std::endl;
         ::free(pivot);
         ::free(workspace);
         exit(1);
@@ -474,8 +467,7 @@ Matrix<D> Matrix<D>::add(const Matrix<D> &B, D s1, D s2) const
     char transA = transpose ? 'T': 'N';
     char transB = B.transpose ?  'T': 'N';
 
-    mkl_somatadd('C', transA, transB,
-                 num_row(), num_col(), s1, elements.get(), numrow,
+    omatadd(transA, transB, num_row(), num_col(), s1, elements.get(), numrow,
                  s2, B.elements.get(), B.numrow, C.elements.get(), C.numrow);
 #else
     for (int j = 0; j < num_col(); j++)

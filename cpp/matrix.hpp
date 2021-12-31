@@ -38,7 +38,7 @@ Matrix<D> sum(const Matrix<D> &M, int dim)
     Matrix<D> ones("ones", transM?M.numrow:M.numcol, 1, 0);
     ones.ones();
     CBLAS_TRANSPOSE cBlasTransM = transM ? CblasTrans : CblasNoTrans;
-    cblas_sgemv(CblasColMajor, cBlasTransM, M.numrow, M.numcol,
+    gemv(cBlasTransM, M.numrow, M.numcol,
                 1.0f, M.elements.get(), M.numrow, ones.elements.get(),
                 1, 0.0f, sumM.elements.get(), 1);
 
@@ -50,7 +50,7 @@ Matrix<D> sum(const Matrix<D> &M, int dim)
 }
 //hstack function as the "hstack" in NumPy
 template <class D>
-Matrix<D> hstack(vector<Matrix<D>> matrices)
+Matrix<D> hstack(const std::vector<Matrix<D>> &matrices)
 {
     int num_row = matrices[0].num_row();
     int num_col = 0;
@@ -75,9 +75,10 @@ Matrix<D> hstack(vector<Matrix<D>> matrices)
 
     return result;
 }
+
 //vstack function as the "vstack" in NumPy
 template <class D>
-Matrix<D> vstack(vector<Matrix<D>> matrices)
+Matrix<D> vstack(const std::vector<Matrix<D>> &matrices)
 {
     int num_row = 0;
     int num_col = matrices[0].num_col();
@@ -240,8 +241,9 @@ Matrix<D> hadmd(Matrix<D> &&M1, const Matrix<D> &M2)
 
 //operator overloads
 template <class D>
-ostream &operator<<(std::ostream &os, const Matrix<D> &M)
+std::ostream &operator<<(std::ostream &os, const Matrix<D> &M)
 {
+    using namespace std;
     // write obj to stream
     os <<M.get_name()<< " " << M.num_row() << " by " << M.num_col();
     for (int i = 0; i < M.num_row(); i++)
@@ -376,7 +378,7 @@ Matrix<D> operator/(Matrix<D>&& lM, const D& r)
     for (int i = 0; i < numelems; i++)
         lM.elements[i] /= r;
 
-    return lM;
+    return std::move(lM);
 }
 template <class D>
 Matrix<D> operator*(const Matrix<D> &lM, const D &r)

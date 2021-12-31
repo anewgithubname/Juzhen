@@ -135,21 +135,24 @@ ans =
 - Linux (CPU/GPU)
 - MacOS (CPU)
 - Windows (CPU/GPU*), you will need to install Visual Studio 2019 to compile the code. 
-## Passing by Reference
-Matrices are always passed by reference. For example: 
-```c++
-Matrix<float> A = {"A",{{1,2},{3,4},{5,6}}};
-auto B = A;  
-B.zeros();
-// now both A and B are zero matrices. 
-```
-If you want a copy of ```A``` to be stored in ```B```, do the following
-```c++
-Matrix<float> A = {"A",{{1,2},{3,4},{5,6}}};
-auto B = A*1.0;  
-B.zeros();
-// A remains the old value. 
-```
+## ```rvalue``` and ```lvalue``` Sementics
+Consider the following three examples:
+1. ```c++
+    Matrix<float> A = {"A",{{1,2},{3,4},{5,6}}}; //A is created. Memory allocated. 
+    auto B = A; //B is a copy of A. Extra space allocated for B.
+    B.zeros(); //B is zero, but A remains the same.
+    ```
+2.  ```c++
+    Matrix<float> A = {"A",{{1,2},{3,4},{5,6}}};
+    auto B = std::move(A); //Both B and A owns the same matrix. No extra memory space allocated. 
+    B.zeros(); //A and B are both zero matrices now. 
+    ```
+3. ```c++
+    Matrix<float> A = {"A",{{1,2},{3,4},{5,6}}};
+    auto B = exp(A); // B steals the memory space from the temporary exp(A). 
+    B.zeros(); // B is zero, but A is not affected. 
+    ```
+Allocating memory is expensive, so make good use of ```std::move``` sementics and steal memory from sacrificial intermediate results. 
 ## Garbage Collection
 The allocated memory spaces will not be automatically released, so later computations can directly claim those spaces without calling expensive memory allocation functions. To release memory, please remember to add a line at the begining of the scope: 
 ```
