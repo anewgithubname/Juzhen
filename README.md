@@ -124,7 +124,7 @@ ans =
 4. MNIST CPU
     ```
     make logi-cpu
-    bin/logi.out
+    bin/logi-cpu.out
     ```
 5. MNIST GPU
     ```
@@ -135,36 +135,42 @@ ans =
 - Linux (CPU/GPU)
 - MacOS (CPU)
 - Windows (CPU/GPU*), you will need to install Visual Studio 2019 to compile the code. 
-## ```rvalue``` and ```lvalue``` Sementics
-Consider the following three examples:
-1. ```c++
+## ```std::move``` Sementics
+Consider the following examples:
+1. Copy. 
+    ```c++
     Matrix<float> A = {"A",{{1,2},{3,4},{5,6}}}; //A is created. Memory allocated. 
     auto B = A; //B is a copy of A. Extra space allocated for B.
     B.zeros(); //B is zero, but A remains the same.
     ```
-2.  ```c++
+2.  Ownership Transfer
+    ```c++
     Matrix<float> A = {"A",{{1,2},{3,4},{5,6}}};
-    auto B = std::move(A); //Both B and A owns the same matrix. No extra memory space allocated. 
-    B.zeros(); //A and B are both zero matrices now. 
+    auto B = std::move(A); // Transfer the memory owned by A to B. 
     ```
-3. ```c++
+3. Return Value 
+    ```c++
     Matrix<float> A = {"A",{{1,2},{3,4},{5,6}}};
-    auto B = exp(A); // B steals the memory space from the temporary exp(A). 
+    auto B = exp(A); // New memory allocated for B.  
     B.zeros(); // B is zero, but A is not affected. 
     ```
-Allocating memory is expensive, so make good use of ```std::move``` sementics and steal memory from sacrificial intermediate results. 
+4.  Sacrificial Intermediate Results
+    ```c++
+    Matrix<float> A = {"A",{{1,2},{3,4},{5,6}}};
+    auto B = exp(std::move(A)); // Using the memory space owned by A to create B. A does not own any memory any more. 
+    ```
+Allocating memory is expensive, so make good use of ```std::move``` semantics and steal memory from sacrificial intermediate results. 
 ## Garbage Collection
-The allocated memory spaces will not be automatically released, so later computations can directly claim those spaces without calling expensive memory allocation functions. To release memory, please remember to add a line at the begining of the scope: 
+The allocated memory will not be automatically released, so later computations can reclaim those spaces without calling memory allocation functions. To release memory, please remember to add a line at the begining of the scope: 
 ```
 MemoryDeleter<T> md1; 
 ```
-where ```T``` is the type of your matrix and ```GPUMemoryDeleter md1;``` if you are using GPU computation. 
+where ```T``` is the type of your matrix and add ```GPUMemoryDeleter md1;``` if you are using GPU computation. 
 
 ## Known Issues
 1. GPU computation on Windows is ~2.5 time slower than on Linux. I am not sure the cause of this. 
-    - Tested on CUDA 11.5, Windows 11. 
-    - Tested it on Native Windows and WSL2. Results are the same. 
-2. Currently, Juzhen only supports single precision float point CBLAS/cuBLAS, although it is very easy to modify the source code and add supports for other types of data. 
+2. GPU computation only supports single precision calculation. 
+3. Currently, Hadamard multiplication does not support in place transpose. 
 ## Benchmark on some CPUs/GPUs
 Benchmark using MNIST example, time collected by the built-in profiling tool. 
 
