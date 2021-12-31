@@ -30,11 +30,11 @@ or on GPU:
 #include <iostream> 
 #include "juzhen.hpp"
 using namespace std;
-
-MemoryDeleter<float> md2;
+ 
+MemoryDeleter<float> md2; 
 GPUMemoryDeleter md1; // GPU memory needs its own deleter. 
 
-int main(){ 
+int main(){
     // cuBLAS initialization ...
 
     // suppose "handle" is cuBLAS handle.
@@ -98,6 +98,36 @@ ans =
    -1.6667    0.6667
     1.3333   -0.3333
 ```
+## Should I use Juzhen?
+NO(*). MATLAB or NumPy are popular among data scientists for a reason. 
+If you are interested in numerical C++ coding, I recommend [Eigen](https://en.wikipedia.org/wiki/Eigen_(C%2B%2B_library)) or [Armadillo](https://en.wikipedia.org/wiki/Armadillo_(C%2B%2B_library)). 
+
+This software is written with educational purposes in mind. If you still want to use it, please read on. 
+
+## Get Started
+1. First, install CBLAS and LAPACK and set environment varibles. 
+    - In Ubuntu,  
+        ```
+        sudo apt install libopenblas-dev liblapack-dev
+        ```
+
+    - In Windows, you can download precompiled binaries from [OpenBLAS](https://github.com/xianyi/OpenBLAS/releases/tag/v0.3.19).
+
+    - In MacOS, BLAS and LAPACK are parts of [Acclerate Framework](https://developer.apple.com/documentation/accelerate), comes with XCode. 
+
+2. To use Juzhen without GPU support, copy the "cpp" folder to your C++ project directory and add the header file ```juzhen.hpp```. 
+
+3. Suppose you wrote your code in ```main.cpp```. Compile it using
+    ```
+    g++ -I cpp/ -D CPU_ONLY -O3 main.cpp -o main.out -llapack -lopenblas 
+    ```
+    Do not forget to link lapack and BLAS! 
+
+4. If you want to use GPU APIs, you need to install [CUDA](https://developer.nvidia.com/cuda-toolkit) and compile your code using [```nvcc```](https://en.wikipedia.org/wiki/Nvidia_CUDA_Compiler):
+    ```
+    nvcc -I cpp/ -O3 main.cpp cpp/cudam.cpp cpp/cukernels.cu -o main.out -lcublas -lcurand -llapack -lopenblas 
+    ```
+    Note that we dropped ```-D CPU_ONLY``` flag. 
 
 ## Examples Code:
 1. [helloworld-cpu](examples/helloworld.cpp)
@@ -168,9 +198,8 @@ MemoryDeleter<T> md1;
 where ```T``` is the type of your matrix and add ```GPUMemoryDeleter md1;``` if you are using GPU computation. 
 
 ## Known Issues
-1. GPU computation on Windows is ~2.5 time slower than on Linux. I am not sure the cause of this. 
-2. GPU computation only supports single precision calculation. 
-3. Currently, Hadamard multiplication does not support in place transpose. 
+1. GPU computation only supports single precision calculation. 
+2. Currently, Hadamard multiplication does not support in place transpose. 
 ## Benchmark on some CPUs/GPUs
 Benchmark using MNIST example, time collected by the built-in profiling tool. 
 
