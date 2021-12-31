@@ -191,11 +191,51 @@ Consider the following examples:
     ```
 Allocating memory is expensive, so make good use of ```std::move``` semantics and steal memory from sacrificial intermediate results. 
 ## Garbage Collection
-The allocated memory will not be automatically released, so later computations can reclaim those spaces without calling memory allocation functions. To release memory, please remember to add a line at the begining of the scope: 
+The allocated memory will not be immediately released, so later computations can reclaim those spaces without calling memory allocation functions. To release the memory before the scope exits, please remember to add a line at the begining of the scope: 
 ```
 MemoryDeleter<T> md1; 
 ```
 where ```T``` is the type of your matrix and add ```GPUMemoryDeleter md1;``` if you are using GPU computation. 
+# Profiling 
+main.cpp
+```c++
+#include <iostream>
+using namespace std;
+
+#include "cpp/juzhen.hpp"
+
+int main(){MemoryDeleter<float> md;
+
+    Matrix<float> A("A", 500, 1000);
+    A.randn();
+
+    {Profiler p; //start the profiler
+        for (int i = 0; i < 1000; i++)
+        {
+            auto &&C = A * A.T();
+        }
+    }// profiler will automatically stop and print out elapsed time when the current scope exits. 
+}
+```
+Compile and Run:
+```bash
+$ g++ -I cpp/ -D CPU_ONLY -O3 main.cpp -o main.out -llapack -lopenblas 
+
+$ ./main.out 
+Time: 1247.48 ms
+Total memory released: 2.86102 MB.
+```
+Compare it with MATLAB:
+```MATLAB
+>> A = randn(500,1000,'single');
+tic; 
+for i=1:1000
+C = A*A';
+end; 
+toc;
+
+Elapsed time is 0.759065 seconds.
+```
 
 ## Known Issues
 1. GPU computation only supports single precision calculation. 
