@@ -38,9 +38,9 @@ int main(){
     // cuBLAS initialization ...
 
     // suppose "handle" is cuBLAS handle.
-    cuMatrix A(handle, Matrix<float>("A",{{1,2,3},{4,5,6}}));
+    cuMatrix A(Matrix<float>("A",{{1,2,3},{4,5,6}}));
     cout << A << endl;
-    cuMatrix B(handle, Matrix<float>("B",{{.1,.2},{.3,.4},{.5,.6}}));
+    cuMatrix B(Matrix<float>("B",{{.1,.2},{.3,.4},{.5,.6}}));
     cout << B << endl << endl;
 
     cout << (log(exp(A*B)+1.0f)/5.0f) << endl;
