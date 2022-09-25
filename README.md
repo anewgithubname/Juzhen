@@ -212,7 +212,7 @@ This software is written with educational purposes in mind. If you still want to
     make helloworld-nn
     bin/helloworld-nn.out
     ```
-6. Neural Net API CPU
+6. Neural Net API GPU
     ```
     make helloworld-nn-gpu
     bin/helloworld-nn-gpu.out
