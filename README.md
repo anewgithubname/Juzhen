@@ -120,7 +120,7 @@ LossLayer<MatrixF> L3t(n, YT);
 list<Layer<MatrixF>*> trainnn({ &L2, &L1, &L0 }), testnn({ &L3t, &L2, &L1, &L0});
 
 // sgd
-static int iter = 0;
+int iter = 0;
 while (iter < 10000) {
     int batch_id = (iter % numbatches);
 
