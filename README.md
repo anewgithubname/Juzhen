@@ -180,6 +180,7 @@ This software is written with educational purposes in mind. If you still want to
 2. [helloworld-gpu](examples/helloworld_gpu.cpp)
 3. [Binary Logistic Regression using a linear model](examples/logisticregression_simple.cpp).
 4. Classifying MNIST digits using one hidden layer neural net (on [CPU](examples/logisticregression_MNIST.cpp)/[GPU](examples/logisticregression_MNIST_GPU.cpp)).
+5. [Regression using neural net APIs](examples/helloworld_nn.cpp) (on CPU and GPU).
 
 ## Compile and Run Examples:
 1. Helloworld CPU
@@ -207,12 +208,12 @@ This software is written with educational purposes in mind. If you still want to
     make logi-gpu
     bin/logi-gpu.out
     ```
-5. Neural Net API CPU
+6. Neural Net API CPU
     ```
     make helloworld-nn
     bin/helloworld-nn.out
     ```
-6. Neural Net API GPU
+7. Neural Net API GPU
     ```
     make helloworld-nn-gpu
     bin/helloworld-nn-gpu.out
