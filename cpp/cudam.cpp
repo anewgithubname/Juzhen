@@ -20,11 +20,11 @@
 */
 
 #include "cudam.h"
-// #define PROFILING
 
 using namespace std;
 list<mem_space<float>> cuMatrix::alive_gpu_mems;
 list<mem_space<float>> cuMatrix::dead_gpu_mems;
+GPU_handle cuMatrix::global_handle = NULL;
 
 GPUMemoryDeleter::~GPUMemoryDeleter(){
     long size = 0; 
@@ -36,12 +36,13 @@ GPUMemoryDeleter::~GPUMemoryDeleter(){
         cudaFree(it->ptr);
         size += it->size;
     }
-    std::cout << "Total GPU memory released: " << size*sizeof(float)/1024.0/1024.0 << " MB." << std::endl;
+    LOG_INFO("Total GPU memory released: {:.2f} MB.", size*sizeof(float)/1024.0/1024.0);
 }
 
-cuMatrix::cuMatrix(GPU_handle handle, const Matrix<float>& M)
+cuMatrix::cuMatrix(const Matrix<float>& M)
 {
-    this->handle = handle;
+    static Profiler profiler("gpu copy");
+    this->handle = global_handle;
     this->name = "cu_"+M.name;
     this->numrow = M.numrow;
     this->numcol = M.numcol;
@@ -51,36 +52,24 @@ cuMatrix::cuMatrix(GPU_handle handle, const Matrix<float>& M)
         cuMatrix::free(p);
     });
 
-#ifdef PROFILING
-    static Profiler profiler("Copying from Host to GPU"); 
-    if(M.num_col() == 128 && M.num_row() == 28*28)
-        profiler.start();
-#endif
+    profiler.start();
     cudaError_t stat = cudaMemcpy(elements.get(), M.elements.get(), numcol * numrow * sizeof(float), cudaMemcpyHostToDevice);
-    
-#ifdef PROFILING
-    if(M.num_col() == 128 && M.num_row() == 28*28)
-        profiler.end();
-#endif
+    profiler.end();
 
     if (stat != cudaSuccess) {
-        printf ("host to device memory copy failed\n");
+        LOG_ERROR("host to device memory copy failed, {}.", stat);
     }
 }
 
-cuMatrix::cuMatrix(GPU_handle handle, const char *name, int numrow, int numcol, int trans)
+cuMatrix::cuMatrix(const char *name, int numrow, int numcol, int trans)
 {
-    this->handle = handle;
+    this->handle = global_handle;
     this->name = name;
     this->numcol = numcol;
     this->numrow = numrow;
     transpose = trans;
     float *p = cuMatrix::allocate(numcol * numrow);
-    //cudaError_t custat = cudaMalloc(&p, numcol * numrow* sizeof(float));
-    //if (custat != cudaSuccess) {
-    //    printf ("device memory allocation failed");
-    //}
-    //
+    
     elements.reset(p, [](auto p) {
         cuMatrix::free(p);
         });
@@ -89,7 +78,7 @@ cuMatrix::cuMatrix(GPU_handle handle, const char *name, int numrow, int numcol, 
 }
 
 cuMatrix::cuMatrix(const cuMatrix& M){
-    std::cout << "cuda copy constructor called" << std::endl;
+    LOG_DEBUG("cuda copy constructor called");
     this->handle = M.handle;
     this->name = "copy of" + M.name;
     this->numrow = M.numrow;
@@ -100,15 +89,15 @@ cuMatrix::cuMatrix(const cuMatrix& M){
                 cuMatrix::free(p);
             });
 
-    cudaError_t custat = cudaMemcpy(elements.get(), M.elements.get(), numcol * numrow * sizeof(float), cudaMemcpyDeviceToDevice);
-    if (custat != cudaSuccess) {
-        printf ("device memory copy failed");
+    cudaError_t stat = cudaMemcpy(elements.get(), M.elements.get(), numcol * numrow * sizeof(float), cudaMemcpyDeviceToDevice);
+    if (stat != cudaSuccess) {
+        LOG_ERROR("device memory copy failed, {}.", stat);
     }
 
 }
 
 cuMatrix::cuMatrix(cuMatrix &&M) noexcept{
-    // cout << "cuda move constructor called" << endl;
+    LOG_DEBUG("cuda move constructor called");
     this->handle = M.handle;
     this->name = M.name;
     this->numrow = M.numrow;
@@ -120,7 +109,7 @@ cuMatrix::cuMatrix(cuMatrix &&M) noexcept{
 
 cuMatrix & cuMatrix::operator=(const cuMatrix &M){
     if(this == &M) return *this;
-    std::cout << "cuda copy assignment called" << std::endl;
+    LOG_DEBUG("cuda copy assignment called");
     this->handle = M.handle;
     this->name = "copy of " + M.name;
     this->numrow = M.numrow;
@@ -131,9 +120,10 @@ cuMatrix & cuMatrix::operator=(const cuMatrix &M){
                 cuMatrix::free(p);
             });
 
-    cudaError_t custat = cudaMemcpy(elements.get(), M.elements.get(), numcol * numrow * sizeof(float), cudaMemcpyDeviceToDevice);
-    if (custat != cudaSuccess) {
-        printf ("device memory copy failed");
+    cudaError_t stat = cudaMemcpy(elements.get(), M.elements.get(), numcol * numrow * sizeof(float), cudaMemcpyDeviceToDevice);
+    if (stat != cudaSuccess) {
+        LOG_ERROR("device memory copy failed, {}.", stat);
+        ERROR_OUT;
     }
 
     return *this;
@@ -141,7 +131,7 @@ cuMatrix & cuMatrix::operator=(const cuMatrix &M){
 
 cuMatrix &cuMatrix::operator=(cuMatrix &&M) noexcept{
     if(this == &M) return *this;
-    // cout << "cuda move assignment called" << endl;
+    LOG_DEBUG("cuda move assignment called");
     this->handle = M.handle;
     this->name = M.name;
     this->numrow = M.numrow;
@@ -154,60 +144,69 @@ cuMatrix &cuMatrix::operator=(cuMatrix &&M) noexcept{
 
 void cuMatrix::ones()
 {
-    float *vec = new float[numcol * numrow];
-    for (int i = 0; i < numcol * numrow; i++) 
-        vec[i] = 1.0;
-    
-    GPU_status stat = cublasSetVector(numcol * numrow, 
-                        sizeof(float), vec, 1, elements.get(), 1);
-
-    if (stat != CUBLAS_STATUS_SUCCESS) {
-        printf ("device memory set one failed");
-    }
-
-    delete[] vec;
-    
+    fill(*this, 1.0f);
 }
 
 void cuMatrix::zeros()
 {
     cudaError_t stat = cudaMemset(elements.get(), 0, numcol * numrow* sizeof(float));
     if (stat != cudaSuccess) {
-        printf ("device memory set zero failed");
+        LOG_ERROR("device memory set zero failed, {}.", stat);
     }
 }
 
 
 void cuMatrix::randn(double mean, double std){
     curandGenerator_t gen;
-    curandStatus_t stats =  curandCreateGenerator(&gen, 
+    // random generator
+    curandStatus_t stat =  curandCreateGenerator(&gen, 
             CURAND_RNG_PSEUDO_DEFAULT);
-    if (stats != CURAND_STATUS_SUCCESS) {
-        printf ("curand create generator failed");
+    if (stat != CURAND_STATUS_SUCCESS) {
+        LOG_ERROR("curand create generator failed, {}.", stat);
+        ERROR_OUT;
     }
-    stats = curandSetPseudoRandomGeneratorSeed(gen, Clock::now().time_since_epoch().count());
-    if (stats != CURAND_STATUS_SUCCESS) {
-        printf ("curand set seed failed");
-    }
-    stats = curandGenerateNormal(gen, elements.get(), numcol * numrow, (float) mean, (float) std);
-    if (stats != CURAND_STATUS_SUCCESS) {
-        printf ("curand generate normal failed");
+    // set seed
+    stat = curandSetPseudoRandomGeneratorSeed(gen, Clock::now().time_since_epoch().count());
+    if (stat != CURAND_STATUS_SUCCESS) {
+        LOG_ERROR("curand set seed failed, {}.", stat);
+        ERROR_OUT;
     }
 
-    stats = curandDestroyGenerator(gen);
-    if (stats != CURAND_STATUS_SUCCESS) {
-        printf ("curand destroy generator failed");
+    if (numcol * numrow % 2 != 0) {
+        float* p = NULL;
+        cudaMalloc(&p, (numcol * numrow + 1)*sizeof(float));
+        stat = curandGenerateNormal(gen, p, numcol * numrow + 1, (float) mean, (float) std);
+        if (stat != CURAND_STATUS_SUCCESS) {
+            LOG_ERROR("curand generate normal failed, {}.", stat);
+            ERROR_OUT;
+        }
+        cudaMemcpy(elements.get(), p, numcol * numrow * sizeof(float), cudaMemcpyDeviceToDevice);
+        cudaFree(p);
+    }else{
+        // generate normal 
+        stat = curandGenerateNormal(gen, elements.get(), numcol * numrow, (float) mean, (float) std);
+        if (stat != CURAND_STATUS_SUCCESS) {
+            LOG_ERROR("curand generate normal failed, {}.", stat);
+            ERROR_OUT;
+        }
+    }
+    // destroy generator 
+    stat = curandDestroyGenerator(gen);
+    if (stat != CURAND_STATUS_SUCCESS) {
+        LOG_ERROR("curand destroy generator failed, {}.", stat);
+        ERROR_OUT;
     }
 }
 
 
 Matrix<float> cuMatrix::to_host() const
 {
-    Matrix<float> ret("->host", numrow, numcol, transpose);
+    Matrix<float> ret((string(name) + "->host").c_str(), numrow, numcol, transpose);
     GPU_status stat = cublasGetMatrix(numrow, numcol, sizeof(float), elements.get(), 
                     numrow, ret.elements.get(), numrow);
     if (stat != CUBLAS_STATUS_SUCCESS) {
-        printf ("data upload failed\n");
+        LOG_ERROR("device memory upload to host failed, {}.", stat);
+        ERROR_OUT;
     }
     return ret;
 }
@@ -222,8 +221,8 @@ float cuMatrix::norm() const
 
 cuMatrix cuMatrix::dot(const cuMatrix &B) const
 {
-    // cout << "dot " << endl;
-    cuMatrix C(handle, "->dot", num_row(), B.num_col());
+    static Profiler p("GPU dot"); p.start();
+    cuMatrix C("dot", num_row(), B.num_col());
 
     cublasOperation_t transA = transpose ? CUBLAS_OP_T : CUBLAS_OP_N;
     cublasOperation_t transB = B.transpose ? CUBLAS_OP_T : CUBLAS_OP_N;
@@ -233,27 +232,27 @@ cuMatrix cuMatrix::dot(const cuMatrix &B) const
                     B.elements.get(), B.numrow, &one, C.elements.get(), C.numrow);
 
     if (stat != CUBLAS_STATUS_SUCCESS) {
-        printf ("dot product failed");
+        LOG_ERROR("dot product failed");
     }
+    p.end();
     return C;
 }
 //s1*M + a
 cuMatrix cuMatrix::add(const float a, const float s1) const
 {
-    cuMatrix C(handle, "add_C", numrow, numcol, transpose);
+    cuMatrix C("add", numrow, numcol, transpose);
     fill(C,a);
 
     GPU_status stat = cublasSaxpy(handle, numrow * numcol, &s1, elements.get(), 1, C.elements.get(), 1);
     if (stat != CUBLAS_STATUS_SUCCESS) {
-        printf ("axpy failed");
+        LOG_ERROR("axpy failed");
     }
     return C;
 }
 //s1*M + s2*B
 cuMatrix cuMatrix::add(const cuMatrix &B, float s1, float s2) const
 {
-    // cout << "add s1s2 " << s1 << " " << s2 << endl;
-    cuMatrix C(handle, "add_C", num_row(), num_col());
+    cuMatrix C("add", num_row(), num_col());
 
     cublasOperation_t transA = transpose ? CUBLAS_OP_T : CUBLAS_OP_N;
     cublasOperation_t transB = B.transpose ? CUBLAS_OP_T : CUBLAS_OP_N;
@@ -261,7 +260,7 @@ cuMatrix cuMatrix::add(const cuMatrix &B, float s1, float s2) const
     GPU_status stat = cublasSgeam(handle, transA, transB, num_row(), num_col(), &s1, elements.get(), numrow,
                 &s2, B.elements.get(), B.numrow, C.elements.get(), C.numrow);
     if (stat != CUBLAS_STATUS_SUCCESS) {
-        printf ("sum failed");
+        LOG_ERROR("add failed");
     }
 
     return C;
@@ -270,7 +269,7 @@ cuMatrix cuMatrix::add(const cuMatrix &B, float s1, float s2) const
 const cuMatrix cuMatrix::T() const
 {
     string newname = name+"_T";
-    cuMatrix MT(handle, newname.c_str(), numrow, numcol, !transpose, elements);
+    cuMatrix MT(newname.c_str(), numrow, numcol, !transpose, elements);
     return MT;
 }
 //similar to MATLAB's sum function, sum the matrix along the specified dimension
@@ -282,8 +281,8 @@ cuMatrix sum(const cuMatrix &M, int dim)
         transM = !transM; 
     }
 
-    cuMatrix sumM(M.handle, "sumM", transM?M.numcol:M.numrow , 1, 0);
-    cuMatrix ones(M.handle, "ones", transM?M.numrow:M.numcol, 1, 0);
+    cuMatrix sumM("sumM", transM?M.numcol:M.numrow , 1, 0);
+    cuMatrix ones("ones", transM?M.numrow:M.numcol, 1, 0);
     ones.ones();
 
     cublasOperation_t cudaTransM = transM ? CUBLAS_OP_T : CUBLAS_OP_N;
@@ -293,7 +292,7 @@ cuMatrix sum(const cuMatrix &M, int dim)
                 1, &zero, sumM.elements.get(), 1);
 
     if (stat != CUBLAS_STATUS_SUCCESS) {
-        printf ("sum failed");
+        LOG_ERROR("sum failed, {}.", stat);
     }
 
     if (dim == 0)
@@ -304,9 +303,9 @@ cuMatrix sum(const cuMatrix &M, int dim)
 }
 ostream & operator <<(ostream &os, const cuMatrix &M){
     using namespace std;
-    // write obj to stream
-    os << M.get_name()<< " " << M.num_row() << " by " << M.num_col();
     Matrix<float> hostM = M.to_host();
+    // write obj to stream
+    os << hostM.get_name()<< " " << hostM.num_row() << " by " << hostM.num_col() << endl;
     for (int i = 0; i < hostM.num_row(); i++)
     {
         os << endl;
@@ -326,18 +325,25 @@ cuMatrix operator*(const cuMatrix &lM, const float &r)
 {
     return lM.add(0, r);
 }
+//rvalue (in place) scaling
+cuMatrix operator*(cuMatrix&& lM, const float& r)
+{
+    LOG_DEBUG("rval * called!");
+    return operator*(r, std::move(lM));
+}
 cuMatrix operator*(const float &l, const cuMatrix &rM)
 {
     // cout << "l*" << endl;
     return rM.add(0,l);
 }
+//rvalue (in place) scaling
 cuMatrix operator*(const float& l, cuMatrix&& rM)
 {
-    // cout << "rval *\n";
     int numelems = rM.numrow * rM.numcol;
+    //original content rM is replaced to store the scaled result.
     GPU_status stat = cublasSscal(rM.handle, numelems, &l, rM.elements.get(), 1);
     if (stat != CUBLAS_STATUS_SUCCESS) {
-        printf("axpy failed");
+        LOG_ERROR("scal failed, {}.", stat);
     }
     return std::move(rM);
 }
@@ -345,18 +351,20 @@ cuMatrix operator/(const cuMatrix &lM, const float &r)
 {
     return lM.add(0, 1.0/r);
 }
-//rvalue division
+
+// rvalue(in place) division
 cuMatrix operator/(cuMatrix &&lM, const float &r)
 {
     const float s =  1.0/r;
-    // cout << "rvalue division " << s << endl;
+    //original content lM is replaced to store the scaled result.
     int numelems = lM.numrow * lM.numcol;
     GPU_status stat = cublasSscal(lM.handle, numelems, &s, lM.elements.get(), 1);
     if (stat != CUBLAS_STATUS_SUCCESS) {
-        printf ("axpy failed");
+        LOG_ERROR("scal failed, {}.", stat);
     }
     return std::move(lM);
 }
+
 cuMatrix operator+(const cuMatrix &lM, const cuMatrix &rM)
 {
     return lM.add(rM, 1.0, 1.0);
@@ -396,7 +404,7 @@ cuMatrix& operator+=(cuMatrix &lM, const cuMatrix &rM)
                                   &s1, lM.elements.get(), lM.numrow, &s2, rM.elements.get(), 
                                   rM.numrow, lM.elements.get(), lM.numrow);
     if (stat != CUBLAS_STATUS_SUCCESS) {
-        printf ("+= failed");
+        LOG_ERROR("+= failed, {}.", stat);
     }
 
     return lM;
@@ -404,6 +412,7 @@ cuMatrix& operator+=(cuMatrix &lM, const cuMatrix &rM)
 
 cuMatrix& operator-=(cuMatrix &lM, const cuMatrix &rM)
 {
+    static Profiler p("GPU -="); p.start();
     // cout << "-=" << endl;
     cublasOperation_t transA = CUBLAS_OP_N;
     cublasOperation_t transB = rM.transpose ? CUBLAS_OP_T : CUBLAS_OP_N;
@@ -413,8 +422,63 @@ cuMatrix& operator-=(cuMatrix &lM, const cuMatrix &rM)
                                   &s1, lM.elements.get(), lM.numrow, &s2, rM.elements.get(), 
                                   rM.numrow, lM.elements.get(), lM.numrow);
     if (stat != CUBLAS_STATUS_SUCCESS) {
-        printf ("-= failed");
+        LOG_ERROR("-= failed, {}.", stat);
     }
 
+    p.end();
     return lM;
+}
+
+curandStatus_t GPUSampler::stats = CURAND_STATUS_NOT_INITIALIZED;
+curandGenerator_t GPUSampler::gen = NULL;
+
+
+cuMatrix cuMatrix::randn(int m, int n){
+    static Profiler p("rand gen"); p.start();
+    auto gen = GPUSampler::gen;
+    cuMatrix M("randn", m, n);
+
+    if (m * n % 2 != 0) {
+        float* p = NULL;
+        cudaMalloc(&p, (m * n + 1)*sizeof(float));
+        curandStatus_t curand_stat = curandGenerateNormal(gen, p, m * n + 1, 0.0f, 1.0f);
+        if (curand_stat != CURAND_STATUS_SUCCESS) {
+            LOG_ERROR("sample random nums failed, {}.", curand_stat);
+            ERROR_OUT;
+        }
+        cudaError_t stat = cudaMemcpy(M.elements.get(), p, m * n * sizeof(float), cudaMemcpyDeviceToDevice);
+        if (stat != cudaSuccess) {
+            LOG_ERROR("device memory copy failed, {}.", stat);
+            ERROR_OUT;
+        }
+        cudaFree(p);
+    }
+    else {
+        // generate normal 
+        auto stat = curandGenerateNormal(gen, M.elements.get(), M.numcol * M.numrow, 0.0f, 1.0f);
+        if (stat != CURAND_STATUS_SUCCESS) {
+            LOG_ERROR("curand generate normal failed, {}.", stat);
+            ERROR_OUT;
+        }
+    }
+    p.end();
+    return M;
+}
+
+cuMatrix cuMatrix::ones(int m, int n)
+{
+    static Profiler p("ones"); p.start();
+    cuMatrix M("ones", m, n); fill(M, 1.0f);
+    p.end();
+    return M;
+}
+
+cuMatrix cuMatrix::zeros(int m, int n)
+{
+    cuMatrix M("zeros", m, n);
+    cudaError_t stat = cudaMemset(M.elements.get(), 0, M.numcol * M.numrow * sizeof(float));
+    if (stat != cudaSuccess) {
+        LOG_ERROR("device memory set zero failed, {}.", stat);
+    }
+    return M;
 }

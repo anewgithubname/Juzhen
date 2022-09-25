@@ -17,7 +17,7 @@
     along with this program.  If not, see <https://www.gnu.org/licenses/>.
  */
 
-#include "juzhen.hpp"
+#include "../cpp/juzhen.hpp"
 #include <math.h>
 #define MatrixI Matrix<int> 
 #define MatrixF Matrix<float>  
@@ -39,45 +39,41 @@ MatrixF one_hot(const MatrixI &Y, int k){
 // Logistic Regression
 int main() { GPUMemoryDeleter md1; MemoryDeleter<float> md2; MemoryDeleter<int> md3; //will release the memory for us when the function exits
     //init cublas
-    cublasStatus_t stat;
-    cublasHandle_t handle;
-    stat = cublasCreate(&handle);
-    if (stat != CUBLAS_STATUS_SUCCESS) {
-        printf("CUBLAS initialization failed\n");
-        return -1;
-    }
+    cublasCreate(&cuMatrix::global_handle);
+    LOG_INFO("CuBLAS INITIALIZED!");
+
     // load data
     int n = 60000, d = 28*28, k = 10;
     MatrixF X("X",d,n); 
-    X.read("X.matrix"); X = X.T();
+    X.read("X.matrix"); 
     cout << "size of X: " << X.num_row() << " " << X.num_col() << endl;
 
     MatrixI labels("labels",1,n); 
-    labels.read("Y.matrix"); labels = labels.T();
+    labels.read("Y.matrix"); 
     cout << "size of labels: " << labels.num_row() << " " << labels.num_col() << endl;
 
     MatrixF Y = one_hot(labels, k);
     cout << "size of Y: " << Y.num_row() << " " << Y.num_col() << endl;
 
-    cuMatrix cuX(handle, X);
-    cuMatrix cuY(handle, Y);
+    cuMatrix cuX(X);
+    cuMatrix cuY(Y);
 
     //initialize neural net parameters
     int m = 28*28*3;
-    cuMatrix W1(handle, "W1",m,d); // first layer coefficient, m x d
-    W1.randn(0,.1);
-    cuMatrix W2(handle, "W2",k,m); // second leayer coefficient, k x m
-    W2.randn(0,.1);
-    cuMatrix b1(handle, "b1",m,1); // first layer bias, m x 1
-    b1.randn(0,.1);
-    cuMatrix b2(handle, "b2",k,1); // second layer bias k x 1
-    b2.randn(0,.1);
+    cuMatrix W1("W1",m,d); // first layer coefficient, m x d
+    W1.randn(0.0,.1);
+    cuMatrix W2("W2",k,m); // second leayer coefficient, k x m
+    W2.randn(0.0,.1);
+    cuMatrix b1("b1",m,1); // first layer bias, m x 1
+    b1.randn(0.0,.1);
+    cuMatrix b2("b2",k,1); // second layer bias k x 1
+    b2.randn(0.0,.1);
 
-    cuMatrix O_k1(handle, "ones", k, 1); O_k1.ones();
+    cuMatrix O_k1("ones", k, 1); O_k1.ones();
 
     // set up batch size
     int nb = 128; int n_batch = n/nb;
-    cuMatrix O_1nb(handle, "ones", 1, nb); O_1nb.ones();
+    cuMatrix O_1nb("ones", 1, nb); O_1nb.ones();
 
     auto t1 = Clock::now(); auto t2 = Clock::now();
 #ifdef PROFILING
@@ -94,8 +90,8 @@ int main() { GPUMemoryDeleter md1; MemoryDeleter<float> md2; MemoryDeleter<int> 
 #ifdef PROFILING 
         p1.start(); 
 #endif
-        cuMatrix X_i(handle, X.columns(nb*batch_id, nb*(batch_id+1)));
-        cuMatrix Y_i(handle, Y.columns(nb*batch_id, nb*(batch_id+1)));
+        cuMatrix X_i(X.columns(nb*batch_id, nb*(batch_id+1)));
+        cuMatrix Y_i(Y.columns(nb*batch_id, nb*(batch_id+1)));
 #ifdef PROFILING
         p1.end(); 
 #endif
@@ -148,7 +144,7 @@ int main() { GPUMemoryDeleter md1; MemoryDeleter<float> md2; MemoryDeleter<int> 
         if (i % 500 == 0){
             // print out training status
             cout << "Iteration: " << i << endl;
-            cuMatrix O_1n(handle, "ones", 1, n); O_1n.ones();
+            cuMatrix O_1n("ones", 1, n); O_1n.ones();
             cuMatrix && f = W2*tanh(W1*cuX+b1*O_1n) + b2*O_1n;
             cout <<"obj " << (-sum(sum(hadmd(cuY,f),0) -log(sum(exp(f),0)),1)/n).to_host() << endl;
             t2 = Clock::now();
@@ -161,11 +157,11 @@ int main() { GPUMemoryDeleter md1; MemoryDeleter<float> md2; MemoryDeleter<int> 
     // loading test data
     int nt = 10000;
     MatrixF Xt("Xt",d,nt); 
-    Xt.read("T.matrix"); Xt = Xt.T();
+    Xt.read("T.matrix"); 
     cout<<"size of Xt: "<<Xt.num_row()<<" "<<Xt.num_col()<<endl;
 
     MatrixI labels_t("labels_t",1,nt); 
-    labels_t.read("YT.matrix"); labels_t = labels_t.T();
+    labels_t.read("YT.matrix"); 
     cout<<"size of labels_t: "<<labels_t.num_row()<<" "<<labels_t.num_col()<<endl;
 
     MatrixF O_1nt("ones", 1, nt); O_1nt.ones();
@@ -194,5 +190,7 @@ int main() { GPUMemoryDeleter md1; MemoryDeleter<float> md2; MemoryDeleter<int> 
         }
     }
     cout << "testing error: "<< (double)err/nt << endl;
-    cublasDestroy(handle);
+    
+    cublasDestroy(cuMatrix::global_handle);
+    LOG_INFO("CuBLAS FREED!");
 }

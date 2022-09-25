@@ -1,5 +1,6 @@
 #include <iostream> 
-#include "juzhen.hpp"
+#define CPU_ONLY
+#include "../cpp/juzhen.hpp"
 using namespace std;
 
 int main(){MemoryDeleter<float> md1; 
@@ -9,5 +10,5 @@ int main(){MemoryDeleter<float> md1;
     Matrix<float> B = {"B", {{.1,.2},{.3,.4},{.5,.6}}};
     cout << B << endl << endl;
 
-    cout << log(exp(A*B)+1.0f)/5.0f << endl;
+    cout << sin(log(exp(A*B)+1.0f)/5.0f) << endl;
 }

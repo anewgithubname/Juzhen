@@ -1,16 +1,16 @@
 #include <iostream> 
-#include "juzhen.hpp"
+#include "../cpp/juzhen.hpp"
 using namespace std;
 
 int main(){ GPUMemoryDeleter md1; MemoryDeleter<float> md2;
     // cuda initialization
-    cublasStatus_t stat;
-    cublasHandle_t handle;
-    stat = cublasCreate(&handle);
-    if (stat != CUBLAS_STATUS_SUCCESS) {
-        printf ("CUBLAS initialization failed\n");
-        return 1;
-    }
+#ifndef CPU_ONLY
+    GPUMemoryDeleter gpumd;
+    GPUSampler sampler(1);
+    cublasCreate(&cuMatrix::global_handle);
+    LOG_INFO("CuBLAS INITIALIZED!");
+#endif
+
     //do stuff...
     cuMatrix A(handle, Matrix<float>("A",{{1,2,3},{4,5,6}}));
     cout << A << endl;
@@ -20,5 +20,8 @@ int main(){ GPUMemoryDeleter md1; MemoryDeleter<float> md2;
     cout << (log(exp(A*B)+1.0f)/5.0f) << endl;
     
     //free cuda
-    cublasDestroy(handle);
+#ifndef CPU_ONLY
+    cublasDestroy(cuMatrix::global_handle);
+    LOG_INFO("CuBLAS FREED!");
+#endif
 }

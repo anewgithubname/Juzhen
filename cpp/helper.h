@@ -22,14 +22,15 @@
 #ifndef HELPER_HPP
 #define HELPER_HPP
 
+#ifndef LOGGING_OFF
+#include <spdlog/spdlog.h>
+#endif
 #include <chrono>
 #include <array>
 typedef std::chrono::high_resolution_clock Clock;
-#include <numeric> 
 #include <random>
 #include <algorithm>
 #include <iostream>
-
 #ifdef INTEL_MKL //do we use Intel mkL special funcs? doesn't seem to have much impact on perf.
 #include <mkl.h>
 #else
@@ -68,9 +69,28 @@ inline int rand_number(){
 }
 
 inline double time_in_ms(Clock::time_point start, Clock::time_point end) {
-    return std::chrono::duration_cast<std::chrono::microseconds>(end - start).count()/1000.0;
+    return std::chrono::duration_cast<std::chrono::nanoseconds>(end - start).count()/1000000.0;
 }
 
+//for loggging
+#ifndef LOGGING_OFF
+#define SPDLOG_COMPILED_LIB
+#define LOG_INFO(...) spdlog::info(__VA_ARGS__)
+#define LOG_WARN(...) spdlog::warn(__VA_ARGS__)
+#define LOG_ERROR(...) spdlog::error(__VA_ARGS__)
+#define LOG_DEBUG(...) spdlog::debug(__VA_ARGS__)
+#else
+#define LOG_INFO(...)
+#define LOG_WARN(...)
+#define LOG_ERROR(...)
+#define LOG_DEBUG(...)
+#endif
+//for force quiting the program
+#define ERROR_OUT exit(1)
+
+/**
+ * @brief simple profiler class, will only print out the cumulative time. 
+ **/
 class Profiler {
     public:
         Profiler(){
@@ -90,13 +110,13 @@ class Profiler {
             if(started){
                 t2 = Clock::now();
                 cumulative_time += time_in_ms(t1, t2);
-                // std::cout << s << std::endl << "Time: " << time_in_ms(t1, t2) << " ms" << std::endl << std::endl;
                 started = false;
             }
         }
         ~Profiler() {
             end();
-            std::cout <<s <<std::endl << "Time: " << cumulative_time << " ms" << std::endl << std::endl;
+			//LOG_INFO("Time: {:.2f} ms.", cumulative_time);
+            std::cout << "profiler: "<< s << ", Time: " << cumulative_time << "ms." << std::endl;
         }
     private:
         Clock::time_point t1;
@@ -106,6 +126,11 @@ class Profiler {
         bool started = false;
 };
 
+#define STATIC_TIC static Profiler profiler(__FUNCTION__); profiler.start()
+#define STATIC_TOC profiler.end()
+
+#define TIC Profiler profiler(__FUNCTION__); profiler.start()
+#define TOC profiler.end()
 
 #ifndef INTEL_MKL
 //CBLAS declarations

@@ -1,4 +1,4 @@
-#include "juzhen.hpp"
+#include "../cpp/juzhen.hpp"
 using namespace std;
 #define MatRef const Matrix<float> & 
 void cpu_matrixaccess(){

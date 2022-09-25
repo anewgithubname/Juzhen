@@ -24,10 +24,82 @@
 #define MATRIX_H
 #include "core.hpp"
 
+//matrix filler funcitons. 
+template<class D>
+Matrix<D> Matrix<D>::ones(int m, int n)
+{
+    static Profiler p("ones"); p.start();
+    Matrix<D> M("ones", m, n);
+#pragma ivdep
+    for (size_t i = 0; i < m*n; i++)
+    {
+        M.elements[i] = 1; 
+    }
+    p.end();
+    return M;
+}
+
+template<class D>
+inline Matrix<D> Matrix<D>::zeros(int m, int n)
+{
+    Matrix<D> M("zeros", m, n);
+    for (size_t i = 0; i < m * n; i++)
+    {
+        M.elements[i] = 0;
+    }
+    return M;
+}
+
+template<class D>
+inline Matrix<D> Matrix<D>::randn(int m, int n)
+{
+    using namespace std;
+	normal_distribution<> d(0, 1);
+    Matrix<D> M("randn", m, n);
+	//cannot be vectorized, due to the implementation of std::random.
+	for (int i = 0; i < M.num_row() * M.num_col(); i++)
+		M.elements[i] = d(randomnumber_gen);
+    
+    return M;
+}
+
 //sum function as the "sum" in MATLAB
 template <class D>
 Matrix<D> sum(const Matrix<D> &M, int dim)
 {
+#ifdef NO_CBLAS
+    int n = M.num_row();
+    int m = M.num_col();
+
+    if (dim == 0)
+    {
+        Matrix<D> sumM("sumM", 1, M.num_col(), 0);
+        sumM.zeros();
+
+        for (int j = 0; j < m; j++)
+        {
+            #pragma clang loop vectorize(enable)
+            for (int i = 0; i < n; i++)
+            {
+                sumM.elem(0, j) += M.elem(i, j);
+            }
+        }
+        return sumM;
+    }else{
+        Matrix<D> sumM("sumM", M.num_row(), 1, 0);
+        sumM.zeros();
+        
+        for (int j = 0; j < m; j++)
+        {
+            #pragma clang loop vectorize(enable)
+            for (int i = 0; i < n; i++)
+            {
+                sumM.elem(i, 0) += M.elem(i, j);
+            }
+        }
+        return sumM;
+    }
+#else
     int transM = M.transpose;
     if (dim == 0)
     {
@@ -41,12 +113,12 @@ Matrix<D> sum(const Matrix<D> &M, int dim)
     gemv(cBlasTransM, M.numrow, M.numcol,
                 1.0f, M.elements.get(), M.numrow, ones.elements.get(),
                 1, 0.0f, sumM.elements.get(), 1);
-
     if (dim == 0)
     {
         sumM.transpose = 1;
     }
     return sumM;
+#endif
 }
 //hstack function as the "hstack" in NumPy
 template <class D>
@@ -157,44 +229,152 @@ Matrix<D> log(const Matrix<D> &M)
 template <class D>
 Matrix<D> tanh(const Matrix<D> &M)
 {
+    static Profiler p("tanh left"); p.start();
     int numelems = M.num_row() * M.num_col();
     Matrix<D> tanhM("tanh", M.numrow, M.numcol, M.transpose);
 #pragma ivdep
     for (int i = 0; i < numelems; i++)
         tanhM.elements[i] = tanh(M.elements[i]);
 
+    p.end();
     return tanhM;
 }
 //rvalue overload
 template <class D>
 Matrix<D> tanh(Matrix<D> &&M)
 {
+    static Profiler p("tanh right"); p.start();
     int numelems = M.num_row() * M.num_col();
 #pragma ivdep
     for (int i = 0; i < numelems; i++)
         M.elements[i] = tanh(M.elements[i]);
 
+    p.end();
     return std::move(M);
 }
 template <class D>
 Matrix<D> d_tanh(const Matrix<D> &M)
 {
+    static Profiler p("dtanh left"); p.start();
     int numelems = M.num_row() * M.num_col();
     Matrix<D> d_tanhM("tanh", M.numrow, M.numcol, M.transpose);
 #pragma ivdep
     for (int i = 0; i < numelems; i++)
         d_tanhM.elements[i] = 1- tanh(M.elements[i])*tanh(M.elements[i]);
 
+    p.end();
     return d_tanhM;
 }
 //rvalue overload
 template <class D>
 Matrix<D> d_tanh(Matrix<D> && M)
 {
+    static Profiler p("dtanh right"); p.start();
     int numelems = M.num_row() * M.num_col();
 #pragma ivdep
     for (int i = 0; i < numelems; i++)
         M.elements[i] = 1- tanh(M.elements[i])*tanh(M.elements[i]);
+    
+    p.end();
+    return std::move(M);
+}
+
+//lvalue atan_exp
+template <class D>
+Matrix<D> atan_exp(const Matrix<D> &M)
+{
+    int numelems = M.num_row() * M.num_col();
+    Matrix<D> atan_expM("atan_exp", M.numrow, M.numcol, M.transpose);
+#pragma ivdep
+    for (int i = 0; i < numelems; i++)
+        atan_expM.elements[i] = atan(exp(M.elements[i]));
+
+    return atan_expM;
+}
+
+//rvalue atan_exp
+template <class D>
+Matrix<D> atan_exp(Matrix<D> && M)
+{
+    int numelems = M.num_row() * M.num_col();
+#pragma ivdep
+    for (int i = 0; i < numelems; i++)
+        M.elements[i] = atan(exp(M.elements[i]));
+
+    return std::move(M);
+}
+
+//lvalue d_atan_exp
+template <class D>
+Matrix<D> d_atan_exp(const Matrix<D> &M)
+{
+    int numelems = M.num_row() * M.num_col();
+    Matrix<D> d_atan_expM("d_atan_exp", M.numrow, M.numcol, M.transpose);
+#pragma ivdep
+    for (int i = 0; i < numelems; i++)
+        d_atan_expM.elements[i] = exp(M.elements[i]) / (1 + exp(2*M.elements[i]));
+
+    return d_atan_expM;
+}
+
+//rvalue d_atan_exp
+template <class D>
+Matrix<D> d_atan_exp(Matrix<D> && M)
+{
+    int numelems = M.num_row() * M.num_col();
+#pragma ivdep
+    for (int i = 0; i < numelems; i++)
+        M.elements[i] = exp(M.elements[i]) / (1 + exp(2*M.elements[i]));
+
+    return std::move(M);
+}
+
+//lvalue sin
+template <class D>
+Matrix<D> sin(const Matrix<D> &M)
+{
+    int numelems = M.num_row() * M.num_col();
+    Matrix<D> sinM("sin", M.numrow, M.numcol, M.transpose);
+#pragma ivdep
+    for (int i = 0; i < numelems; i++)
+        sinM.elements[i] = sin(M.elements[i]);
+
+    return sinM;
+}
+
+//rvalue sin
+template <class D>
+Matrix<D> sin(Matrix<D> && M)
+{
+    int numelems = M.num_row() * M.num_col();
+#pragma ivdep
+    for (int i = 0; i < numelems; i++)
+        M.elements[i] = sin(M.elements[i]);
+
+    return std::move(M);
+}
+
+//lvalue cos
+template <class D>
+Matrix<D> cos(const Matrix<D> &M)
+{
+    int numelems = M.num_row() * M.num_col();
+    Matrix<D> cosM("cos", M.numrow, M.numcol, M.transpose);
+#pragma ivdep
+    for (int i = 0; i < numelems; i++)
+        cosM.elements[i] = cos(M.elements[i]);
+
+    return cosM;
+}
+
+//rvalue cos
+template <class D>
+Matrix<D> cos(Matrix<D> && M)
+{
+    int numelems = M.num_row() * M.num_col();
+#pragma ivdep
+    for (int i = 0; i < numelems; i++)
+        M.elements[i] = cos(M.elements[i]);
 
     return std::move(M);
 }
@@ -208,8 +388,9 @@ Matrix<D> hadmd(const Matrix<D> &M1, const Matrix<D> &M2)
     for (int j=0; j< numcol; j++){
 #pragma ivdep
         for (int i=0; i< numrow; i++){
-            // result.elem(i, j) = M1.elem(i, j) * M2.elem(i, j);
-            result.elements[i*numcol+j ] = M1.elements[i*numcol+j] * M2.elements[i*numcol+j];
+            result.elem(i, j) = M1.elem(i, j) * M2.elem(i, j);
+            // TODO: why does the line below exist?
+            //result.elements[i*numcol+j ] = M1.elements[i*numcol+j] * M2.elements[i*numcol+j];
         }
     }
     return result;
@@ -462,5 +643,15 @@ Matrix<D>& operator-=(Matrix<D> &lM, const Matrix<D> &rM)
     }
     return lM;
 }
+//in place square
+template<class D>
+inline Matrix<D> square(Matrix<D> &&M)
+{
+    int numelems = M.num_row() * M.num_col();
+#pragma ivdep
+    for (int i = 0; i < numelems; i++)
+        M.elements[i] *= M.elements[i];
 
+    return std::move(M);
+}
 #endif

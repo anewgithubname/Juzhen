@@ -16,7 +16,8 @@
     You should have received a copy of the GNU General Public License
     along with this program.  If not, see <https://www.gnu.org/licenses/>.
  */
-#include "juzhen.hpp"
+// #define NO_CBLAS
+#include "../cpp/juzhen.hpp"
 using namespace std;
 int main(){ MemoryDeleter<float> md1; //will release the memory for us when the function exits
     //creating dataset

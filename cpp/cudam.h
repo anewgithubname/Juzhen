@@ -23,8 +23,9 @@
 #define CUDAM_HPP
 
 #include "core.hpp"
-#include "cuda.h"
-#include "cublas_v2.h"
+#include "matrix.hpp"
+#include <cuda.h>
+#include <cublas_v2.h>
 #include <curand.h>
 
 typedef cublasHandle_t GPU_handle;
@@ -32,6 +33,8 @@ typedef cublasStatus_t GPU_status;
 struct GPUMemoryDeleter;
 
 class cuMatrix : public Matrix<float> {
+    //NOTE: each matrix does have its own handle, however, for now, 
+    //they are all assigned to the global handle. 
     GPU_handle handle;
 
     static std::list<mem_space<float>> alive_gpu_mems;
@@ -41,7 +44,7 @@ class cuMatrix : public Matrix<float> {
         // search for space in the freed space.
         for (auto it = dead_gpu_mems.begin(); it != dead_gpu_mems.end(); it++) {
             if (it->size == size) {
-                //cout << "Found GPU space in freed space: " << size << " address: "<< it->ptr << endl;
+                LOG_DEBUG("Found space in dead GPU memory: {}, address: {}", size, fmt::ptr(it->ptr));
                 float* ptr = it->ptr;
                 mem_space<float> mem; mem.ptr = it->ptr;  mem.size = it->size;
                 alive_gpu_mems.push_back(mem);
@@ -51,11 +54,12 @@ class cuMatrix : public Matrix<float> {
         }
         // no space available, allocate new space
         float* ptr = NULL; 
-        cudaError_t custat = cudaMalloc(&ptr, size * sizeof(float));
-        if (custat != cudaSuccess) {
-            printf ("device memory allocation failed");
+        cudaError_t stat = cudaMalloc(&ptr, size * sizeof(float));
+        if (stat != cudaSuccess) {
+            LOG_ERROR("device memory allocation failed, {}.", cudaGetErrorString(stat));
+            exit(1);
         }
-        //cout << "No GPU space available, allocate new space: " << size << " address: " << ptr << endl;
+        LOG_DEBUG("No GPU space available, allocate new space: {}, address: {}", size, fmt::ptr(ptr));
         mem_space<float> space = { ptr, size };
         alive_gpu_mems.push_back(space);
         return ptr;
@@ -63,35 +67,39 @@ class cuMatrix : public Matrix<float> {
     }
 
     static void free(float* ptr) {
-        // static Profiler p("deleter_GPU"); p.start();
+        //static Profiler p("deleter_GPU"); p.start();
+        // find the ptr in the alive mem list
         int size = -1;
         for (auto it = alive_gpu_mems.begin(); it != alive_gpu_mems.end(); it++) {
             if (it->ptr == ptr) {
                 size = it->size;
             }
         }
+        //copy it to the dead mem list
         //cout << "freeing GPU " << ptr << " size: " << size << endl; 
         mem_space<float> mem = { ptr, size };
         dead_gpu_mems.push_back(mem);
 
+        // delete the entry from the alive list
         for (auto it = alive_gpu_mems.begin(); it != alive_gpu_mems.end(); it++) {
             if (it->ptr == ptr) {
                 alive_gpu_mems.erase(it);
-                return;
+                break;
             }
         }
-        // p.end();
+         //p.end();
     }
-    cuMatrix(GPU_handle handle, const char *name, int numrow, int numcol, int trans, 
+    cuMatrix(const char *name, int numrow, int numcol, int trans, 
              std::shared_ptr<float[]> elements)
-    :Matrix<float>(name, numrow, numcol, trans, elements){this->handle = handle;}
-    cuMatrix(GPU_handle handle, const char* name, int numrow, int numcol, int trans);
+    :Matrix<float>(name, numrow, numcol, trans, elements){this->handle = global_handle;}
+    cuMatrix(const char* name, int numrow, int numcol, int trans);
 
 public:
+    static GPU_handle global_handle;
     //constructors and copiers.
-    cuMatrix() : Matrix<float>() {handle = NULL;}
-    cuMatrix(GPU_handle handle, const Matrix<float>& M);
-    cuMatrix(GPU_handle handle, const char* name, int numrow, int numcol):cuMatrix(handle, name, numrow, numcol, 0) {};
+    cuMatrix() : Matrix<float>() {handle = global_handle;}
+    cuMatrix(const Matrix<float>& M);
+    cuMatrix(const char* name, int numrow, int numcol):cuMatrix(name, numrow, numcol, 0) {};
 
     cuMatrix(const cuMatrix &M);
     cuMatrix(cuMatrix &&M) noexcept;
@@ -102,7 +110,11 @@ public:
     void ones();
     void zeros();
     void randn(){ randn(0.0, 1.0);}
-    void randn(double mean, double std);
+    void randn(double mean, double std) override;
+
+    static cuMatrix randn(int m, int n);
+    static cuMatrix ones(int m, int n);
+    static cuMatrix zeros(int m, int n);
 
     //basic matrix ops
     cuMatrix dot(const cuMatrix &B) const;
@@ -128,9 +140,11 @@ public:
 
     //our friends
     friend cuMatrix operator*(const float& l, cuMatrix&& rM);
+    friend cuMatrix operator*(cuMatrix&& lM, const float &r);
     friend cuMatrix& operator+=(cuMatrix &lM, const cuMatrix &rM);
     friend cuMatrix& operator-=(cuMatrix &lM, const cuMatrix &rM);
     friend cuMatrix operator/(const float &l, const cuMatrix &rM);
+    friend cuMatrix operator/(const float &l, cuMatrix &&rM);
     friend cuMatrix operator/(const cuMatrix &lM, const cuMatrix &rM);
     friend cuMatrix operator/(cuMatrix &&lM, const float &r);
     friend cuMatrix sum(const cuMatrix &M, int dim);
@@ -141,6 +155,7 @@ public:
     friend cuMatrix tanh(cuMatrix &&M);
     friend cuMatrix d_tanh(const cuMatrix &M);
     friend cuMatrix d_tanh(cuMatrix &&M);
+    friend cuMatrix square(cuMatrix&& M);
     friend void copy(cuMatrix &dest, const cuMatrix &src);
     friend cuMatrix& fill(cuMatrix &M, float a);
     friend cuMatrix hstack(std::vector<cuMatrix> &matrices);
@@ -157,6 +172,40 @@ struct GPUMemoryDeleter{
     ~GPUMemoryDeleter();
 };
 
+struct GPUSampler {
+ 
+    static curandStatus_t stats;
+    static curandGenerator_t gen;
+    
+    //random sampler
+    GPUSampler(int seed) {
+        // random generator
+        curandStatus_t stats = curandCreateGenerator(&gen, CURAND_RNG_PSEUDO_DEFAULT);
+        if (stats != CURAND_STATUS_SUCCESS) {
+            LOG_ERROR("curand create generator failed.");
+            ERROR_OUT;
+        }
+        // set seed
+        stats = curandSetPseudoRandomGeneratorSeed(gen, seed);
+        if (stats != CURAND_STATUS_SUCCESS) {
+            LOG_ERROR("curand set seed failed");
+            ERROR_OUT;
+        }
+        LOG_INFO("GPU sampler is initialized with seeed {}.", seed);
+    }
+    //deconstruct the sampler
+    ~GPUSampler() {
+        // destroy generator 
+        stats = curandDestroyGenerator(gen);
+        if (stats != CURAND_STATUS_SUCCESS) {
+            LOG_ERROR("curand destroy generator failed!");
+            ERROR_OUT;
+        }
+        LOG_INFO("GPU sampler is destroyed!");
+    }
+};
+
+//operators, math functions
 cuMatrix sum(const cuMatrix &M, int dim);
 std::ostream & operator <<(std::ostream &os, const cuMatrix &M);
 cuMatrix operator*(const cuMatrix &lM, const cuMatrix &rM);
@@ -181,6 +230,7 @@ cuMatrix tanh(const cuMatrix &M);
 cuMatrix tanh(cuMatrix &&M);
 cuMatrix d_tanh(cuMatrix &&M);
 cuMatrix d_tanh(const cuMatrix &M);
+cuMatrix square(cuMatrix&& M);
 cuMatrix hadmd(const cuMatrix &M1, const cuMatrix &M2);
 cuMatrix& fill(cuMatrix &M, float a);
 void copy(cuMatrix &dest, const cuMatrix &src);

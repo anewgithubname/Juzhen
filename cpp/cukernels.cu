@@ -18,8 +18,8 @@
     You should have received a copy of the GNU General Public License
     along with this program.  If not, see <https://www.gnu.org/licenses/>.
 */
-#include "cuda.h"
-#include "cublas_v2.h"
+#include <cuda.h>
+#include <cublas_v2.h>
 #include "cudam.h"
 using namespace std;
 
@@ -31,6 +31,17 @@ __global__ void fillKernel(float *d_out, float val, int numElements)
     if (i < numElements)
     {
         d_out[i] = val;
+    }
+}
+
+__global__ void squareKernel(float* vec, int numElements)
+{
+
+    int i = blockDim.x * blockIdx.x + threadIdx.x;
+
+    if (i < numElements)
+    {
+        vec[i] *= vec[i];
     }
 }
 
@@ -168,17 +179,19 @@ cuMatrix exp(cuMatrix &&M)
 
 cuMatrix exp(const cuMatrix &M)
 {
-    cuMatrix result(M.handle, "expM", M.numrow, M.numcol, M.transpose);
+    STATIC_TIC;
+    cuMatrix result("expM", M.numrow, M.numcol, M.transpose);
     int numElem = M.num_row() * M.num_col();
     int threadsPerBlock = 1024;
     int blocksPerGrid = (numElem + threadsPerBlock - 1) / threadsPerBlock;
     expKernel<<<blocksPerGrid, threadsPerBlock>>>(result.elements.get(), M.elements.get(), numElem);
+    STATIC_TOC;
     return result;
 }
 
 cuMatrix log(const cuMatrix &M)
 {
-    cuMatrix result(M.handle, "logM", M.numrow, M.numcol, M.transpose);
+    cuMatrix result("logM", M.numrow, M.numcol, M.transpose);
 
     int numElem = M.num_row() * M.num_col();
     int threadsPerBlock = 1024;
@@ -189,7 +202,7 @@ cuMatrix log(const cuMatrix &M)
 
 cuMatrix tanh(const cuMatrix &M)
 {
-    cuMatrix result(M.handle, "tanhM", M.numrow, M.numcol, M.transpose);
+    cuMatrix result("tanhM", M.numrow, M.numcol, M.transpose);
     int numElem = M.num_row() * M.num_col();
     int threadsPerBlock = 1024;
     int blocksPerGrid = (numElem + threadsPerBlock - 1) / threadsPerBlock;
@@ -200,33 +213,50 @@ cuMatrix tanh(const cuMatrix &M)
 //in place tanh
 cuMatrix tanh(cuMatrix &&M)
 {
+    STATIC_TIC;
     // cout << "rval tanh" << endl;
     int numElem = M.num_row() * M.num_col();
     int threadsPerBlock = 1024;
     int blocksPerGrid = (numElem + threadsPerBlock - 1) / threadsPerBlock;
     inPlaceTanhKernel<<<blocksPerGrid, threadsPerBlock>>>(M.elements.get(), numElem);
+    STATIC_TOC;
     return std::move(M);
 }
 
 cuMatrix d_tanh(const cuMatrix &M)
 {
-    cuMatrix result(M.handle, "d_tanhM", M.numrow, M.numcol, M.transpose);
+    STATIC_TIC;
+    cuMatrix result("d_tanhM", M.numrow, M.numcol, M.transpose);
 
     int numElem = M.num_row() * M.num_col();
     int threadsPerBlock = 1024;
     int blocksPerGrid = (numElem + threadsPerBlock - 1) / threadsPerBlock;
     d_tanhKernel<<<blocksPerGrid, threadsPerBlock>>>(result.elements.get(), M.elements.get(), numElem);
+    STATIC_TOC;
     return result;
 }
 
 //in place d_tanh
 cuMatrix d_tanh(cuMatrix &&M)
 {
+    STATIC_TIC;
     // cout << "rval d_tanh" << endl;
     int numElem = M.num_row() * M.num_col();
     int threadsPerBlock = 1024;
     int blocksPerGrid = (numElem + threadsPerBlock - 1) / threadsPerBlock;
     inplaceD_tanhKernel<<<blocksPerGrid, threadsPerBlock>>>(M.elements.get(), numElem);
+    STATIC_TOC;
+    return std::move(M);
+}
+
+//in place square
+cuMatrix square(cuMatrix&& M)
+{
+    // cout << "rval d_tanh" << endl;
+    int numElem = M.num_row() * M.num_col();
+    int threadsPerBlock = 1024;
+    int blocksPerGrid = (numElem + threadsPerBlock - 1) / threadsPerBlock;
+    squareKernel << <blocksPerGrid, threadsPerBlock >> > (M.elements.get(), numElem);
     return std::move(M);
 }
 
@@ -242,12 +272,7 @@ void copy(cuMatrix &dest, const cuMatrix &src)
 
     dest.elements.reset();
     float *p = cuMatrix::allocate(numElem);
-    //cudaError_t stats = cudaMalloc(&p, numElem * sizeof(float));
-    //if (stats != cudaSuccess)
-    //{
-    //    printf("Error allocating memory on GPU\n");
-    //    exit(1);
-    //}
+
     dest.elements = shared_ptr<float[]>(p, [](auto p) {
         cuMatrix::free(p);
         });
@@ -263,7 +288,7 @@ cuMatrix hstack(vector<cuMatrix> &matrices)
     {
         num_col += matrices[i].num_col();
     }
-    cuMatrix result(matrices[0].handle, "hstack", num_row, num_col, 0);
+    cuMatrix result("hstack", num_row, num_col, 0);
 
     int col_index = 0;
     for (int i = 0; i < matrices.size(); i++)
@@ -311,8 +336,9 @@ const cuMatrix vstack(vector<cuMatrix>&& matrices)
 }
 
 cuMatrix hadmd(const cuMatrix &M1, const cuMatrix &M2)
-{   
-    cuMatrix result(M1.handle, "hadmd", M1.numrow, M1.numcol, M1.transpose);
+{
+    static Profiler p("GPU hadmd"); p.start();
+    cuMatrix result("hadmd", M1.numrow, M1.numcol, M1.transpose);
 
     //if M2 has a different transposition flag, transpose M2 and store it in result. 
     cublasOperation_t transM2 = (M2.transpose != M1.transpose) ? CUBLAS_OP_T : CUBLAS_OP_N;
@@ -322,13 +348,15 @@ cuMatrix hadmd(const cuMatrix &M1, const cuMatrix &M2)
                                   &s2, result.elements.get(), result.numrow, result.elements.get(), result.numrow);
     if (stat != CUBLAS_STATUS_SUCCESS)
     {
-        printf("tranpose failed");
+        LOG_ERROR("Error in Transpose");
+        ERROR_OUT;
     }
 
     int numElem = M1.numrow * M1.numcol;
     int threadsPerBlock = 1024;
     int blocksPerGrid = (numElem + threadsPerBlock - 1) / threadsPerBlock;
     productKernel<<<blocksPerGrid, threadsPerBlock>>>(result.elements.get(), M1.elements.get(), numElem);
+    p.end();
     return result;
 }
 // //rvalue hadmd
@@ -376,7 +404,7 @@ cuMatrix hadmd(const cuMatrix &M1, const cuMatrix &M2)
 
 cuMatrix operator/(const float &l, const cuMatrix &rM)
 {
-    cuMatrix result(rM.handle, "elem_div", rM.numrow, rM.numcol, rM.transpose);
+    cuMatrix result("elem_div", rM.numrow, rM.numcol, rM.transpose);
 
     int numElem = rM.numrow * rM.numcol;
     int threadsPerBlock = 1024;
@@ -386,9 +414,21 @@ cuMatrix operator/(const float &l, const cuMatrix &rM)
     return result;
 }
 
+cuMatrix operator/(const float& l, cuMatrix&& rM)
+{
+    LOG_DEBUG("rval l/rM called!");
+
+    int numElem = rM.numrow * rM.numcol;
+    int threadsPerBlock = 1024;
+    int blocksPerGrid = (numElem + threadsPerBlock - 1) / threadsPerBlock;
+    divKernel << <blocksPerGrid, threadsPerBlock >> > (rM.elements.get(), l, rM.elements.get(), numElem);
+
+    return std::move(rM);
+}
+
 cuMatrix operator/(const cuMatrix &M1, const cuMatrix &M2)
 {
-    cuMatrix result(M1.handle, "elem_div", M2.numrow, M2.numcol, M2.transpose);
+    cuMatrix result("elem_div", M2.numrow, M2.numcol, M2.transpose);
 
     cublasOperation_t transM1 = (M2.transpose != M1.transpose) ? CUBLAS_OP_T : CUBLAS_OP_N;
     float s1 = 1.0, s2 = 1.0;
@@ -397,7 +437,8 @@ cuMatrix operator/(const cuMatrix &M1, const cuMatrix &M2)
                                   &s2, result.elements.get(), result.numrow, result.elements.get(), result.numrow);
     if (stat != CUBLAS_STATUS_SUCCESS)
     {
-        printf("/ failed");
+        LOG_ERROR("/ failed");
+        ERROR_OUT;
     }
 
     int numElem = M1.numrow * M1.numcol;

@@ -16,8 +16,9 @@
     You should have received a copy of the GNU General Public License
     along with this program.  If not, see <https://www.gnu.org/licenses/>.
  */
-
-#include "juzhen.hpp"
+// #define NO_CBLAS
+#define CPU_ONLY
+#include "../cpp/juzhen.hpp"
 #include <math.h>
 #define MatrixI Matrix<int> 
 #define MatrixF Matrix<float> 
@@ -41,11 +42,11 @@ int main(){ MemoryDeleter<float> md1; MemoryDeleter<int> md2; //will release the
     // load data
     int n = 60000, d = 28*28, k = 10;
     MatrixF X("X",d,n); 
-    X.read("X.matrix"); X = std::move(X.T());
+    X.read("X.matrix"); 
     cout << "size of X: " << X.num_row() << " " << X.num_col() << endl;
 
     MatrixI labels("labels",1,n); 
-    labels.read("Y.matrix"); labels = std::move(labels.T());
+    labels.read("Y.matrix"); 
     cout << "size of labels: " << labels.num_row() << " " << labels.num_col() << endl;
 
     MatrixF Y = one_hot(labels, k);
@@ -54,13 +55,13 @@ int main(){ MemoryDeleter<float> md1; MemoryDeleter<int> md2; //will release the
     //initialize parameters
     int m = 28*28*3;
     MatrixF W1("W1",m,d); // first layer coefficient, m x d
-    W1.randn(0,.1);
+    W1.randn(0.0,.1);
     MatrixF W2("W2",k,m); // second layer coefficient, k x m
-    W2.randn(0,.1);
+    W2.randn(0.0,.1);
     MatrixF b1("b1",m,1); // first layer bias, m x 1
-    b1.randn(0,.1);
+    b1.randn(0.0,.1);
     MatrixF b2("b2",k,1); // second layer bias k x 1
-    b2.randn(0,.1);
+    b2.randn(0.0,.1);
 
     MatrixF O_k1("ones", k, 1); O_k1.ones();
 
@@ -149,11 +150,11 @@ int main(){ MemoryDeleter<float> md1; MemoryDeleter<int> md2; //will release the
     // load test data
     int nt = 10000;
     MatrixF Xt("Xt",d,nt); 
-    Xt.read("T.matrix"); Xt = std::move(Xt.T());
+    Xt.read("T.matrix"); 
     cout<<"size of Xt: "<<Xt.num_row()<<" "<<Xt.num_col()<<endl;
 
     MatrixI labels_t("labels_t",1,nt); 
-    labels_t.read("YT.matrix"); labels_t = std::move(labels_t.T());
+    labels_t.read("YT.matrix"); 
     cout<<"size of labels_t: "<<labels_t.num_row()<<" "<<labels_t.num_col()<<endl;
 
     MatrixF O_1nt("ones", 1, nt); O_1nt.ones();
