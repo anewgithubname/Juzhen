@@ -101,7 +101,7 @@ ans =
 You can also use a higher level Neural Net API to write Neural Net applications: 
 ```c++
 // problem set up
-const int n = 5000, d = 10, batchsize = 50, numbatches = n / batchsize;
+const int n = 5000, batchsize = 50, numbatches = n / batchsize;
 
 // regression dataset generation
 auto X = randn(10, n), beta = randn(10, 1);
