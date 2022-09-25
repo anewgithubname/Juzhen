@@ -23,6 +23,11 @@ helloworld:
 helloworld-gpu:
 	nvcc -I cpp/ -O3 examples/helloworld_gpu.cpp  cpp/cudam.cpp cpp/cukernels.cu -o bin/helloworld-gpu.out \
 	 		 								   -lcublas -lcurand -llapack -lopenblas
+helloworld-nn:
+	clang++ -I cpp/ -D CPU_ONLY -O3 examples/helloworld_nn.cpp  -llapack -lopenblas -o bin/helloworld-nn.out
+helloworld-nn-gpu:
+	nvcc -I cpp/ -O3 examples/helloworld_nn.cpp  cpp/cudam.cpp cpp/cukernels.cu -o bin/helloworld-nn-gpu.out \
+	 		 								   -lcublas -lcurand -llapack -lopenblas
 else
 logi-cpu: 
 	# Compile without MKL

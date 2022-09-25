@@ -98,6 +98,52 @@ ans =
    -1.6667    0.6667
     1.3333   -0.3333
 ```
+You can also use a higher level Neural Net API to write Neural Net applications: 
+```c++
+// problem set up
+const int n = 5000, d = 10, batchsize = 50, numbatches = n / batchsize;
+
+// regression dataset generation
+auto X = randn(10, n), beta = randn(10, 1);
+auto Y = beta.T() * X + randn(1, n);
+
+auto XT = randn(10, n);
+auto YT = beta.T() * XT + randn(1, n);
+
+// define layers
+Layer<MatrixF> L0(16, 10, batchsize), L1(4, 16, batchsize);
+LinearLayer<MatrixF> L2(1, 4, batchsize);
+// least sqaure loss
+LossLayer<MatrixF> L3t(n, YT);
+
+// nns are linked lists containing layers
+list<Layer<MatrixF>*> trainnn({ &L2, &L1, &L0 }), testnn({ &L3t, &L2, &L1, &L0});
+
+// sgd
+static int iter = 0;
+while (iter < 10000) {
+    int batch_id = (iter % numbatches);
+
+    // obtaining batches
+    auto X_i = X.columns(batchsize * batch_id, batchsize * (batch_id + 1));
+    auto Y_i = Y.columns(batchsize * batch_id, batchsize * (batch_id + 1));
+
+    // forward-backward pass
+    forward(trainnn, X_i);
+    LossLayer<MatrixF> L3(batchsize, Y_i);
+    trainnn.push_front(&L3);
+    backprop(trainnn, X_i);
+    trainnn.pop_front();
+
+    // print progress
+    if (iter % 1000 == 0) {
+        cout << "testing loss: " << Juzhen::forward(testnn, XT).elem(0, 0) << endl;
+    }
+
+    iter++;
+}
+```
+
 ## Should I use Juzhen?
 NO(*). MATLAB or NumPy are popular among data scientists for a reason. 
 If you are interested in numerical C++ coding, I recommend [Eigen](https://en.wikipedia.org/wiki/Eigen_(C%2B%2B_library)) or [Armadillo](https://en.wikipedia.org/wiki/Armadillo_(C%2B%2B_library)). 
@@ -161,6 +207,17 @@ This software is written with educational purposes in mind. If you still want to
     make logi-gpu
     bin/logi-gpu.out
     ```
+5. Neural Net API CPU
+    ```
+    make helloworld-nn
+    bin/helloworld-nn.out
+    ```
+6. Neural Net API CPU
+    ```
+    make helloworld-nn-gpu
+    bin/helloworld-nn-gpu.out
+    ```
+    
 ## Supported Platforms
 - Linux (CPU/GPU)
 - MacOS (CPU)
