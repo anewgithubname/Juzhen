@@ -23,126 +23,131 @@
 
  */
 
-#ifndef LAYER_HPP
-#define LAYER_HPP
+#ifndef LAYER2_HPP
+#define LAYER2_HPP
 #include <cfloat>
 #include <list>  
-#include "juzhen.hpp"
+#include "core.hpp"
+#include "matrix.hpp"
+#ifndef CPU_ONLY
+#include "cumatrix.cuh"
+#endif
 
 namespace Juzhen
 {
 	/** 
 	* Fully connected layer with tanh activation
 	*/
-	template <class M>
+	template <class D>
 	class Layer {
 	protected:
-		M weights, bias, val;
+		Matrix<D> weights, bias, val;
 		//batch size
 		int nb;
-		float lrW, lrb;
+		double lrW, lrb;
 	public:
 		Layer(int m, int n, int nb) :
 			weights("weights", m, n), bias("bias", m, 1), val("output", m, nb) {
 
 			//intitialize parameters and gradients
 			this->nb = nb;
-			weights = M::randn(m, n) * .1f;
-			bias = M::randn(m, 1) * .1f;
+			weights = Matrix<D>::randn(m, n) * .1;
+			bias = Matrix<D>::randn(m, 1) * .1;
 			val.zeros();
-			lrW = .01f;
-			lrb = .01f;
+			lrW = .01;
+			lrb = .01;
 		}
-		virtual const M grad(const M& input) const {
+		virtual const Matrix<D> grad(const Matrix<D>& input) const {
 			// TODO: each time make a new matrix, not efficient
-			return d_tanh(weights * input + bias * M::ones(1, input.num_col()));
+			return d_tanh(weights * input + bias * Matrix<D>::ones(1, input.num_col()));
 		}
 
 		// this function will destroy gW and gb
-		void update(M& gW, M& gb) {
+		void update(Matrix<D>& gW, Matrix<D>& gb) {
 			weights -= lrW * std::move(gW);
 			bias -= lrb * std::move(gb);
 		}
 
-		virtual void eval(const M& input) {
+		virtual void eval(const Matrix<D>& input) {
 			// TODO: each time make a new matrix, not efficient
-			val = tanh(weights * input + bias * M::ones(1, input.num_col()));
+			val = tanh(weights * input + bias * Matrix<D>::ones(1, input.num_col()));
 		}
 
-		const M& W() { return weights; };
-		const M& b() { return bias; };
-		const M& value() { return val; }
+		Matrix<D>& W() { return weights; };
+		Matrix<D>& b() { return bias; };
+		const Matrix<D>& value() { return val; }
 
 		void print() {
 			using namespace std;
-			cout << weights << endl << bias << endl;
+			cout << weights << endl << bias << endl << lrW << endl << lrb << endl;
 		}
+		
+		template <class Mat>
+		friend void setlr(std::list<Layer<Mat>*> neuralnet, double lr);
 	};
 
 	/**
 	* Linear Layer without activation function
 	*/
-	template <class M>
-	class LinearLayer : public Layer<M> {
-		M o;
+	template <class D>
+	class LinearLayer : public Layer<D> {
 	public:
-		LinearLayer(int m, int n, int nb) : Layer<M>(m, n, nb), o("ones", m, nb) {
-			o.ones();
+		LinearLayer(int m, int n, int nb) : Layer<D>(m, n, nb) {
 		}
-		virtual const M grad(const M& input) const override {
-			return 1.0f*o; 
+		virtual const Matrix<D> grad(const Matrix<D>& input) const override {
+			return 1.0*Matrix<D>::ones(Layer<D>::weights.num_row(), input.num_col());
 		}
 
-		virtual void eval(const M& input) override {
+		virtual void eval(const Matrix<D>& input) override {
 			// TODO: each time make a new matrix, not efficient
-			Layer<M>::val = Layer<M>::weights * input + Layer<M>::bias * M::ones(1, input.num_col());
+			Layer<D>::val = Layer<D>::weights * input + Layer<D>::bias * Matrix<D>::ones(1, input.num_col());
 		}
 	};
 	
 	/*
 	* least square layer 
 	*/
-	template <class M>
-	class LossLayer : public Layer<M> {
+	template <class D>
+	class LossLayer : public Layer<D> {
 		// you cannot change the output once you set it. 
-		const M& output;
+		const Matrix<D>& output;
 	public:
-		LossLayer(int nb, const M& output) : Layer<M>(1, 1, nb), output(output) {
+		LossLayer(int nb, const Matrix<D>& output) : Layer<D>(1, 1, nb), output(output) {
 		}
 
-		virtual const M grad(const M& input) const override {
-			return 2.0f * (input - output) / Layer<M>::nb;
+		virtual const Matrix<D> grad(const Matrix<D>& input) const override {
+			return 2.0* (input - output) / Layer<D>::nb;
 		}
 
-		virtual void eval(const M& input) override {
-			Layer<M>::val = sum(square(output - input), 1) / Layer<M>::nb;
+		virtual void eval(const Matrix<D>& input) override {
+			Layer<D>::val = sum(square(output - input), 1) / Layer<D>::nb;
 		}
 	};
 
 	/*
 	* logistic layer
 	*/
-	template <class M>
-	class LogisticLayer : public Layer<M> {
+	template <class D>
+	class LogisticLayer : public Layer<D> {
 		// you cannot change the output once you set it. 
-		const M& output;
-		M oneK1;
+		const Matrix<D>& output;
+		Matrix<D> oneK1;
 	public:
-		LogisticLayer(int nb, const M& output) : 
-			Layer<M>(2, 2, nb), 
+		LogisticLayer(int nb, const Matrix<D>& output) : 
+			Layer<D>(2, 2, nb), 
 			output(output), 
 			oneK1("oneK1", output.num_row(), 1) {
 			oneK1.ones();
 		}
 
-		virtual const M grad(const M& input) const override {
+		virtual const Matrix<D> grad(const Matrix<D>& input) const override {
 			auto Z = oneK1 * sum(exp(input), 0);
-			return - (output - exp(input) / std::move(Z)) / Layer<M>::nb;
+			return - (output - exp(input) / std::move(Z)) / Layer<D>::nb;
 		}
 
-		virtual void eval(const M& input) override {
-			Layer<M>::val = sum(hadmd(input, output), 0) - log(sum(exp(input),0));
-			Layer<M>::val = - sum(Layer<M>::val, 1) / Layer<M>::nb;
+		virtual void eval(const Matrix<D>& input) override {
+			Layer<D>::val = sum(hadmd(input, output), 0) - log(sum(exp(input),0));
+			Layer<D>::val = - sum(Layer<D>::val, 1) / Layer<D>::nb;
 		}
 	};
 
@@ -150,25 +155,25 @@ namespace Juzhen
 	/*
 	* zero-one layer
 	*/
-	template <class M>
-	class ZeroOneLayer : public Layer<M> {
+	template <class D>
+	class ZeroOneLayer : public Layer<D> {
 		// you cannot change the output once you set it. 
-		const M& output;
-		M oneK1;
+		const Matrix<D>& output;
+		Matrix<D> oneK1;
 	public:
-		ZeroOneLayer(int nb, const M& output) :
-			Layer<M>(1, 1, nb),
+		ZeroOneLayer(int nb, const Matrix<D>& output) :
+			Layer<D>(1, 1, nb),
 			output(output),
 			oneK1("oneK1", output.num_row(), 1) {
 			oneK1.ones();
 		}
 
-		virtual const M grad(const M& input) const override {
+		virtual const Matrix<D> grad(const Matrix<D>& input) const override {
 			LOG_ERROR("not supported!");
 			ERROR_OUT;
 		}
 
-		virtual void eval(const M& input) override {
+		virtual void eval(const Matrix<D>& input) override {
 			// compute test accuracy
 			double err = 0;
 			int k = input.num_row();
@@ -187,14 +192,13 @@ namespace Juzhen
 					err++;
 				}
 			}
-			Layer<M>::val = M("val", { { err / nt } });
+			Layer<D>::val = Matrix<D>("val", { { err / nt } });
 		}
 	};
 
-
 	// evaluate a neural network, with input. 
-	template<class M>
-	const M& forward(std::list<Layer<M>*> neuralnet, const M& input) {
+	template <class D>
+	const Matrix<D>& forward(std::list<Layer<D>*> neuralnet, const Matrix<D>& input) {
 		if (neuralnet.size() == 0) {
 			return input;
 		}
@@ -208,8 +212,8 @@ namespace Juzhen
 	}
 
 	// updating the parameters in neural network.
-	template<class M>
-	M backprop(std::list<Layer<M>*> neuralnet, const M& input) {
+	template <class D>
+	Matrix<D> backprop(std::list<Layer<D>*> neuralnet, const Matrix<D>& input) {
 		auto tt = neuralnet.back();
 		neuralnet.pop_back();
 		if (neuralnet.size() == 0) {
@@ -230,6 +234,21 @@ namespace Juzhen
 
 			// compute W ^ T * curr_grad
 			return tt->W().T() * t;
+		}
+	}
+
+	template <class D>
+	void setlr(std::list<Layer<D>*> neuralnet, double lr)
+	{
+		if (neuralnet.size() == 0) {
+			return;
+		}
+		else {
+			neuralnet.back()->lrW = lr;
+			neuralnet.back()->lrb = lr;
+
+			neuralnet.pop_back();
+			return setlr(neuralnet, lr);
 		}
 	}
 }

@@ -18,15 +18,24 @@
     You should have received a copy of the GNU General Public License
     along with this program.  If not, see <https://www.gnu.org/licenses/>.
 */
-#include <cuda.h>
-#include <cublas_v2.h>
-#include "cudam.h"
+#include "cumatrix.cuh"
 using namespace std;
 
-__global__ void fillKernel(float *d_out, float val, int numElements)
+__global__ void addKernel(float *d_out, float s1, float a, size_t numElements)
 {
 
-    int i = blockDim.x * blockIdx.x + threadIdx.x;
+    size_t i = blockDim.x * blockIdx.x + threadIdx.x;
+
+    if (i < numElements)
+    {
+        d_out[i] = s1*d_out[i]+a;
+    }
+}
+
+__global__ void fillKernel(float *d_out, float val, size_t numElements)
+{
+
+    size_t i = blockDim.x * blockIdx.x + threadIdx.x;
 
     if (i < numElements)
     {
@@ -34,10 +43,10 @@ __global__ void fillKernel(float *d_out, float val, int numElements)
     }
 }
 
-__global__ void squareKernel(float* vec, int numElements)
+__global__ void squareKernel(float* vec, size_t numElements)
 {
 
-    int i = blockDim.x * blockIdx.x + threadIdx.x;
+    size_t i = blockDim.x * blockIdx.x + threadIdx.x;
 
     if (i < numElements)
     {
@@ -45,10 +54,21 @@ __global__ void squareKernel(float* vec, int numElements)
     }
 }
 
-__global__ void productKernel(float *d_out, float *d_in, int numElements)
+__global__ void squareKernel(float*res, float* vec, size_t numElements)
 {
 
-    int i = blockDim.x * blockIdx.x + threadIdx.x;
+    size_t i = blockDim.x * blockIdx.x + threadIdx.x;
+
+    if (i < numElements)
+    {
+        res[i] = vec[i]* vec[i];
+    }
+}
+
+__global__ void productKernel(float *d_out, float *d_in, size_t numElements)
+{
+
+    size_t i = blockDim.x * blockIdx.x + threadIdx.x;
 
     if (i < numElements)
     {
@@ -56,10 +76,10 @@ __global__ void productKernel(float *d_out, float *d_in, int numElements)
     }
 }
 
-__global__ void divKernel(float *d_out, float *d_in, int numElements)
+__global__ void divKernel(float *d_out, float *d_in, size_t numElements)
 {
 
-    int i = blockDim.x * blockIdx.x + threadIdx.x;
+    size_t i = blockDim.x * blockIdx.x + threadIdx.x;
 
     if (i < numElements)
     {
@@ -67,10 +87,10 @@ __global__ void divKernel(float *d_out, float *d_in, int numElements)
     }
 }
 
-__global__ void divKernel(float *d_out, float d_in1, float *d_in2, int numElements)
+__global__ void divKernel(float *d_out, float d_in1, float *d_in2, size_t numElements)
 {
 
-    int i = blockDim.x * blockIdx.x + threadIdx.x;
+    size_t i = blockDim.x * blockIdx.x + threadIdx.x;
 
     if (i < numElements)
     {
@@ -78,10 +98,10 @@ __global__ void divKernel(float *d_out, float d_in1, float *d_in2, int numElemen
     }
 }
 
-__global__ void copyKernel(float *d_out, float *d_in, int numElements)
+__global__ void copyKernel(float *d_out, float *d_in, size_t numElements)
 {
 
-    int i = blockDim.x * blockIdx.x + threadIdx.x;
+    size_t i = blockDim.x * blockIdx.x + threadIdx.x;
 
     if (i < numElements)
     {
@@ -89,9 +109,31 @@ __global__ void copyKernel(float *d_out, float *d_in, int numElements)
     }
 }
 
-__global__ void inplaceExpKernel(float *vec, int numElements)
+__global__ void copyKernel(float* d_out, float* d_in, size_t numElements, size_t numrow, 
+                           size_t rowstart, size_t rowend, size_t colstart, size_t colend, bool direction)
 {
-    int i = blockDim.x * blockIdx.x + threadIdx.x;
+
+    size_t k = blockDim.x * blockIdx.x + threadIdx.x;
+
+    if (k < numElements)
+    {
+        //d_out[i] = d_in[i];
+        int numrow_out = rowend - rowstart;
+        int j = k / numrow_out;
+        int i = k % numrow_out;
+
+        int idx = (i + rowstart) + (j + colstart) * numrow;
+
+        if(direction)
+            d_out[k] = d_in[idx]; //copy out
+        else
+            d_in[idx] = d_out[k]; // assign
+    }
+}
+
+__global__ void inplaceExpKernel(float *vec, size_t numElements)
+{
+    size_t i = blockDim.x * blockIdx.x + threadIdx.x;
 
     if (i < numElements)
     {
@@ -99,9 +141,9 @@ __global__ void inplaceExpKernel(float *vec, int numElements)
     }
 }
 
-__global__ void expKernel(float *vecdes, float *vec, int numElements)
+__global__ void expKernel(float *vecdes, float *vec, size_t numElements)
 {
-    int i = blockDim.x * blockIdx.x + threadIdx.x;
+    size_t i = blockDim.x * blockIdx.x + threadIdx.x;
 
     if (i < numElements)
     {
@@ -109,9 +151,9 @@ __global__ void expKernel(float *vecdes, float *vec, int numElements)
     }
 }
 
-__global__ void logKernel(float *vecdes, float *vec, int numElements)
+__global__ void logKernel(float *vecdes, float *vec, size_t numElements)
 {
-    int i = blockDim.x * blockIdx.x + threadIdx.x;
+    size_t i = blockDim.x * blockIdx.x + threadIdx.x;
 
     if (i < numElements)
     {
@@ -119,9 +161,9 @@ __global__ void logKernel(float *vecdes, float *vec, int numElements)
     }
 }
 
-__global__ void tanhKernel(float *vecdes, float *vec, int numElements)
+__global__ void tanhKernel(float *vecdes, float *vec, size_t numElements)
 {
-    int i = blockDim.x * blockIdx.x + threadIdx.x;
+    size_t i = blockDim.x * blockIdx.x + threadIdx.x;
 
     if (i < numElements)
     {
@@ -129,9 +171,9 @@ __global__ void tanhKernel(float *vecdes, float *vec, int numElements)
     }
 }
 
-__global__ void inPlaceTanhKernel(float *vec, int numElements)
+__global__ void inPlaceTanhKernel(float *vec, size_t numElements)
 {
-    int i = blockDim.x * blockIdx.x + threadIdx.x;
+    size_t i = blockDim.x * blockIdx.x + threadIdx.x;
 
     if (i < numElements)
     {
@@ -139,9 +181,9 @@ __global__ void inPlaceTanhKernel(float *vec, int numElements)
     }
 }
 
-__global__ void d_tanhKernel(float *vecdes, float *vec, int numElements)
+__global__ void d_tanhKernel(float *vecdes, float *vec, size_t numElements)
 {
-    int i = blockDim.x * blockIdx.x + threadIdx.x;
+    size_t i = blockDim.x * blockIdx.x + threadIdx.x;
 
     if (i < numElements)
     {
@@ -149,9 +191,9 @@ __global__ void d_tanhKernel(float *vecdes, float *vec, int numElements)
     }
 }
 
-__global__ void inplaceD_tanhKernel(float *vec, int numElements)
+__global__ void inplaceD_tanhKernel(float *vec, size_t numElements)
 {
-    int i = blockDim.x * blockIdx.x + threadIdx.x;
+    size_t i = blockDim.x * blockIdx.x + threadIdx.x;
 
     if (i < numElements)
     {
@@ -159,155 +201,191 @@ __global__ void inplaceD_tanhKernel(float *vec, int numElements)
     }
 }
 
-cuMatrix& fill(cuMatrix &M, float a){
-    int numElem = M.num_row() * M.num_col();
-    int threadsPerBlock = 1024;
-    int blocksPerGrid = (numElem + threadsPerBlock - 1) / threadsPerBlock;
-    fillKernel<<<blocksPerGrid, threadsPerBlock>>>(M.elements.get(), a, numElem);
+__global__ void elemwise_kernel(float (*func)(float), float* vecdes, float* vec, size_t numElements)
+{
+    size_t i = blockDim.x * blockIdx.x + threadIdx.x;
+
+    if (i < numElements)
+    {
+        vecdes[i] = func(vec[i]);
+    }
+}
+
+__global__ void Inplace_elemwise_kernel(float (*func)(float), float* vecdes, size_t numElements)
+{
+    size_t i = blockDim.x * blockIdx.x + threadIdx.x;
+
+    if (i < numElements)
+    {
+        vecdes[i] = (*func)(vecdes[i]);
+    }
+}
+
+Matrix<CUDAfloat> elemwise(float (*func)(float), const Matrix<CUDAfloat>& M)
+{   
+    // STATIC_TIC;
+
+    Matrix<CUDAfloat> result("resM", M.numrow, M.numcol, M.transpose);
+    size_t numElem = M.num_row() * M.num_col(); 
+    elemwise_kernel <<<cudaConfig(numElem)>>> (func, (float*)result.elements.get(), (float*)M.elements.get(), numElem);
+    // CudaErrorCheck(cudaPeekAtLastError());
+    // CudaErrorCheck(cudaDeviceSynchronize());
+
+    // STATIC_TOC;
+    return result;
+}
+
+Matrix<CUDAfloat> elemwise(float (*func)(float), Matrix<CUDAfloat>&& M)
+{   
+    // STATIC_TIC;
+    size_t numElem = M.num_row() * M.num_col(); 
+    Inplace_elemwise_kernel <<<cudaConfig(numElem)>>> (func, (float*)M.elements.get(), numElem);
+    // CudaErrorCheck(cudaPeekAtLastError());
+    // CudaErrorCheck(cudaDeviceSynchronize());
+
+    // STATIC_TOC;
+    return std::move(M);
+}
+
+Matrix<CUDAfloat>& fill(Matrix<CUDAfloat> &M, double a){
+    size_t numElem = M.num_row() * M.num_col();
+    fillKernel<<<cudaConfig(numElem)>>>((float*)M.elements.get(), (float)a, numElem);
     return M;
 }
 
 // in place exponential
-cuMatrix exp(cuMatrix &&M)
+Matrix<CUDAfloat> exp(Matrix<CUDAfloat> &&M)
 {
-    int numElem = M.num_row() * M.num_col();
-    int threadsPerBlock = 1024;
-    int blocksPerGrid = (numElem + threadsPerBlock - 1) / threadsPerBlock;
-    inplaceExpKernel<<<blocksPerGrid, threadsPerBlock>>>(M.elements.get(), numElem);
+    size_t numElem = M.num_row() * M.num_col();
+    inplaceExpKernel<<<cudaConfig(numElem)>>>((float*)M.elements.get(), numElem);
     return std::move(M);
 }
 
-cuMatrix exp(const cuMatrix &M)
+Matrix<CUDAfloat> exp(const Matrix<CUDAfloat> &M)
 {
     STATIC_TIC;
-    cuMatrix result("expM", M.numrow, M.numcol, M.transpose);
-    int numElem = M.num_row() * M.num_col();
-    int threadsPerBlock = 1024;
-    int blocksPerGrid = (numElem + threadsPerBlock - 1) / threadsPerBlock;
-    expKernel<<<blocksPerGrid, threadsPerBlock>>>(result.elements.get(), M.elements.get(), numElem);
+    Matrix<CUDAfloat> result("expM", M.numrow, M.numcol, M.transpose);
+    size_t numElem = M.num_row() * M.num_col();
+    expKernel<<<cudaConfig(numElem)>>>((float*)result.elements.get(), (float*)M.elements.get(), numElem);
     STATIC_TOC;
     return result;
 }
 
-cuMatrix log(const cuMatrix &M)
+Matrix<CUDAfloat> log(const Matrix<CUDAfloat> &M)
 {
-    cuMatrix result("logM", M.numrow, M.numcol, M.transpose);
+    Matrix<CUDAfloat> result("logM", M.numrow, M.numcol, M.transpose);
 
-    int numElem = M.num_row() * M.num_col();
-    int threadsPerBlock = 1024;
-    int blocksPerGrid = (numElem + threadsPerBlock - 1) / threadsPerBlock;
-    logKernel<<<blocksPerGrid, threadsPerBlock>>>(result.elements.get(), M.elements.get(), numElem);
+    size_t numElem = M.num_row() * M.num_col();
+    logKernel<<<cudaConfig(numElem)>>>((float*) result.elements.get(), (float*) M.elements.get(), numElem);
     return result;
 }
 
-cuMatrix tanh(const cuMatrix &M)
+Matrix<CUDAfloat> tanh(const Matrix<CUDAfloat> &M)
 {
-    cuMatrix result("tanhM", M.numrow, M.numcol, M.transpose);
-    int numElem = M.num_row() * M.num_col();
-    int threadsPerBlock = 1024;
-    int blocksPerGrid = (numElem + threadsPerBlock - 1) / threadsPerBlock;
-    tanhKernel<<<blocksPerGrid, threadsPerBlock>>>(result.elements.get(), M.elements.get(), numElem);
+    Matrix<CUDAfloat> result("tanhM", M.numrow, M.numcol, M.transpose);
+    size_t numElem = M.num_row() * M.num_col();
+    tanhKernel<<<cudaConfig(numElem) >>>((float*) result.elements.get(), (float*) M.elements.get(), numElem);
     return result;
 }
 
 //in place tanh
-cuMatrix tanh(cuMatrix &&M)
+Matrix<CUDAfloat> tanh(Matrix<CUDAfloat> &&M)
 {
     STATIC_TIC;
     // cout << "rval tanh" << endl;
-    int numElem = M.num_row() * M.num_col();
-    int threadsPerBlock = 1024;
-    int blocksPerGrid = (numElem + threadsPerBlock - 1) / threadsPerBlock;
-    inPlaceTanhKernel<<<blocksPerGrid, threadsPerBlock>>>(M.elements.get(), numElem);
+    size_t numElem = M.num_row() * M.num_col();
+    inPlaceTanhKernel<<<cudaConfig(numElem)>>>((float*) M.elements.get(), numElem);
     STATIC_TOC;
     return std::move(M);
 }
 
-cuMatrix d_tanh(const cuMatrix &M)
+Matrix<CUDAfloat> d_tanh(const Matrix<CUDAfloat> &M)
 {
     STATIC_TIC;
-    cuMatrix result("d_tanhM", M.numrow, M.numcol, M.transpose);
+    Matrix<CUDAfloat> result("d_tanhM", M.numrow, M.numcol, M.transpose);
 
-    int numElem = M.num_row() * M.num_col();
-    int threadsPerBlock = 1024;
-    int blocksPerGrid = (numElem + threadsPerBlock - 1) / threadsPerBlock;
-    d_tanhKernel<<<blocksPerGrid, threadsPerBlock>>>(result.elements.get(), M.elements.get(), numElem);
+    size_t numElem = M.num_row() * M.num_col();
+    d_tanhKernel<<<cudaConfig(numElem)>>>((float*) result.elements.get(), (float*) M.elements.get(), numElem);
     STATIC_TOC;
     return result;
 }
 
 //in place d_tanh
-cuMatrix d_tanh(cuMatrix &&M)
+Matrix<CUDAfloat> d_tanh(Matrix<CUDAfloat> &&M)
 {
     STATIC_TIC;
     // cout << "rval d_tanh" << endl;
-    int numElem = M.num_row() * M.num_col();
-    int threadsPerBlock = 1024;
-    int blocksPerGrid = (numElem + threadsPerBlock - 1) / threadsPerBlock;
-    inplaceD_tanhKernel<<<blocksPerGrid, threadsPerBlock>>>(M.elements.get(), numElem);
+    size_t numElem = M.num_row() * M.num_col();
+    inplaceD_tanhKernel<<<cudaConfig(numElem)>>>((float*) M.elements.get(), numElem);
     STATIC_TOC;
     return std::move(M);
 }
 
 //in place square
-cuMatrix square(cuMatrix&& M)
+Matrix<CUDAfloat> square(Matrix<CUDAfloat>&& M)
 {
     // cout << "rval d_tanh" << endl;
-    int numElem = M.num_row() * M.num_col();
-    int threadsPerBlock = 1024;
-    int blocksPerGrid = (numElem + threadsPerBlock - 1) / threadsPerBlock;
-    squareKernel << <blocksPerGrid, threadsPerBlock >> > (M.elements.get(), numElem);
+    size_t numElem = M.num_row() * M.num_col();
+    squareKernel <<<cudaConfig(numElem)>>> ((float*) M.elements.get(), numElem);
     return std::move(M);
 }
 
-void copy(cuMatrix &dest, const cuMatrix &src)
+//in place square
+Matrix<CUDAfloat> square(const Matrix<CUDAfloat>& M)
 {
-    int numElem = src.num_row() * src.num_col();
-    int threadsPerBlock = 1024;
-    int blocksPerGrid = (numElem + threadsPerBlock - 1) / threadsPerBlock;
+    // cout << "lval d_tanh" << endl;
+    Matrix<CUDAfloat> res("square", M.numrow, M.numcol, M.transpose);
+    size_t numElem = M.num_row() * M.num_col();
+    squareKernel <<<cudaConfig(numElem)>>> ((float *) res.elements.get(), (float*) M.elements.get(), numElem);
+    return res;
+}
+
+void copy(Matrix<CUDAfloat> &dest, const Matrix<CUDAfloat> &src)
+{
+    size_t numElem = src.num_row() * src.num_col();
 
     dest.numrow = src.numrow;
     dest.numcol = src.numcol;
     dest.transpose = src.transpose;
 
     dest.elements.reset();
-    float *p = cuMatrix::allocate(numElem);
+    CUDAfloat *p = MemoryDeleter<CUDAfloat>::allocate(numElem);
 
-    dest.elements = shared_ptr<float[]>(p, [](auto p) {
-        cuMatrix::free(p);
+    dest.elements = shared_ptr<CUDAfloat[]>(p, [](auto p) {
+        MemoryDeleter<CUDAfloat>::free(p);
         });
 
-    copyKernel<<<blocksPerGrid, threadsPerBlock>>>(dest.elements.get(), src.elements.get(), numElem);
+    copyKernel<<<cudaConfig(numElem)>>>((float*) dest.elements.get(), (float*) src.elements.get(), numElem);
 }
 
-cuMatrix hstack(vector<cuMatrix> &matrices)
+Matrix<CUDAfloat> hstack(vector<Matrix<CUDAfloat>> &matrices)
 {
-    int num_row = matrices[0].num_row();
-    int num_col = 0;
-    for (int i = 0; i < matrices.size(); i++)
+    size_t num_row = matrices[0].num_row();
+    size_t num_col = 0;
+    for (size_t i = 0; i < matrices.size(); i++)
     {
         num_col += matrices[i].num_col();
     }
-    cuMatrix result("hstack", num_row, num_col, 0);
+    Matrix<CUDAfloat> result("hstack", num_row, num_col, 0);
 
-    int col_index = 0;
-    for (int i = 0; i < matrices.size(); i++)
+    size_t col_index = 0;
+    for (size_t i = 0; i < matrices.size(); i++)
     {
         if (matrices[i].get_transpose() == 0)
         {
-            int numElem = matrices[i].num_row() * matrices[i].num_col();
-            int threadsPerBlock = 1024;
-            int blocksPerGrid = (numElem + threadsPerBlock - 1) / threadsPerBlock;
-            copyKernel<<<blocksPerGrid, threadsPerBlock>>>(&result.elements.get()[col_index * num_row], matrices[i].elements.get(), numElem);
+            size_t numElem = matrices[i].num_row() * matrices[i].num_col();
+            copyKernel<<<cudaConfig(numElem)>>>((float*) &result.elements.get()[col_index * num_row], (float*) matrices[i].elements.get(), numElem);
         }
         else
         {
             float alpha = 1.0, beta = 0.0;
-            cublasSgeam(matrices[0].handle, CUBLAS_OP_T, CUBLAS_OP_N,
+            CuBLASErrorCheck(
+                cublasSgeam(matrices[0].handle, CUBLAS_OP_T, CUBLAS_OP_N,
                         num_row, matrices[i].num_col(),
-                        &alpha, matrices[i].elements.get(), matrices[i].numrow,
-                        &beta, &result.elements.get()[col_index * num_row], num_row,
-                        &result.elements.get()[col_index * num_row], num_row);
+                        &alpha, (float *)matrices[i].elements.get(), matrices[i].numrow,
+                        &beta, (float *) & result.elements.get()[col_index * num_row], num_row,
+                        (float *) & result.elements.get()[col_index * num_row], num_row)
+            );
         }
         col_index += matrices[i].num_col();
     }
@@ -315,14 +393,14 @@ cuMatrix hstack(vector<cuMatrix> &matrices)
     return result;
 }
 
-cuMatrix hstack(vector<cuMatrix> &&matrices){
+Matrix<CUDAfloat> hstack(vector<Matrix<CUDAfloat>> &&matrices){
     return hstack(matrices);
 }
 
-const cuMatrix vstack(vector<cuMatrix>& matrices)
+const Matrix<CUDAfloat> vstack(vector<Matrix<CUDAfloat>>& matrices)
 {
 
-   for (int i = 0; i < matrices.size(); i++)
+   for (size_t i = 0; i < matrices.size(); i++)
    {
        matrices[i].transpose = !matrices[i].transpose;
    }
@@ -330,120 +408,112 @@ const cuMatrix vstack(vector<cuMatrix>& matrices)
    return hstack(matrices).T();
 }
 
-const cuMatrix vstack(vector<cuMatrix>&& matrices)
+const Matrix<CUDAfloat> vstack(vector<Matrix<CUDAfloat>>&& matrices)
 {
     return vstack(matrices);
 }
 
-cuMatrix hadmd(const cuMatrix &M1, const cuMatrix &M2)
+Matrix<CUDAfloat> hadmd(const Matrix<CUDAfloat> &M1, const Matrix<CUDAfloat> &M2)
 {
     static Profiler p("GPU hadmd"); p.start();
-    cuMatrix result("hadmd", M1.numrow, M1.numcol, M1.transpose);
+    Matrix<CUDAfloat> result("hadmd", M1.numrow, M1.numcol, M1.transpose);
 
     //if M2 has a different transposition flag, transpose M2 and store it in result. 
     cublasOperation_t transM2 = (M2.transpose != M1.transpose) ? CUBLAS_OP_T : CUBLAS_OP_N;
     float s1 = 1.0, s2 = 0.0;
-    GPU_status stat = cublasSgeam(result.handle, transM2, CUBLAS_OP_N, M1.numrow, M1.numcol,
-                                  &s1, M2.elements.get(), M2.numrow,
-                                  &s2, result.elements.get(), result.numrow, result.elements.get(), result.numrow);
-    if (stat != CUBLAS_STATUS_SUCCESS)
-    {
-        LOG_ERROR("Error in Transpose");
-        ERROR_OUT;
-    }
 
-    int numElem = M1.numrow * M1.numcol;
-    int threadsPerBlock = 1024;
-    int blocksPerGrid = (numElem + threadsPerBlock - 1) / threadsPerBlock;
-    productKernel<<<blocksPerGrid, threadsPerBlock>>>(result.elements.get(), M1.elements.get(), numElem);
+    CuBLASErrorCheck( 
+        cublasSgeam(result.handle, transM2, CUBLAS_OP_N, M1.numrow, M1.numcol,
+                    &s1, (float *) M2.elements.get(), M2.numrow,
+                    &s2, (float*) result.elements.get(), result.numrow, (float *)result.elements.get(), result.numrow)
+    );
+
+    size_t numElem = M1.numrow * M1.numcol;
+    productKernel<<<cudaConfig(numElem)>>>((float*) result.elements.get(), (float*) M1.elements.get(), numElem);
     p.end();
     return result;
 }
-// //rvalue hadmd
-// cuMatrix hadmd(const cuMatrix &M1, cuMatrix &&M2)
-// {
-//     cout << "rvalue hadmd" << endl;
-//     //if M2 has a different transposition flag, transpose M2 and store it in result. 
-//     cublasOperation_t transM2 = (M2.transpose != M1.transpose) ? CUBLAS_OP_T : CUBLAS_OP_N;
-//     float s1 = 1.0, s2 = 0.0;
-//     GPU_status stat = cublasSgeam(M1.handle, transM2, CUBLAS_OP_N, M1.numrow, M1.numcol,
-//                                   &s1, M2.elements.get(), M2.numrow,
-//                                   &s2, M2.elements.get(), M2.numrow, M2.elements.get(), M2.numrow);
-//     if (stat != CUBLAS_STATUS_SUCCESS)
-//     {
-//         printf("tranpose failed");
-//     }
 
-//     int numElem = M1.numrow * M1.numcol;
-//     int threadsPerBlock = 1024;
-//     int blocksPerGrid = (numElem + threadsPerBlock - 1) / threadsPerBlock;
-//     productKernel<<<blocksPerGrid, threadsPerBlock>>>(M2.elements.get(), M1.elements.get(), numElem);
-//     return std::move(M2);
-// }
-// //rvalue hadmd
-// cuMatrix hadmd(cuMatrix &&M1, const cuMatrix &M2)
-// {
-//     cout << "rvalue hadmd" << endl;
-//     //if M2 has a different transposition flag, transpose M1 and store it in result. 
-//     cublasOperation_t transM1 = (M2.transpose != M1.transpose) ? CUBLAS_OP_T : CUBLAS_OP_N;
-//     float s1 = 1.0, s2 = 0.0;
-//     GPU_status stat = cublasSgeam(M2.handle, transM1, CUBLAS_OP_N, M2.numrow, M2.numcol,
-//                                   &s1, M1.elements.get(), M1.numrow,
-//                                   &s2, M1.elements.get(), M1.numrow, M1.elements.get(), M1.numrow);
-//     if (stat != CUBLAS_STATUS_SUCCESS)
-//     {
-//         printf("tranpose failed");
-//     }
-
-//     int numElem = M1.numrow * M1.numcol;
-//     int threadsPerBlock = 1024;
-//     int blocksPerGrid = (numElem + threadsPerBlock - 1) / threadsPerBlock;
-//     productKernel<<<blocksPerGrid, threadsPerBlock>>>(M1.elements.get(), M2.elements.get(), numElem);
-//     return std::move(M1);
+// Matrix<GPUfloat> hadmd(const Matrix<GPUfloat>& M1, Matrix<GPUfloat>&& M2) {
+//     return hadmd(M1, M2);
 // }
 
-cuMatrix operator/(const float &l, const cuMatrix &rM)
+// Matrix<GPUfloat> hadmd(Matrix<GPUfloat>&& M1, const Matrix<GPUfloat> & M2) {
+//     return hadmd(M1, M2);
+// }
+
+//rvalue hadmd
+Matrix<CUDAfloat> hadmd(const Matrix<CUDAfloat> &M1, Matrix<CUDAfloat> &&M2)
 {
-    cuMatrix result("elem_div", rM.numrow, rM.numcol, rM.transpose);
+    // cout << "rvalue hadmd" << endl;
+    //if M2 has a different transposition flag, transpose M2 and store it in result. 
+    if (M2.transpose == M1.transpose){ 
+        size_t numElem = M1.numrow * M1.numcol;
+        productKernel<<<cudaConfig(numElem)>>>((float*) M2.elements.get(), (float*) M1.elements.get(), numElem);
+        return std::move(M2);
+    }
+    else{
+        return hadmd(M1, M2);
+    }
+}
+//rvalue hadmd
+Matrix<CUDAfloat> hadmd(Matrix<CUDAfloat> &&M1, const Matrix<CUDAfloat> &M2)
+{
+    // cout << "rvalue hadmd" << endl;
+    //if M2 has a different transposition flag, transpose M1 and store it in result. 
+    if (M2.transpose == M1.transpose){ 
+        size_t numElem = M1.numrow * M1.numcol;
+        productKernel<<<cudaConfig(numElem)>>>((float *)M1.elements.get(), (float*)M2.elements.get(), numElem);
+        return std::move(M1);
+    }
+    else{
+        return hadmd(M1, M2);
+    }
+}
 
-    int numElem = rM.numrow * rM.numcol;
-    int threadsPerBlock = 1024;
-    int blocksPerGrid = (numElem + threadsPerBlock - 1) / threadsPerBlock;
-    divKernel<<<blocksPerGrid, threadsPerBlock>>>(result.elements.get(), l, rM.elements.get(), numElem);
+Matrix<CUDAfloat> hadmd(Matrix<CUDAfloat>&& M1, Matrix<CUDAfloat>&& M2) {
+    return hadmd(M1, M2);
+}
+
+Matrix<CUDAfloat> operator/(double l, const Matrix<CUDAfloat> &rM)
+{
+    Matrix<CUDAfloat> result("elem_div", rM.numrow, rM.numcol, rM.transpose);
+
+    size_t numElem = rM.numrow * rM.numcol;
+    divKernel<<<cudaConfig(numElem)>>>((float*) result.elements.get(), (float)l, (float*) rM.elements.get(), numElem);
 
     return result;
 }
 
-cuMatrix operator/(const float& l, cuMatrix&& rM)
+Matrix<CUDAfloat> operator/(double l, Matrix<CUDAfloat>&& rM)
 {
     LOG_DEBUG("rval l/rM called!");
 
-    int numElem = rM.numrow * rM.numcol;
-    int threadsPerBlock = 1024;
-    int blocksPerGrid = (numElem + threadsPerBlock - 1) / threadsPerBlock;
-    divKernel << <blocksPerGrid, threadsPerBlock >> > (rM.elements.get(), l, rM.elements.get(), numElem);
+    size_t numElem = rM.numrow * rM.numcol;
+    divKernel <<<cudaConfig(numElem)>>> ((float*) rM.elements.get(), (float)l, (float*) rM.elements.get(), numElem);
 
     return std::move(rM);
 }
 
-cuMatrix operator/(const cuMatrix &M1, const cuMatrix &M2)
+Matrix<CUDAfloat> operator/(const Matrix<CUDAfloat> &M1, const Matrix<CUDAfloat> &M2)
 {
-    cuMatrix result("elem_div", M2.numrow, M2.numcol, M2.transpose);
+    Matrix<CUDAfloat> result("elem_div", M2.numrow, M2.numcol, M2.transpose);
 
     cublasOperation_t transM1 = (M2.transpose != M1.transpose) ? CUBLAS_OP_T : CUBLAS_OP_N;
     float s1 = 1.0, s2 = 1.0;
-    GPU_status stat = cublasSgeam(result.handle, transM1, CUBLAS_OP_N, M2.numrow, M2.numcol,
-                                  &s1, M1.elements.get(), M1.numrow,
-                                  &s2, result.elements.get(), result.numrow, result.elements.get(), result.numrow);
-    if (stat != CUBLAS_STATUS_SUCCESS)
-    {
-        LOG_ERROR("/ failed");
-        ERROR_OUT;
-    }
-
-    int numElem = M1.numrow * M1.numcol;
-    int threadsPerBlock = 1024;
-    int blocksPerGrid = (numElem + threadsPerBlock - 1) / threadsPerBlock;
-    divKernel<<<blocksPerGrid, threadsPerBlock>>>(result.elements.get(), M2.elements.get(), numElem);
+    
+    CuBLASErrorCheck(
+        cublasSgeam(result.handle, transM1, CUBLAS_OP_N, M2.numrow, M2.numcol,
+                                  &s1, (float*) M1.elements.get(), M1.numrow,
+                                  &s2, (float*) result.elements.get(), result.numrow, (float*) result.elements.get(), result.numrow)
+    );
+    
+    size_t numElem = M1.numrow * M1.numcol;
+    divKernel<<<cudaConfig(numElem)>>>((float*) result.elements.get(), (float*) M2.elements.get(), numElem);
     return result;
+}
+
+Matrix<CUDAfloat> operator/(Matrix<CUDAfloat> &&M1, Matrix<CUDAfloat> &&M2)
+{
+    return M1 / M2;
 }

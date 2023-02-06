@@ -26,82 +26,146 @@
 #ifndef CORE_HPP
 #define CORE_HPP
 
-#include <stdlib.h>
-#include <memory>
-#include <string>
-#include <iostream>
-#include <random>
-#include <string.h>
-#include <list>
-#include "helper.h"
+#include "helper.hpp"
+
+template <class D> 
+D *mem_alloc(size_t size){
+    return new D[size];
+}
 
 template <class D>
-struct mem_space{
+void mem_free(D *ptr){
+    delete [] ptr;
+}
+
+template <class D>
+struct MemorySpace{
     D* ptr;
-    int size;
+    size_t size;
+    bool operator==(const MemorySpace<D>& other) const{
+        //compares the memory address only. 
+        return ptr == other.ptr;
+    }
+    bool operator!=(const MemorySpace<D>& other) const{
+        return !(*this == other);
+    }
 };
 
 template <class D>
-struct MemoryDeleter;
+class MemoryDeleter{
+    static std::list<MemorySpace<D>> alive_mems;
+    static std::list<MemorySpace<D>> dead_mems;
 
-template <class D>
-class Matrix
-{
-protected:
-    int numcol;
-    int numrow;
-    bool transpose;
-    std::string name;    
-
-    std::shared_ptr<D[]> elements;
-    static std::list<mem_space<D>> alive_mems;
-    static std::list<mem_space<D>> dead_mems;
-
-    static D* allocate(int size){
-        //static Profiler p(std::string("allocator ") + typeid(D).name()); p.start();
+public:
+    static D* allocate(size_t size){
+        static Profiler p(std::string("allocator ") + datatype(D)); p.start();
         // search for space in the freed space.
+
+         //auto it = std::find_if(dead_mems.begin(),dead_mems.end(),
+         //                      [&](auto mem){return mem.size == size;});
+
+         //if(it != dead_mems.end()){
+         //    LOG_DEBUG("Found {} space in dead memory: {}, address: {}", 
+         //               datatype(D), size * sizeof(D), fmt::ptr(it->ptr));
+         //    alive_mems.push_back({it->ptr, it->size});
+         //    dead_mems.erase(it);
+         //    p.end();
+         //    return it->ptr;
+         //}
+
         for(auto it = dead_mems.begin(); it != dead_mems.end(); it++){
             if(it->size == size){
-                LOG_DEBUG("Found CPU space in dead memory: {}, address: {}", size, fmt::ptr(it->ptr));
+                LOG_DEBUG("Found {} space in dead memory: {}, address: {}", datatype(D), size * sizeof(D), fmt::ptr(it->ptr));
                 D* ptr = it->ptr;
-                mem_space<D> mem; mem.ptr = it->ptr;  mem.size = it->size;
-                alive_mems.push_back(mem);
+                alive_mems.push_back({it->ptr, it->size});
                 dead_mems.erase(it);
                 //p.end();
                 return ptr;
             }
         }
+        
         // no space available, allocate new space
-        D* ptr = new D[size];
-        LOG_DEBUG("No CPU space available, allocate new space: {}, address: {}", size, fmt::ptr(ptr));
-        mem_space<D> space = {ptr, size};
-        alive_mems.push_back(space);
-        //p.end();
+        D* ptr = NULL;
+        try{
+            ptr = mem_alloc<D>(size);
+        }catch(std::bad_alloc& e){
+            LOG_ERROR("Failed to allocate memory: {}", e.what());
+            ERROR_OUT;
+        }
+        LOG_DEBUG("No {} space available, allocate new space: {}, address: {}", 
+                   datatype(D), size * sizeof(D), fmt::ptr(ptr));
+        alive_mems.push_back({ptr, size});
+        p.end();
         return ptr;
     }
 
     static void free(D* ptr){
-        //static Profiler p(std::string("deleter ") + typeid(D).name()); 
-        int size = -1; 
-        //p.start();
+        static Profiler p(std::string("deleter ") + datatype(D)); 
+        size_t size = 0; 
+        p.start();
+
+         /*auto it = std::find_if(alive_mems.begin(), alive_mems.end(),
+                               [&](auto mem){return mem.ptr == ptr;});
+        
+         if(it != alive_mems.end()){
+             size = it->size;
+             alive_mems.erase(it);
+         }else{
+             LOG_ERROR("Failed to find address {} in alive memory type: {}, size: {}", 
+                        fmt::ptr(ptr), datatype(D), size * sizeof(D));
+             ERROR_OUT;
+         }*/
+
         for (auto it = alive_mems.begin(); it != alive_mems.end(); it++) {
             if (it->ptr == ptr) {
                 size = it->size;
-                break;
-            }
-        }
-        mem_space<D> mem = {ptr, size};
-        dead_mems.push_back(mem);
-        for(auto it = alive_mems.begin(); it != alive_mems.end(); it++){
-            if(it->ptr == ptr){
                 alive_mems.erase(it);
                 break;
             }
         }
-        //p.end();
+        
+        dead_mems.push_back({ptr, size});
+        p.end();
     }
 
-    Matrix(const char *name, int numrow, int numcol, int trans, std::shared_ptr<D[]> elements){
+    ~MemoryDeleter(){
+        size_t size = 0; 
+        //for each loop
+        for(MemorySpace<D> mem_i:alive_mems){
+            mem_free(mem_i.ptr);
+            size += mem_i.size;
+        }
+
+        //for each loop
+        for(MemorySpace<D> mem_i:dead_mems){
+            mem_free(mem_i.ptr);
+            size += mem_i.size;
+        }
+
+        alive_mems.clear();
+        dead_mems.clear();
+        LOG_INFO("Total {} memory released: {:.2f} MB.", 
+                  datatype(D), size*sizeof(D)/1024.0/1024.0);
+    }
+};
+
+template <class D>
+std::list<MemorySpace<D>> MemoryDeleter<D>::alive_mems;
+template <class D>
+std::list<MemorySpace<D>> MemoryDeleter<D>::dead_mems;
+
+template <class D>
+class Matrix
+{
+protected:
+    size_t numcol;
+    size_t numrow;
+    bool transpose;
+    std::string name;    
+
+    std::shared_ptr<D[]> elements;
+
+    Matrix(const char *name, size_t numrow, size_t numcol, int trans, std::shared_ptr<D[]> elements){
         this->name = name; 
         this->numrow = numrow;
         this->numcol = numcol;
@@ -109,73 +173,80 @@ protected:
         this->elements = elements;
     }
 
-    inline int idx(int i, int j) const{
+    inline size_t idx(size_t i, size_t j) const{
         return transpose ? i *numrow + j : j * numrow + i;
     }
-    Matrix(const char *name, int numrow, int numcol, int trans);
 
+    Matrix(const char *name, size_t numrow, size_t numcol, int trans);
+
+public:
     //random number generator
     static std::mt19937 randomnumber_gen;
-public:
+
     // constructors 
     Matrix() : numcol(0), numrow(0), elements(nullptr), transpose(0), name("uninit") {}
-    Matrix(const char *name, int numrow, int numcol): Matrix(name, numrow, numcol, 0) {}
+    Matrix(const char *name, size_t numrow, size_t numcol): Matrix(name, numrow, numcol, 0) {}
     Matrix(const char *name, std::vector<std::vector<double>> elems);
 
     Matrix(const Matrix &M);
     Matrix(Matrix &&M) noexcept;
+
     Matrix<D> &operator=(const Matrix<D> &M);
     Matrix<D> &operator=(Matrix<D> &&M) noexcept;
 
     // access matrix info
-    inline D elem(int i, int j) const { return elements[idx(i, j)]; }
-    inline D &elem(int i, int j) { return elements[idx(i, j)]; }
-    inline int num_col() const { return transpose ? numrow : numcol; }
-    inline int num_row() const { return transpose ? numcol : numrow; }
+    inline D elem(size_t i, size_t j) const { return elements[idx(i, j)]; }
+    inline D &elem(size_t i, size_t j) { return elements[idx(i, j)]; }
+    inline size_t num_col() const { return transpose ? numrow : numcol; }
+    inline size_t num_row() const { return transpose ? numcol : numrow; }
     inline int get_transpose() const { return transpose; }
     std::string get_name() const { return name; }
+    const D* data() const { return elements.get(); }
 
     // Matrix Fillers
-    virtual void zeros(){
+    void zeros(){
         memset(elements.get(), 0, sizeof(D) * numrow * numcol);
     }
-    virtual void ones();
+    void ones();
     void rand(){
-        for (int i = 0; i < num_row() * num_col(); i++)
+        for (size_t i = 0; i < num_row() * num_col(); i++)
             elements[i] = (D)rand_number();
     }
-    void randn(){ randn(0.0, 1.0);}
-    virtual void randn(double mean, double std);
 
     // Matrix Operations / performance notes
     Matrix<D> dot(const Matrix<D> &B) const; //using cblas_dgemm
     Matrix<D> add(const Matrix<D> &B, D s1, D s2) const; // using double for loop
-    Matrix<D> add(const D &b, D s1) const; //using single for loop
-    Matrix<D> scale(const D &s1) const { return add(0, s1); }
+    void add(const Matrix<D>& B, D s1, D s2);
+    Matrix<D> add(D b, D s1) const; //using single for loop
+    void add(D b, D s1);
+    Matrix<D> scale(D s1) const { return add(0, s1); }
+    void scale(D s1) { add(0, s1); }
     Matrix<D> inv(); // using LU decomposition 
     D norm() const; //using single for loop
     const Matrix<D> T() const;
     
     //Matrix slicers
-    virtual Matrix<D> columns(int start, int end) const;
-    virtual Matrix<D> columns(idxlist cols) const;
-    virtual Matrix<D> rows(int start, int end) const;
-    virtual Matrix<D> rows(idxlist rows) const;
-    virtual Matrix<D> slice(int rstart, int rend, int cstart, int cend) const;
-    virtual Matrix<D> slice(const idxlist &rowidx, const idxlist &colidx) const;
+    Matrix<D> columns(size_t start, size_t end) const;
+    void columns(size_t start, size_t end, const Matrix<D>& M);
+    Matrix<D> columns(idxlist cols) const;
+    Matrix<D> rows(size_t start, size_t end) const;
+    void rows(size_t start, size_t end, const Matrix<D>& M);
+    Matrix<D> rows(idxlist rows) const;
+    Matrix<D> slice(size_t rstart, size_t rend, size_t cstart, size_t cend) const;
+    void slice(size_t rstart, size_t rend, size_t cstart, size_t cend, const Matrix<D>& M);
+    Matrix<D> slice(const idxlist &rowidx, const idxlist &colidx) const;
 
-    //Matrix IOs
-    void read(std::string filename);
-    void write(std::string filename);
-
-    static Matrix<D> randn(int m, int n);
-    static Matrix<D> ones(int m, int n);
-    static Matrix<D> zeros(int m, int n);
+    static Matrix<D> randn(size_t m, size_t n);
+    static Matrix<D> rand(size_t m, size_t n);
+    static Matrix<D> ones(size_t m, size_t n);
+    static Matrix<D> zeros(size_t m, size_t n);
     //Matrix's friends
     template <class Data>
     friend Matrix<Data> sum(const Matrix<Data> &M, int dim);
     template <class Data>
     friend Matrix<Data> exp(const Matrix<Data> &M);
+    template <class Data>
+    friend Matrix<Data> exp(Matrix<Data> &&M);
     template <class Data>
     friend Matrix<Data> log(const Matrix<Data> &M);
     template <class Data>
@@ -203,62 +274,63 @@ public:
     friend Matrix<Data> cos(const Matrix<Data> &M);
     template <class Data>
     friend Matrix<Data> cos(Matrix<Data> && M);
-    
+    template <class Data>
+    friend Matrix<Data> square(const Matrix<Data> &M);
     template <class Data>
     friend Matrix<Data> square(Matrix<Data> &&M);
+    
+    template <class Data, class Function>
+    friend Matrix<Data> elemwise(Function func, Matrix<Data> &&M);
+    template <class Data, class Function>
+    friend Matrix<Data> elemwise(Function func, const Matrix<Data> &M);
+    template<class Data, class Function>
+    friend Matrix<Data> reduce(Function func, const Matrix<Data>& M, int dim, int k);
+    // template <class Data>
+    // friend Matrix<Data> elemwise(float (*func)(float), Matrix<Data> &&M);
+    // template <class Data>
+    // friend Matrix<Data> elemwise(float (*func)(float), const Matrix<Data> &M);
+
     template <class Data>
     friend Matrix<Data> hstack(const std::vector<Matrix<Data>> &matrices);
     template <class Data>
     friend Matrix<Data> vstack(const std::vector<Matrix<Data>> &matrices);
     template <class Data>
-    friend Matrix<Data> operator*(const Data &l, Matrix<Data> &&rM);
+    friend Matrix<Data> operator-(const Matrix<Data> &lM, Matrix<Data> &&rM);
     template <class Data>
-    friend Matrix<Data> operator/(const Data &l, const Matrix<Data> &rM);
+    friend Matrix<Data> operator*(double l, Matrix<Data> &&rM);
+    template <class Data>
+    friend Matrix<Data> operator/(double l, const Matrix<Data> &rM);
     template <class Data> 
-    friend Matrix<Data> operator/(const Data &l, Matrix<Data> &&rM);
+    friend Matrix<Data> operator/(double l, Matrix<Data> &&rM);
     template <class Data>
-    friend Matrix<Data> operator/(Matrix<Data>&& lM, const Data& r);
+    friend Matrix<Data> operator/(Matrix<Data>&& lM, double r);
     template <class Data>
     friend Matrix<Data> operator/(const Matrix<Data> &lM, const Matrix<Data> &rM);
     template <class Data> 
     friend Matrix<Data> hadmd(const Matrix<Data> &M1, const Matrix<Data> &M2);
+
+	template <class Data>
+    friend Matrix<Data> read(std::string filename);
+    template <class Data>
+    friend void write(std::string filename, const Matrix<Data> &M);
+        
     friend class cuMatrix;
+    friend class Matrix<CUDAfloat>; 
     friend struct MemoryDeleter<D>;
 };
 
 template <class D>
-std::list<mem_space<D>> Matrix<D>::alive_mems;
-template <class D>
-std::list<mem_space<D>> Matrix<D>::dead_mems;
-template <class D>
 std::mt19937 Matrix<D>::randomnumber_gen(1);
 
 template <class D>
-struct MemoryDeleter{
-    ~MemoryDeleter(){
-        long size = 0; 
-        for(auto it = Matrix<D>::alive_mems.begin(); it != Matrix<D>::alive_mems.end(); it++){
-            delete []it->ptr;
-            size += it->size;
-        }
-        for(auto it = Matrix<D>::dead_mems.begin(); it != Matrix<D>::dead_mems.end(); it++){
-            delete []it->ptr;
-            size += it->size;
-        }
-        LOG_INFO("Total CPU memory released: {:.2f} MB.", size*sizeof(D)/1024.0/1024.0);
-    }
-};
-
-template <class D>
-Matrix<D>::Matrix(const char *name, int numrow, int numcol, int trans){
+Matrix<D>::Matrix(const char *name, size_t numrow, size_t numcol, int trans){
     this->name = name;
     this->numcol = numcol;
     this->numrow = numrow;
     transpose = trans;
     //TODO: Not nice using reset, should change
-    elements.reset(Matrix<D>::allocate(numrow*numcol), [](auto p) {
-           Matrix<D>::free(p);
-        //    delete []p;
+    elements.reset(MemoryDeleter<D>::allocate(numrow*numcol), [](auto p) {
+           MemoryDeleter<D>::free(p);
         });
 }
 
@@ -270,16 +342,15 @@ Matrix<D>::Matrix(const char *name, std::vector<std::vector<double>> elems){
     transpose = 0;
     
     //TODO: Not nice using reset, should change
-    elements.reset(Matrix<D>::allocate(numrow*numcol), [](auto p) {
-           Matrix<D>::free(p);
-        //    delete []p;
+    elements.reset(MemoryDeleter<D>::allocate(numrow*numcol), [](auto p) {
+           MemoryDeleter<D>::free(p);
         });
 
     // double for loop may have some performance issues, 
     // but should be OK for small matrices. 
     // remember to always loop over columns first. 
-    for (int j = 0; j < numcol; j++){
-        for (int i = 0; i < numrow; i++){
+    for (size_t j = 0; j < numcol; j++){
+        for (size_t i = 0; i < numrow; i++){
             elem(i, j) = elems[i][j];
         }
     }
@@ -287,12 +358,12 @@ Matrix<D>::Matrix(const char *name, std::vector<std::vector<double>> elems){
 
 template <class D>
 Matrix<D>::Matrix(const Matrix<D> &M){
-    LOG_WARN("copy construction called, {}!", M.name);
+    LOG_DEBUG("copy construction called, {}!", M.name);
     numcol = M.numcol;
     numrow = M.numrow;
     transpose = M.transpose;
-    elements.reset(Matrix<D>::allocate(numrow*numcol), [](auto p) {
-        Matrix<D>::free(p);
+    elements.reset(MemoryDeleter<D>::allocate(numrow*numcol), [](auto p) {
+        MemoryDeleter<D>::free(p);
     });
 
     memcpy(elements.get(), M.elements.get(), numrow*numcol*sizeof(D));
@@ -312,13 +383,13 @@ Matrix<D>::Matrix(Matrix<D> &&M) noexcept{
 
 template <class D>
 Matrix<D> &Matrix<D>::operator=(const Matrix<D> &M){
-    LOG_WARN("copy assignment called!");
+    LOG_DEBUG("copy assignment called!");
     if(this == &M) return *this;
     numcol = M.numcol;
     numrow = M.numrow;
     transpose = M.transpose;
-    elements.reset(Matrix<D>::allocate(numrow*numcol), [](auto p) {
-        Matrix<D>::free(p);
+    elements.reset(MemoryDeleter<D>::allocate(numrow*numcol), [](auto p) {
+        MemoryDeleter<D>::free(p);
     });
 
     memcpy(elements.get(), M.elements.get(), numrow*numcol*sizeof(D));
@@ -341,31 +412,20 @@ Matrix<D> &Matrix<D>::operator=(Matrix<D> &&M) noexcept{
 
 template<class D>
 void Matrix<D>::ones(){
-    int numelems = num_row() * num_col();
+    size_t numelems = num_row() * num_col();
 #pragma ivdep
-    for (int i = 0; i < numelems; i++)
+    for (size_t i = 0; i < numelems; i++)
         elements[i] = 1.0;
 }
 
-//non vectorized randn
-template<class D>
-void Matrix<D>::randn(double mean, double std)
-{
-    using namespace std;
-    normal_distribution<> d(mean, std);
-    //cannot be vectorized, due to the implementation of std::random.
-    for (int i = 0; i < num_row() * num_col(); i++)
-        elements[i] = d(randomnumber_gen);
-}
-//vectorized norm
 template<class D>
 D Matrix<D>::norm() const
 {
     D norm = 0;
-    int numelems = num_row() * num_col();
+    size_t numelems = num_row() * num_col();
 #pragma clang loop vectorize(enable)
 #pragma ivdep
-    for (int i = 0; i < numelems; i++)
+    for (size_t i = 0; i < numelems; i++)
         norm += elements[i] * elements[i];
 
     return sqrt(norm);
@@ -380,12 +440,12 @@ const Matrix<D> Matrix<D>::T() const
 }
 
 template<class D>
-Matrix<D> Matrix<D>::slice(int rstart, int rend, int cstart, int cend) const
+Matrix<D> Matrix<D>::slice(size_t rstart, size_t rend, size_t cstart, size_t cend) const
 {
     Matrix<D> M("submatrix", rend - rstart, cend - cstart, 0);
-    for (int j = cstart; j < cend; j++)
+    for (size_t j = cstart; j < cend; j++)
     {
-        for (int i = rstart; i < rend; i++)
+        for (size_t i = rstart; i < rend; i++)
         {
             M.elem(i - rstart, j - cstart) = elem(i, j);
         }
@@ -393,18 +453,31 @@ Matrix<D> Matrix<D>::slice(int rstart, int rend, int cstart, int cend) const
     return M;
 }
 
+template<class D>
+void Matrix<D>::slice(size_t rstart, size_t rend, size_t cstart, size_t cend, const Matrix<D> &M)
+{
+    for (size_t j = cstart; j < cend; j++)
+    {
+        for (size_t i = rstart; i < rend; i++)
+        {
+            elem(i, j) = M.elem(i - rstart, j - cstart);
+        }
+    }
+}
+
 template <class D>
 Matrix<D> Matrix<D>::slice(const idxlist &rowidx, const idxlist &colidx) const
 {
+    //TODO: the size of matrix is int, which may not be enough
     Matrix<D> M("submatrix", rowidx.size(), colidx.size(), 0);
-    int i = 0;
+    size_t i = 0;
     for (auto it = rowidx.begin(); it != rowidx.end(); it++)
     {
-        int r = *it;
-        int j = 0;
+        size_t r = *it;
+        size_t j = 0;
         for (auto it2 = colidx.begin(); it2 != colidx.end(); it2++)
         {
-            int c = *it2;
+            size_t c = *it2;
             M.elem(i, j) = elem(r, c);
             j++;
         }
@@ -419,19 +492,19 @@ Matrix<D> Matrix<D>::dot(const Matrix<D> &B) const
     Matrix<D> C("dot", num_row(), B.num_col(),0);
     C.zeros();
 #ifdef NO_CBLAS
-    int n = C.num_row();
-    int m = C.num_col();
-    int k = num_col();
+    size_t n = C.num_row();
+    size_t m = C.num_col();
+    size_t k = num_col();
 
 #pragma omp simd
 #pragma ivdep
-    for (int i = 0; i < n; i++)
+    for (size_t i = 0; i < n; i++)
     {
 #pragma ivdep
-        for (int j = 0; j < m; j++)
+        for (size_t j = 0; j < m; j++)
         {
 #pragma ivdep
-            for (int l = 0; l < k; l++)
+            for (size_t l = 0; l < k; l++)
             {
                 C.elem(i, j) += elem(i, l) * B.elem(l, j);
             }
@@ -456,7 +529,7 @@ template <class D>
 Matrix<D> Matrix<D>::inv()
 {
     Matrix<D> inv("inv_M", numrow, numcol, 0);
-    for (int i = 0; i < numrow * numcol; i++)
+    for (size_t i = 0; i < numrow * numcol; i++)
     {
         inv.elements[i] = elements[i];
     }
@@ -497,7 +570,7 @@ Matrix<D> Matrix<D>::inv()
     return inv;
 }
 
-// s1*A + s2*B
+// C = s1*A + s2*B
 template <class D>
 Matrix<D> Matrix<D>::add(const Matrix<D> &B, D s1, D s2) const
 {
@@ -511,64 +584,113 @@ Matrix<D> Matrix<D>::add(const Matrix<D> &B, D s1, D s2) const
     omatadd(transA, transB, num_row(), num_col(), s1, elements.get(), numrow,
                  s2, B.elements.get(), B.numrow, C.elements.get(), C.numrow);
 #else
-    for (int j = 0; j < num_col(); j++)
+    for (size_t j = 0; j < num_col(); j++)
     {
-        for (int i = 0; i < num_row(); i++)
+#pragma clang loop vectorize(enable)
+        for (size_t i = 0; i < num_row(); i++)
         {
             //NOTE: Perhaps there is better way of doing this
             // considering the cache hit rate. 
-            C.elements[idx(i,j)] = s1 * elements[idx(i,j)] + s2 * B.elements[idx(i,j)];
+            //NOTE: there was a mistake here
+            C.elem(i,j) = s1 * elem(i,j) + s2 * B.elem(i,j);
         }
     }
 #endif
     return C;
 }
-//s1*A + b
+
+// A = s1*A + s2*B
 template <class D>
-Matrix<D> Matrix<D>::add(const D &b, D s1) const
+void Matrix<D>::add(const Matrix<D>& B, D s1, D s2)
 {
+    for (size_t j = 0; j < num_col(); j++)
+    {
+#pragma clang loop vectorize(enable)
+        for (size_t i = 0; i < num_row(); i++)
+        {
+            //NOTE: Perhaps there is better way of doing this
+            // considering the cache hit rate. 
+            //NOTE: there was a mistake here
+            elem(i, j) = s1 * elem(i, j) + s2 * B.elem(i, j);
+        }
+    }
+
+}
+
+//C = s1*A + b
+template <class D>
+Matrix<D> Matrix<D>::add(D b, D s1) const
+{
+#ifdef INTEL_MKL
+    Matrix<D> C("add", num_row(), num_col(), 0);
+    C.zeros();
+    auto e = Matrix<D>::ones(num_row(), num_col());
+    char transA = transpose ? 'T' : 'N';
+    char transB = 'N';
+
+    omatadd(transA, transB, num_row(), num_col(), s1, elements.get(), numrow,
+        b, e.elements.get(), e.numrow, C.elements.get(), C.numrow);
+#else
+
     Matrix<D> C("add", numrow, numcol, transpose);
-    int numelems = num_row() * num_col();
+    size_t numelems = num_row() * num_col();
 #pragma ivdep
-    for (int i = 0; i < numelems; i++)
+    for (size_t i = 0; i < numelems; i++)
     {
         C.elements[i] = s1 * elements[i] + b;
     }
+#endif
     return C;
 }
 
+//A = s1*A + b
 template <class D>
-/*
-    Read a matrix from file.
-    filename: the file that contains the matrix.
-    */
-void Matrix<D>::read(std::string filename)
+void Matrix<D>::add(D b, D s1)
 {
-    FILE *f = fopen(filename.c_str(), "rb");
-    // read int variables to the file.
-    numrow = getw(f);
-    numcol = getw(f);
-    transpose = getw(f);
-
-    fread(elements.get(), sizeof(D), numcol * numrow, f);
-
-    fclose(f);
+    size_t numelems = num_row() * num_col();
+#pragma ivdep
+    for (size_t i = 0; i < numelems; i++)
+    {
+        elements[i] = s1 * elements[i] + b;
+    }
 }
+
+/*
+* Read Matrix from a File
+* 
+*/
+
+template <class D>
+Matrix<D> read(std::string filename)
+{
+    FILE* f = fopen(filename.c_str(), "rb");
+    // read int variables to the file.
+    size_t numrow = getw(f);
+    size_t numcol = getw(f);
+    size_t transpose = getw(f);
+    
+	Matrix<D> A(filename.c_str(), numrow, numcol, transpose);
+    int bytesread = fread(A.elements.get(), sizeof(D), numcol * numrow, f);
+	fclose(f);
+    
+	return A;
+}
+
 template <class D>
 /*
     Write matrix M to file
     M: the matrix to be written
     filename: name of the file to be created.
     */
-void Matrix<D>::write(std::string filename)
+void write(std::string filename, const Matrix<D> &M)
 {
     FILE *f = fopen(filename.c_str(), "wb");
     // write int variables to the file.
-    putw(numrow, f);
-    putw(numcol, f);
-    putw(transpose, f);
 
-    fwrite(elements.get(), sizeof(D), numcol * numrow, f);
+	putw(M.numrow, f);
+    putw(M.numcol, f);
+    putw(M.transpose, f);
+	fwrite(M.elements.get(), sizeof(D), M.numcol * M.numrow, f);
 
     fclose(f);
 }
