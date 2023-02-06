@@ -1,0 +1,55 @@
+cmake_minimum_required(VERSION 3.16)
+# configure the project and languages used
+set(CMAKE_CUDA_ARCHITECTURES 61)
+set(CMAKE_CXX_STANDARD 20)
+set(CMAKE_CUDA_COMPILER "/usr/local/cuda-12.0/bin/nvcc")
+set(CUDA_TOOLKIT_ROOT_DIR "/usr/local/cuda-12.0")
+project(animated_octo_sniffle LANGUAGES CXX CUDA)
+
+set(spdlog_ROOT "external/spdlog/")
+set(fmt_ROOT "external/fmt/")
+
+find_package(OpenBLAS REQUIRED)
+find_package(LAPACK REQUIRED)
+find_package(CUDA REQUIRED)
+find_package(Boost REQUIRED)
+find_package(spdlog REQUIRED)
+find_package(fmt REQUIRED)
+
+# compiling and linking requirements
+
+add_executable(test cpp/launcher.cu tests/unittest.cu cpp/cumatrix.cu cpp/cukernels.cu)
+target_precompile_headers(test PRIVATE cpp/juzhen.hpp)
+target_include_directories(test PUBLIC ${OpenBLAS_INCLUDE_DIRS})
+target_include_directories(test PUBLIC ${CUDA_INCLUDE_DIRS})
+target_link_libraries(test spdlog::spdlog ${LAPACK_LIBRARIES} ${OpenBLAS_LIBRARIES} ${CUDA_LIBRARIES} ${CUDA_curand_LIBRARY} ${CUDA_CUBLAS_LIBRARIES})
+target_compile_options(test PRIVATE $<$<COMPILE_LANGUAGE:CUDA>:--extended-lambda -ccbin=/usr/bin/clang++-14 -std=c++20>) 
+
+add_executable(helloworld_nn cpp/launcher.cu examples/helloworld_nn.cu cpp/cumatrix.cu cpp/cukernels.cu)
+target_precompile_headers(helloworld_nn PRIVATE cpp/juzhen.hpp)
+target_include_directories(helloworld_nn PUBLIC ${OpenBLAS_INCLUDE_DIRS})
+target_include_directories(helloworld_nn PUBLIC ${CUDA_INCLUDE_DIRS})
+target_link_libraries(helloworld_nn spdlog::spdlog ${LAPACK_LIBRARIES} ${OpenBLAS_LIBRARIES} ${CUDA_LIBRARIES} ${CUDA_curand_LIBRARY} ${CUDA_CUBLAS_LIBRARIES})
+target_compile_options(helloworld_nn PRIVATE $<$<COMPILE_LANGUAGE:CUDA>:--extended-lambda -ccbin=/usr/bin/clang++-14 -std=c++20>) 
+
+add_executable(demo_classification cpp/launcher.cu examples/demo_classification.cu cpp/cumatrix.cu cpp/cukernels.cu)
+target_precompile_headers(demo_classification PRIVATE cpp/juzhen.hpp)
+target_include_directories(demo_classification PUBLIC ${OpenBLAS_INCLUDE_DIRS})
+target_include_directories(demo_classification PUBLIC ${CUDA_INCLUDE_DIRS})
+target_link_libraries(demo_classification spdlog::spdlog ${LAPACK_LIBRARIES} ${OpenBLAS_LIBRARIES} ${CUDA_LIBRARIES} ${CUDA_curand_LIBRARY} ${CUDA_CUBLAS_LIBRARIES})
+target_compile_options(demo_classification PRIVATE $<$<COMPILE_LANGUAGE:CUDA>:--extended-lambda -ccbin=/usr/bin/clang++-14 -std=c++20>) 
+
+add_executable(demo cpp/launcher.cu examples/demo.cu cpp/cumatrix.cu cpp/cukernels.cu)
+target_precompile_headers(demo PRIVATE cpp/juzhen.hpp)
+target_include_directories(demo PUBLIC ${OpenBLAS_INCLUDE_DIRS})
+target_include_directories(demo PUBLIC ${CUDA_INCLUDE_DIRS})
+target_link_libraries(demo spdlog::spdlog ${LAPACK_LIBRARIES} ${OpenBLAS_LIBRARIES} ${CUDA_LIBRARIES} ${CUDA_curand_LIBRARY} ${CUDA_CUBLAS_LIBRARIES})
+target_compile_options(demo PRIVATE $<$<COMPILE_LANGUAGE:CUDA>:--extended-lambda -ccbin=/usr/bin/clang++-14 -std=c++20>) 
+
+add_executable(mnist cpp/launcher.cu examples/demo_mnist.cu cpp/cumatrix.cu cpp/cukernels.cu)
+target_precompile_headers(mnist PRIVATE cpp/juzhen.hpp)
+target_include_directories(mnist PUBLIC ${OpenBLAS_INCLUDE_DIRS})
+target_include_directories(mnist PUBLIC ${CUDA_INCLUDE_DIRS})
+target_link_libraries(mnist spdlog::spdlog ${LAPACK_LIBRARIES} ${OpenBLAS_LIBRARIES} ${CUDA_LIBRARIES} ${CUDA_curand_LIBRARY} ${CUDA_CUBLAS_LIBRARIES})
+target_compile_options(mnist PRIVATE $<$<COMPILE_LANGUAGE:CUDA>:--extended-lambda -ccbin=/usr/bin/clang++-14 -std=c++20>) 
+# target_compile_options(animated_octo_sniffle PRIVATE -D CPU_ONLY) 
