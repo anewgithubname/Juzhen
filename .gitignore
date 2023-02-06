@@ -60,3 +60,4 @@ vsproj/*
 .vs/*
 *.DS_store
 build/*
+*.matrix
