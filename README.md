@@ -5,16 +5,17 @@
 
 Juzhen is a set of C++ APIs for matrix operations. It provides a higher level interface for lower-level numerical calculation software like [CBLAS](http://www.netlib.org/blas/) and [CUDA](https://en.wikipedia.org/wiki/CUDA). It supports Neural Net API similar to the ones used in PyTorch or Tensorflow. 
 
+This API is developed under C++20 and CUDA 12.0. 
+
 ## Example
 You can perform matrix operations like this:
 ```c++
+//helloworld.cu in the project folder
 #include <iostream> 
-#include "juzhen.hpp"
+#include "cpp/juzhen.hpp"
 using namespace std;
 
-MemoryDeleter<float> md1; // it will automatically release all allocated memory
-
-int main(){ 
+int compute(){ 
     // declare matrices like you would in MATLAB or Numpy.
     Matrix<float> A = {"A", {{1,2,3},{4,5,6}}};
     cout << A << endl;
@@ -23,30 +24,37 @@ int main(){
 
     cout << log(exp(A*B)+1.0f)/5.0f << endl;
     // no need to release memory by hand. 
+
+    return 0;
 }
 ```
+Then compile: 
+```bash
+clang++ -x c++ -std=c++20 -DCPU_ONLY -DLOGGING_OFF -O3 ./cpp/launcher.cu ./helloworld.cu -o bin/helloworld.out -lopenblas
+```
+
 or on GPU:
 ```c++
+//helloworld.cu in the project folder
 #include <iostream> 
-#include "juzhen.hpp"
+#include "cpp/juzhen.hpp"
 using namespace std;
- 
-MemoryDeleter<float> md2; 
-GPUMemoryDeleter md1; // GPU memory needs its own deleter. 
 
-int main(){
-    // cuBLAS initialization ...
-
-    // suppose "handle" is cuBLAS handle.
-    cuMatrix A(Matrix<float>("A",{{1,2,3},{4,5,6}}));
+int compute(){
+    //matrices on GPU
+    Matrix<CUDAfloat> A(Matrix<float>("A",{{1,2,3},{4,5,6}}));
     cout << A << endl;
-    cuMatrix B(Matrix<float>("B",{{.1,.2},{.3,.4},{.5,.6}}));
+    Matrix<CUDAfloat> B(Matrix<float>("B",{{.1,.2},{.3,.4},{.5,.6}}));
     cout << B << endl << endl;
 
+    //only when you try to print, matrices are downloaded from the GPU.
     cout << (log(exp(A*B)+1.0f)/5.0f) << endl;
-    
-    //free cuBLAS ...
+    return 0;
 }
+```
+Then compile: 
+```bash
+nvcc -std=c++20 -DLOGGING_OFF -O3 ./cpp/launcher.cu ./cpp/cumatrix.cu ./cpp/cukernels.cu ./helloworld.cu -o bin/helloworld.out -lcublas -lcurand
 ```
 They both prints out:
 ```
@@ -76,16 +84,17 @@ ans =
 >> 
 ```
 
-Juzhen (CPU API) also supports matrix slicing: 
+Juzhen also supports matrix slicing: 
 ```c++
 #include <iostream> 
 using namespace std;
-
 #include "cpp/juzhen.hpp"
 
-int main() {MemoryDeleter<float> md;
+int compute() {
     Matrix<float> A = { "A", {{1,2,3},{4,5,6}} };
     cout << A.columns(0, 2).inv() << endl;
+    
+    return 0;
 }
 ```
 The code above is the same as the following MATLAB code: 
@@ -100,48 +109,73 @@ ans =
 ```
 You can also use a higher level Neural Net API to write Neural Net applications: 
 ```c++
-// problem set up
-const int n = 5000, batchsize = 50, numbatches = n / batchsize;
+//helloworldnn.cu
+#include "cpp/layer.hpp"
 
-// regression dataset generation
-auto X = randn(10, n), beta = randn(10, 1);
-auto Y = beta.T() * X + randn(1, n);
+using namespace std;
+using namespace Juzhen;
 
-auto XT = randn(10, n);
-auto YT = beta.T() * XT + randn(1, n);
-
-// define layers
-Layer<MatrixF> L0(16, 10, batchsize), L1(4, 16, batchsize);
-LinearLayer<MatrixF> L2(1, 4, batchsize);
-// least sqaure loss
-LossLayer<MatrixF> L3t(n, YT);
-
-// nns are linked lists containing layers
-list<Layer<MatrixF>*> trainnn({ &L2, &L1, &L0 }), testnn({ &L3t, &L2, &L1, &L0});
-
-// sgd
-int iter = 0;
-while (iter < 10000) {
-    int batch_id = (iter % numbatches);
-
-    // obtaining batches
-    auto X_i = X.columns(batchsize * batch_id, batchsize * (batch_id + 1));
-    auto Y_i = Y.columns(batchsize * batch_id, batchsize * (batch_id + 1));
-
-    // forward-backward pass
-    forward(trainnn, X_i);
-    LossLayer<MatrixF> L3(batchsize, Y_i);
-    trainnn.push_front(&L3);
-    backprop(trainnn, X_i);
-    trainnn.pop_front();
-
-    // print progress
-    if (iter % 1000 == 0) {
-        cout << "testing loss: " << Juzhen::forward(testnn, XT).elem(0, 0) << endl;
-    }
-
-    iter++;
+#define FLOAT float
+inline Matrix<float> randn(int m, int n)
+{
+    return Matrix<float>::randn(m, n);
 }
+inline Matrix<float> ones(int m, int n) { return Matrix<float>::ones(m, n); }
+#define MatrixI Matrix<int>
+
+int compute()
+{
+
+    // problem set up
+    const int n = 5000, batchsize = 50, numbatches = n / batchsize;
+
+    // regression dataset generation
+    auto X = randn(10, n), beta = randn(10, 1);
+    auto Y = beta.T() * X + randn(1, n);
+
+    auto XT = randn(10, n);
+    auto YT = beta.T() * XT + randn(1, n);
+
+    // define layers
+    Layer<float> L0(16, 10, batchsize), L1(4, 16, batchsize);
+    LinearLayer<float> L2(1, 4, batchsize);
+    // least sqaure loss
+    LossLayer<float> L3t(n, YT);
+
+    // nns are linked lists containing layers
+    list<Layer<float> *> trainnn({&L2, &L1, &L0}), testnn({&L3t, &L2, &L1, &L0});
+
+    // sgd
+    int iter = 0;
+    while (iter < 10000)
+    {
+        int batch_id = (iter % numbatches);
+
+        // obtaining batches
+        auto X_i = X.columns(batchsize * batch_id, batchsize * (batch_id + 1));
+        auto Y_i = Y.columns(batchsize * batch_id, batchsize * (batch_id + 1));
+
+        // forward-backward pass
+        forward(trainnn, X_i);
+        LossLayer<float> L3(batchsize, Y_i);
+        trainnn.push_front(&L3);
+        backprop(trainnn, X_i);
+        trainnn.pop_front();
+
+        // print progress
+        if (iter % 1000 == 0)
+        {
+            cout << "testing loss: " << Juzhen::forward(testnn, XT).elem(0, 0) << endl;
+        }
+
+        iter++;
+    }
+    return 0;
+}
+```
+Then compile: 
+```bash
+clang++ -x c++ -std=c++20 -DCPU_ONLY -DLOGGING_OFF -O3 ./cpp/launcher.cu ./helloworldnn.cu -o bin/helloworld.out -lopenblas
 ```
 
 ## Should I use Juzhen?
@@ -182,7 +216,7 @@ This software is written with educational purposes in mind. If you still want to
 4. Classifying MNIST digits using one hidden layer neural net (on [CPU](examples/logisticregression_MNIST.cpp)/[GPU](examples/logisticregression_MNIST_GPU.cpp)).
 5. [Regression using neural net APIs](examples/helloworld_nn.cpp) (on CPU and GPU).
 
-## Compile and Run Examples:
+<!-- ## Compile and Run Examples:
 1. Helloworld CPU
     ```
     make helloworld
@@ -217,7 +251,7 @@ This software is written with educational purposes in mind. If you still want to
     ```
     make helloworld-nn-gpu
     bin/helloworld-nn-gpu.out
-    ```
+    ``` -->
     
 ## Supported Platforms
 - Linux (CPU/GPU)
@@ -253,7 +287,8 @@ The allocated memory will not be immediately released, so later computations can
 ```
 MemoryDeleter<T> md1; 
 ```
-where ```T``` is the type of your matrix and add ```GPUMemoryDeleter md1;``` if you are using GPU computation. 
+where ```T``` is the type of your matrix.
+
 # Profiling 
 main.cpp
 ```c++
@@ -262,7 +297,7 @@ using namespace std;
 
 #include "cpp/juzhen.hpp"
 
-int main(){MemoryDeleter<float> md;
+int compute(){
 
     Matrix<float> A("A", 500, 1000);
     A.randn();
