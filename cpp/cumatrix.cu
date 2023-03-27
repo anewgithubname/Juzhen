@@ -124,7 +124,7 @@ void Matrix<CUDAfloat>::zeros()
 
 Matrix<float> Matrix<CUDAfloat>::to_host() const
 {
-    static Profiler p(__FUNCTION__);
+    STATIC_TIC;
     Matrix<float> ret((string(name) + "->host").c_str(), numrow, numcol, transpose);
     // if (numrow * numcol == 1) {
     //     p.start();
@@ -139,6 +139,7 @@ Matrix<float> Matrix<CUDAfloat>::to_host() const
         LOG_ERROR("device memory upload to host failed, {}.", stat);
         ERROR_OUT;
     }
+    STATIC_TOC;
     return ret;
 }
 
@@ -154,7 +155,7 @@ float Matrix<CUDAfloat>::norm() const
 
 Matrix<CUDAfloat> Matrix<CUDAfloat>::dot(const Matrix<CUDAfloat>& B) const
 {
-    static Profiler p("GPU dot"); p.start();
+    STATIC_TIC;
     Matrix<CUDAfloat> C("dot", num_row(), B.num_col());
 
     cublasOperation_t transA = transpose ? CUBLAS_OP_T : CUBLAS_OP_N;
@@ -165,8 +166,7 @@ Matrix<CUDAfloat> Matrix<CUDAfloat>::dot(const Matrix<CUDAfloat>& B) const
         num_row(), B.num_col(), num_col(), &one, (float *) elements.get(), numrow,
         (float *) B.elements.get(), B.numrow, &one, (float *) C.elements.get(), C.numrow) 
     );
-
-    p.end();
+    STATIC_TOC;
     return C;
 }
 //s1*M + a
@@ -224,6 +224,47 @@ void Matrix<CUDAfloat>::add(const Matrix<CUDAfloat>& B, float s1, float s2) {
 
 }
 
+// elementwise division
+__global__ void divKernel(float *d_out, float *d_in, size_t numElements)
+{
+
+    size_t i = blockDim.x * blockIdx.x + threadIdx.x;
+
+    if (i < numElements)
+    {
+        d_out[i] /= d_in[i];
+    }
+}
+
+
+// inplace division
+__global__ void divKernel(float *d_out, float d_in1, float *d_in2, size_t numElements)
+{
+
+    size_t i = blockDim.x * blockIdx.x + threadIdx.x;
+
+    if (i < numElements)
+    {
+        d_out[i] = d_in1 / d_in2[i];
+    }
+}
+
+Matrix<CUDAfloat> Matrix<CUDAfloat>::reciprocal(double l) const{
+    Matrix<CUDAfloat> result("elem_rec", numrow, numcol, transpose);
+
+    size_t numElem = numrow * numcol;
+    divKernel<<<cudaConfig(numElem)>>>((float*) result.elements.get(), (float)l, (float*) elements.get(), numElem);
+
+    return result;
+}
+
+void Matrix<CUDAfloat>::reciprocal(double l){
+    LOG_DEBUG("rval l/rM called!");
+
+    size_t numElem = numrow * numcol;
+    divKernel <<<cudaConfig(numElem)>>> ((float*) elements.get(), (float)l, (float*) elements.get(), numElem);
+}
+
 const Matrix<CUDAfloat> Matrix<CUDAfloat>::T() const
 {
     string newname = name + "_T";
@@ -278,7 +319,7 @@ curandGenerator_t GPUSampler::gen = NULL;
 
 
 Matrix<CUDAfloat> Matrix<CUDAfloat>::randn(size_t m, size_t n) {
-    static Profiler p("rand gen"); p.start();
+    STATIC_TIC;
     auto& gen = GPUSampler::gen;
     Matrix<CUDAfloat> M("randn", m, n);
 
@@ -305,7 +346,7 @@ Matrix<CUDAfloat> Matrix<CUDAfloat>::randn(size_t m, size_t n) {
             ERROR_OUT;
         }
     }
-    p.end();
+    STATIC_TOC;
     return M;
 }
 
@@ -343,9 +384,9 @@ Matrix<CUDAfloat> Matrix<CUDAfloat>::rand(size_t m, size_t n) {
 
 Matrix<CUDAfloat> Matrix<CUDAfloat>::ones(size_t m, size_t n)
 {
-    static Profiler p("ones"); p.start();
+    STATIC_TIC;
     Matrix<CUDAfloat> M("ones", m, n); fill(M, 1.0f);
-    p.end();
+    STATIC_TOC;
     return M;
 }
 

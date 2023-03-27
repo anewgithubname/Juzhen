@@ -23,39 +23,13 @@
 #ifndef MATRIX_H
 #define MATRIX_H
 #include "core.hpp"
+
+#if __cplusplus >= 202002L
+#define HAS_CONCEPTS "has concepts"
 #include <concepts>
-
-template<typename D>
-concept Addable = requires(Matrix<D> &&A, const Matrix<D> &B, const Matrix<D> &C, D d)
-{
-    d = d+1;
-    A.add(B,1,1); //self add
-    {C.add(B,1,1)} ->  std::same_as<Matrix<D>>; // const add
-};
-
-template<typename D>
-concept ScalarAddable = requires(Matrix<D> &&A, const Matrix<D> &C, D d)
-{
-    d = d+1;
-    A.add(1,1); //self add
-    {C.add(1,1)} ->  std::same_as<Matrix<D>>; // const add
-};
-
-template<typename D>
-concept Scalable = requires(Matrix<D> &&A, const Matrix<D> &C, D d)
-{
-    d = d+1;
-    A.scale((D) 1); //self add
-    {C.scale((D) 1)} ->  std::same_as<Matrix<D>>; // const add
-};
-
-template<typename D>
-concept Multiplicable = requires(const Matrix<D> && A, const Matrix<D> &B, D d)
-{
-    d = d + 1;
-    {A.dot(B)} ->  std::same_as<Matrix<D>>; // const add
-};
-
+#else
+#define HAS_CONCEPTS "not have concepts"
+#endif
 
 //matrix filler funcitons. 
 template<class D>
@@ -88,13 +62,13 @@ template<class D>
 inline Matrix<D> Matrix<D>::randn(size_t m, size_t n)
 {
     using namespace std;
-	normal_distribution<> d(0, 1);
+	normal_distribution<D> d(0, 1);
     Matrix<D> M("randn", m, n);
 	//cannot be vectorized, due to the implementation of std::random.
     size_t numelems = M.num_row() * M.num_col();
 #pragma ivdep
 	for (size_t i = 0; i < numelems; i++)
-		M.elements[i] = (D) d(randomnumber_gen);
+		M.elements[i] = (D) d(global_rand_gen);
     
     return M;
 }
@@ -103,11 +77,13 @@ template<class D>
 inline Matrix<D> Matrix<D>::rand(size_t m, size_t n)
 {
     using namespace std;
-    uniform_real_distribution<> d(0, 1);
-    Matrix<D> M("rand", m, n);
+    uniform_real_distribution<D> d(0, 1);
+    Matrix<D> M("randn", m, n);
     //cannot be vectorized, due to the implementation of std::random.
-    for (size_t i = 0; i < M.num_row() * M.num_col(); i++)
-        M.elements[i] = (D) d(randomnumber_gen);
+    size_t numelems = M.num_row() * M.num_col();
+#pragma ivdep
+    for (size_t i = 0; i < numelems; i++)
+        M.elements[i] = (D)d(global_rand_gen);
 
     return M;
 }
@@ -304,7 +280,7 @@ Matrix<D> elemwise(Function func, Matrix<D> &&M) {
 template<class D, class Function>
 Matrix<D> reduce(Function func, const Matrix<D>& M, int dim, int k)
 {   
-    // STATIC_TIC;
+    // STATIC_TIMER;
     bool trans = false;
     if (dim == 0 && !M.transpose) {
         trans = false;
@@ -620,6 +596,56 @@ std::ostream &operator<<(std::ostream &os, const Matrix<D> &M)
     }
     return os;
 }
+
+
+#if __cplusplus >= 202002L // use concept
+// The four rules for implementing a matrix class
+template<typename D>
+concept Addable = requires(Matrix<D> &&A, const Matrix<D> &B, const Matrix<D> &C, D d)
+{
+    d = d+1;
+    A.add(B,1,1); //self add
+    {C.add(B,1,1)} ->  std::same_as<Matrix<D>>; // const add
+};
+
+template<typename D>
+concept ScalarAddable = requires(Matrix<D> &&A, const Matrix<D> &C, D d)
+{
+    d = d+1;
+    A.add(1,1); //self add
+    {C.add(1,1)} ->  std::same_as<Matrix<D>>; // const add
+};
+
+template<typename D>
+concept Scalable = requires(Matrix<D> &&A, const Matrix<D> &C, D d)
+{
+    d = d+1;
+    A.scale((D) 1); //self add
+    {C.scale((D) 1)} ->  std::same_as<Matrix<D>>; // const add
+};
+
+template<typename D>
+concept Multiplicable = requires(const Matrix<D> && A, const Matrix<D> &B, D d)
+{
+    d = d + 1;
+    {A.dot(B)} ->  std::same_as<Matrix<D>>; // const add
+};
+template<typename D>
+concept ElemInvitable = requires(const Matrix<D> && A, const Matrix<D> &B, D d)
+{
+    d = d + 1;
+    A.reciprocal(d); //self reciprocal
+    {B.reciprocal(d)} ->  std::same_as<Matrix<D>>; // const reciprocal
+};
+
+#else
+#define Addable typename
+#define ScalarAddable typename
+#define Scalable typename
+#define Multiplicable typename
+#define ElemInvitable typename
+#endif
+
 template <Multiplicable D>
 Matrix<D> operator*(const Matrix<D> &lM, const Matrix<D> &rM)
 {
@@ -654,13 +680,13 @@ Matrix<D> operator+(const Matrix<D> &lM, Matrix<D> &&rM)
 template <ScalarAddable D>
 Matrix<D> operator+(const Matrix<D> &lM, double r)
 {
-    return lM.add((D) r, (D) 1.0);
+    return lM.add(r, 1.0);
 }
 //rvalue version of operator +
 template <ScalarAddable D>
 Matrix<D> operator+(Matrix<D> &&lM, double r)
 {
-    lM.add((D) r, (D) 1.0);
+    lM.add(r, 1.0);
     return std::move(lM);
 }
 template <ScalarAddable D>
@@ -709,7 +735,7 @@ Matrix<D> operator-(const Matrix<D> &lM, double r)
 template <ScalarAddable D>
 Matrix<D> operator-(Matrix<D> &&lM, double r)
 {
-    lM.add( - (D) r, 1.0);
+    lM.add( -  r, 1.0);
     return std::move(lM);
 }
 template <ScalarAddable D>
@@ -734,89 +760,34 @@ Matrix<D> operator-(Matrix<D> &&rM)
     rM.add(0, -1.0);
     return std::move(rM);
 }
-template <class D>
-Matrix<D> operator/(const Matrix<D> &lM, const Matrix<D> &rM)
-{
-    size_t numcol = lM.num_col();
-    size_t numrow = lM.num_row();
-    Matrix<D> result("elem_div", lM.num_row(), lM.num_col(), 0);
-    for(size_t j = 0; j< numcol; j++)
-    {
-#pragma ivdep
-        for(size_t i = 0; i< numrow; i++)
-        {
-            result.elem(i, j) = lM.elem(i, j) / rM.elem(i, j);
-        }
-    }
-    return result;
-}
-//rvalue division
-template <class D>
-Matrix<D> operator/(Matrix<D> &&lM, Matrix<D> &&rM)
-{
-    size_t numcol = lM.num_col();
-    size_t numrow = lM.num_row();
-    // printf("rval /");
-    for(size_t j = 0; j< numcol; j++)
-    {
-#pragma ivdep
-        for(size_t i = 0; i< numrow; i++)
-        {
-            lM.elem(i, j) /= rM.elem(i, j);
-        }
-    }
-    return std::move(lM);
-}
-template <class D>
-Matrix<D> operator/(double l, const Matrix<D> &rM)
-{
-    size_t numelems = rM.num_row() * rM.num_col();
-    Matrix<D> result("elem_div", rM.num_row(), rM.num_col(), 0);
-#pragma ivdep
-    for (size_t i = 0; i < numelems; i++)
-        result.elements[i] = l / rM.elements[i];
-
-    return result;
-}
-//rvalue division
-template <class D>
-Matrix<D> operator/(double l, Matrix<D> &&rM)
-{
-    size_t numelems = rM.num_row() * rM.num_col();
-#pragma ivdep
-    for (size_t i = 0; i < numelems; i++)
-        rM.elements[i] = l / rM.elements[i];
-
-    return std::move(rM);
-}
 template <Scalable D>
 Matrix<D> operator/(const Matrix<D> &lM, double r)
 {
-    return lM.scale((D) (1.0 / r));
+    return lM.scale( (1.0 / r));
 }
 //rvalue division
 template <Scalable D>
 Matrix<D> operator/(Matrix<D>&& lM, double r)
 {
     // cout << "rval /" << endl;
-    lM.scale( (D) (1 / r));
+    lM.scale(  (1 / r));
     return std::move(lM);
 }
 template <Scalable D>
 Matrix<D> operator*(const Matrix<D> &lM, double r)
 {
-    return lM.scale((D)r);
+    return lM.scale(r);
 }
 template <Scalable D>
 Matrix<D> operator*(Matrix<D> &&lM, double r)
 {
-    lM.scale((D)r);
+    lM.scale(r);
     return std::move(lM);
 }
 template <Scalable D>
 Matrix<D> operator*(double l, const Matrix<D> &rM)
 {
-    return rM.scale((D)l);
+    return rM.scale(l);
 }
 //rvalue *
 template <Scalable D>
@@ -849,6 +820,32 @@ Matrix<D>& operator-=(Matrix<D> &lM, const Matrix<D> &rM)
 {
     lM.add(rM, 1.0, -1.0);
     return lM;
+}
+
+template <ElemInvitable D>
+Matrix<D> operator/(const Matrix<D> &lM, const Matrix<D> &rM)
+{
+    Matrix<D> ret = rM.reciprocal(1.0);
+    return hadmd(lM, ret);
+}
+//rvalue division
+template <ElemInvitable D>
+Matrix<D> operator/(const Matrix<D> &lM, Matrix<D> &&rM)
+{
+    rM.reciprocal(1.0);
+    return hadmd(lM, std::move(rM));
+}
+template <ElemInvitable D>
+Matrix<D> operator/(double l, const Matrix<D> &rM)
+{
+    return rM.reciprocal(l);
+}
+//rvalue division
+template <ElemInvitable D>
+Matrix<D> operator/(double l, Matrix<D> &&rM)
+{
+    rM.reciprocal(l);
+    return std::move(rM);
 }
 
 #endif

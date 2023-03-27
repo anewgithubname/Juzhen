@@ -72,6 +72,7 @@ vector<Matrix<float>> dataset(int n, int d){
 }
 
 int compute() {
+    //spdlog::set_level(spdlog::level::debug);
 #ifndef CPU_ONLY
     GPUSampler sampler(2345);
 #endif

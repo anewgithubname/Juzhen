@@ -22,7 +22,8 @@
     along with this program.  If not, see <https://www.gnu.org/licenses/>.
 
  */
-#ifndef __WIN64
+
+#if !defined(_WIN64) && defined(__x86_64__) // Linux, x86_64
 #include <cpuid.h>
 #endif
 #include "../cpp/juzhen.hpp"
@@ -34,7 +35,7 @@
 // Uses the __cpuid intrinsic to get information about
 // CPU extended instruction set support.
 
-#ifdef __WIN64
+#ifdef _WIN64
 
 #include <bitset>
 #include <array>
@@ -226,7 +227,7 @@ const CPUInfo::InstructionSet_Internal CPUInfo::CPU_Rep;
 
 void DisplayCPU()
 {
-#ifndef _WIN64
+#if !defined(_WIN64) && defined(__x86_64__) // Linux, x86_64
    using namespace std;
    char CPUBrandString[0x40];
    unsigned int CPUInfo[4] = {0, 0, 0, 0};
@@ -249,7 +250,7 @@ void DisplayCPU()
    }
 
    cout << "CPU: " << CPUBrandString << endl;
-#else
+#elif defined(_WIN64)
     std::cout << "CPU: ";
     std::cout << CPUInfo::Brand() << std::endl;
 #endif
@@ -293,8 +294,8 @@ void PrintSeparationLine() {
 
 int main()
 {
-    spdlog::set_pattern("%^[%l]%$, %v");
-    // spdlog::set_level(spdlog::level::debug);
+    //spdlog::set_pattern("%^[%l]%$, %v");
+    //spdlog::set_level(spdlog::level::debug);
 
     std::cout << "Welcome to Juzhen (Beta)!"<< std::endl; 
     PrintLogo();
@@ -308,22 +309,25 @@ int main()
 #endif
     PrintSeparationLine();
 
-    MemoryDeleter<int> mdi;
-    MemoryDeleter<float> md;
-    MemoryDeleter<CUDAfloat> gpumd;
-#ifndef CPU_ONLY
-    // GPUMemoryDeleter gpumd;
-    CuBLASErrorCheck(cublasCreate(&Matrix<CUDAfloat>::global_handle));
-#endif
     int ret = 1;
-    PrintSeparationLine();
-    {
-        ret = compute();
-    }
-    PrintSeparationLine();
-#ifndef CPU_ONLY
-    CuBLASErrorCheck(cublasDestroy(Matrix<CUDAfloat>::global_handle));
-#endif
 
+    {
+        MemoryDeleter<int> mdi;
+        MemoryDeleter<float> md;
+        MemoryDeleter<CUDAfloat> gpumd;
+#ifndef CPU_ONLY
+        // GPUMemoryDeleter gpumd;
+        CuBLASErrorCheck(cublasCreate(&Matrix<CUDAfloat>::global_handle));
+#endif
+        PrintSeparationLine();
+        {
+           ret = compute();
+        }
+        PrintSeparationLine();
+#ifndef CPU_ONLY
+        CuBLASErrorCheck(cublasDestroy(Matrix<CUDAfloat>::global_handle));
+#endif
+    }
+    
     return ret;
 }

@@ -23,7 +23,9 @@
 #define HELPER_HPP
 
 #ifndef LOGGING_OFF
-// #define SPDLOG_COMPILED_LIB
+#ifndef SPDLOG_COMPILED_LIB
+#define SPDLOG_COMPILED_LIB
+#endif
 #include <spdlog/spdlog.h>
 #include "spdlog/sinks/stdout_sinks.h"
 #endif
@@ -50,6 +52,8 @@ BOOST_STRONG_TYPEDEF(float, CUDAfloat)
 
 typedef std::vector<size_t> idxlist;
 
+static std::mt19937 global_rand_gen; // global random number generator
+
 inline idxlist seq(size_t start, size_t end) {
     idxlist ret;
     for (size_t i = start; i < end; i++) {
@@ -65,9 +69,7 @@ inline idxlist seq(size_t end){
 inline idxlist shuffle(int start, int end){
     using namespace std;
     idxlist ret = seq(start, end);
-    random_device rd;
-    mt19937 g(rd());
-    shuffle(ret.begin(), ret.end(), g);
+    shuffle(ret.begin(), ret.end(), global_rand_gen);
     return ret;
 }
 
@@ -125,11 +127,11 @@ class Profiler {
         }
         ~Profiler() {
             end();
-#ifndef LOGGING_OFF
-			LOG_INFO("{}, Time: {:.2f} ms.", s, cumulative_time);
-#else
+// #ifndef LOGGING_OFF
+// 			LOG_INFO("{}, Time: {:.2f} ms.", s, cumulative_time);
+// #else
             std::cout << "profiler: "<< s << ", Time: " << cumulative_time << "ms." << std::endl;
-#endif
+// #endif
         }
     private:
         Clock::time_point t1;

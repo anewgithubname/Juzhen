@@ -58,31 +58,20 @@ class MemoryDeleter{
 
 public:
     static D* allocate(size_t size){
-        static Profiler p(std::string("allocator ") + datatype(D)); p.start();
+        STATIC_TIC;
+        
         // search for space in the freed space.
+         auto it = std::find_if(dead_mems.begin(),dead_mems.end(),
+                              [&](MemorySpace<D> mem){return mem.size == size;});
 
-         //auto it = std::find_if(dead_mems.begin(),dead_mems.end(),
-         //                      [&](auto mem){return mem.size == size;});
-
-         //if(it != dead_mems.end()){
-         //    LOG_DEBUG("Found {} space in dead memory: {}, address: {}", 
-         //               datatype(D), size * sizeof(D), fmt::ptr(it->ptr));
-         //    alive_mems.push_back({it->ptr, it->size});
-         //    dead_mems.erase(it);
-         //    p.end();
-         //    return it->ptr;
-         //}
-
-        for(auto it = dead_mems.begin(); it != dead_mems.end(); it++){
-            if(it->size == size){
-                LOG_DEBUG("Found {} space in dead memory: {}, address: {}", datatype(D), size * sizeof(D), fmt::ptr(it->ptr));
-                D* ptr = it->ptr;
-                alive_mems.push_back({it->ptr, it->size});
-                dead_mems.erase(it);
-                //p.end();
-                return ptr;
-            }
-        }
+         if(it != dead_mems.end()){
+            LOG_DEBUG("Found {} space in dead memory: {}, address: {}", 
+                       datatype(D), size * sizeof(D), fmt::ptr(it->ptr));
+            alive_mems.push_back({it->ptr, it->size});
+            D* ret = it->ptr; dead_mems.erase(it);
+            STATIC_TOC;
+            return ret;
+         }
         
         // no space available, allocate new space
         D* ptr = NULL;
@@ -95,37 +84,28 @@ public:
         LOG_DEBUG("No {} space available, allocate new space: {}, address: {}", 
                    datatype(D), size * sizeof(D), fmt::ptr(ptr));
         alive_mems.push_back({ptr, size});
-        p.end();
+        STATIC_TOC;
         return ptr;
     }
 
     static void free(D* ptr){
-        static Profiler p(std::string("deleter ") + datatype(D)); 
+        STATIC_TIC;
         size_t size = 0; 
-        p.start();
 
-         /*auto it = std::find_if(alive_mems.begin(), alive_mems.end(),
-                               [&](auto mem){return mem.ptr == ptr;});
-        
-         if(it != alive_mems.end()){
-             size = it->size;
-             alive_mems.erase(it);
-         }else{
-             LOG_ERROR("Failed to find address {} in alive memory type: {}, size: {}", 
-                        fmt::ptr(ptr), datatype(D), size * sizeof(D));
-             ERROR_OUT;
-         }*/
-
-        for (auto it = alive_mems.begin(); it != alive_mems.end(); it++) {
-            if (it->ptr == ptr) {
-                size = it->size;
-                alive_mems.erase(it);
-                break;
-            }
+        auto it = std::find_if(alive_mems.begin(), alive_mems.end(),
+                            [&](MemorySpace<D> mem){return mem.ptr == ptr;});
+    
+        if(it != alive_mems.end()){
+            size = it->size;
+            alive_mems.erase(it);
+        }else{
+            LOG_ERROR("Failed to find address {} in alive memory type: {}, size: {}", 
+                    fmt::ptr(ptr), datatype(D), size * sizeof(D));
+            ERROR_OUT;
         }
         
         dead_mems.push_back({ptr, size});
-        p.end();
+        STATIC_TOC;
     }
 
     ~MemoryDeleter(){
@@ -180,13 +160,12 @@ protected:
     Matrix(const char *name, size_t numrow, size_t numcol, int trans);
 
 public:
-    //random number generator
-    static std::mt19937 randomnumber_gen;
 
     // constructors 
     Matrix() : numcol(0), numrow(0), elements(nullptr), transpose(0), name("uninit") {}
     Matrix(const char *name, size_t numrow, size_t numcol): Matrix(name, numrow, numcol, 0) {}
     Matrix(const char *name, std::vector<std::vector<double>> elems);
+    Matrix(const char *name, size_t numrow, size_t numcol, std::shared_ptr<D[]> elements): Matrix(name, numrow, numcol, 0, elements) {};
 
     Matrix(const Matrix &M);
     Matrix(Matrix &&M) noexcept;
@@ -197,6 +176,9 @@ public:
     // access matrix info
     inline D elem(size_t i, size_t j) const { return elements[idx(i, j)]; }
     inline D &elem(size_t i, size_t j) { return elements[idx(i, j)]; }
+    inline D operator()(size_t i, size_t j) const { return elements[idx(i, j)]; }
+    inline D &operator()(size_t i, size_t j) { return elements[idx(i, j)]; }
+    
     inline size_t num_col() const { return transpose ? numrow : numcol; }
     inline size_t num_row() const { return transpose ? numcol : numrow; }
     inline int get_transpose() const { return transpose; }
@@ -208,10 +190,6 @@ public:
         memset(elements.get(), 0, sizeof(D) * numrow * numcol);
     }
     void ones();
-    void rand(){
-        for (size_t i = 0; i < num_row() * num_col(); i++)
-            elements[i] = (D)rand_number();
-    }
 
     // Matrix Operations / performance notes
     Matrix<D> dot(const Matrix<D> &B) const; //using cblas_dgemm
@@ -221,6 +199,10 @@ public:
     void add(D b, D s1);
     Matrix<D> scale(D s1) const { return add(0, s1); }
     void scale(D s1) { add(0, s1); }
+    
+    void reciprocal(double l);
+    Matrix<D> reciprocal(double l) const;
+
     Matrix<D> inv(); // using LU decomposition 
     D norm() const; //using single for loop
     const Matrix<D> T() const;
@@ -314,13 +296,9 @@ public:
     template <class Data>
     friend void write(std::string filename, const Matrix<Data> &M);
         
-    friend class cuMatrix;
-    friend class Matrix<CUDAfloat>; 
-    friend struct MemoryDeleter<D>;
+    friend class MemoryDeleter<D>;
+    friend class Matrix<CUDAfloat>;
 };
-
-template <class D>
-std::mt19937 Matrix<D>::randomnumber_gen(1);
 
 template <class D>
 Matrix<D>::Matrix(const char *name, size_t numrow, size_t numcol, int trans){
@@ -329,7 +307,7 @@ Matrix<D>::Matrix(const char *name, size_t numrow, size_t numcol, int trans){
     this->numrow = numrow;
     transpose = trans;
     //TODO: Not nice using reset, should change
-    elements.reset(MemoryDeleter<D>::allocate(numrow*numcol), [](auto p) {
+    elements.reset(MemoryDeleter<D>::allocate(numrow*numcol), [](D* p) {
            MemoryDeleter<D>::free(p);
         });
 }
@@ -342,7 +320,7 @@ Matrix<D>::Matrix(const char *name, std::vector<std::vector<double>> elems){
     transpose = 0;
     
     //TODO: Not nice using reset, should change
-    elements.reset(MemoryDeleter<D>::allocate(numrow*numcol), [](auto p) {
+    elements.reset(MemoryDeleter<D>::allocate(numrow*numcol), [](D* p) {
            MemoryDeleter<D>::free(p);
         });
 
@@ -362,7 +340,7 @@ Matrix<D>::Matrix(const Matrix<D> &M){
     numcol = M.numcol;
     numrow = M.numrow;
     transpose = M.transpose;
-    elements.reset(MemoryDeleter<D>::allocate(numrow*numcol), [](auto p) {
+    elements.reset(MemoryDeleter<D>::allocate(numrow*numcol), [](D* p) {
         MemoryDeleter<D>::free(p);
     });
 
@@ -388,7 +366,7 @@ Matrix<D> &Matrix<D>::operator=(const Matrix<D> &M){
     numcol = M.numcol;
     numrow = M.numrow;
     transpose = M.transpose;
-    elements.reset(MemoryDeleter<D>::allocate(numrow*numcol), [](auto p) {
+    elements.reset(MemoryDeleter<D>::allocate(numrow*numcol), [](D* p) {
         MemoryDeleter<D>::free(p);
     });
 
@@ -534,7 +512,7 @@ Matrix<D> Matrix<D>::inv()
         inv.elements[i] = elements[i];
     }
 
-    int N = num_row();
+    int N = (int) num_row();
     int error = 0;
     int *pivot = (int *)malloc(N * sizeof(int)); // LAPACK requires MIN(M,N), here M==N, so N will do fine.
     int Nwork = 2 * N * N;
@@ -653,6 +631,20 @@ void Matrix<D>::add(D b, D s1)
     {
         elements[i] = s1 * elements[i] + b;
     }
+}
+
+template <class D>
+void Matrix<D>::reciprocal(double l){
+    for (size_t i = 0; i < numrow * numcol; i++)
+        elements[i] = l / elements[i];  
+}
+
+template <class D>
+Matrix<D> Matrix<D>::reciprocal(double l) const{
+    Matrix<D> M((name + "reci").c_str(), numrow, numcol, transpose);
+    for (size_t i = 0; i < numrow * numcol; i++)
+        M.elements[i] = l / elements[i];  
+    return M;
 }
 
 /*

@@ -76,27 +76,7 @@ __global__ void productKernel(float *d_out, float *d_in, size_t numElements)
     }
 }
 
-__global__ void divKernel(float *d_out, float *d_in, size_t numElements)
-{
 
-    size_t i = blockDim.x * blockIdx.x + threadIdx.x;
-
-    if (i < numElements)
-    {
-        d_out[i] /= d_in[i];
-    }
-}
-
-__global__ void divKernel(float *d_out, float d_in1, float *d_in2, size_t numElements)
-{
-
-    size_t i = blockDim.x * blockIdx.x + threadIdx.x;
-
-    if (i < numElements)
-    {
-        d_out[i] = d_in1 / d_in2[i];
-    }
-}
 
 __global__ void copyKernel(float *d_out, float *d_in, size_t numElements)
 {
@@ -472,48 +452,6 @@ Matrix<CUDAfloat> hadmd(Matrix<CUDAfloat> &&M1, const Matrix<CUDAfloat> &M2)
 }
 
 Matrix<CUDAfloat> hadmd(Matrix<CUDAfloat>&& M1, Matrix<CUDAfloat>&& M2) {
-    return hadmd(M1, M2);
+    return hadmd(M1, std::move(M2));
 }
 
-Matrix<CUDAfloat> operator/(double l, const Matrix<CUDAfloat> &rM)
-{
-    Matrix<CUDAfloat> result("elem_div", rM.numrow, rM.numcol, rM.transpose);
-
-    size_t numElem = rM.numrow * rM.numcol;
-    divKernel<<<cudaConfig(numElem)>>>((float*) result.elements.get(), (float)l, (float*) rM.elements.get(), numElem);
-
-    return result;
-}
-
-Matrix<CUDAfloat> operator/(double l, Matrix<CUDAfloat>&& rM)
-{
-    LOG_DEBUG("rval l/rM called!");
-
-    size_t numElem = rM.numrow * rM.numcol;
-    divKernel <<<cudaConfig(numElem)>>> ((float*) rM.elements.get(), (float)l, (float*) rM.elements.get(), numElem);
-
-    return std::move(rM);
-}
-
-Matrix<CUDAfloat> operator/(const Matrix<CUDAfloat> &M1, const Matrix<CUDAfloat> &M2)
-{
-    Matrix<CUDAfloat> result("elem_div", M2.numrow, M2.numcol, M2.transpose);
-
-    cublasOperation_t transM1 = (M2.transpose != M1.transpose) ? CUBLAS_OP_T : CUBLAS_OP_N;
-    float s1 = 1.0, s2 = 1.0;
-    
-    CuBLASErrorCheck(
-        cublasSgeam(result.handle, transM1, CUBLAS_OP_N, M2.numrow, M2.numcol,
-                                  &s1, (float*) M1.elements.get(), M1.numrow,
-                                  &s2, (float*) result.elements.get(), result.numrow, (float*) result.elements.get(), result.numrow)
-    );
-    
-    size_t numElem = M1.numrow * M1.numcol;
-    divKernel<<<cudaConfig(numElem)>>>((float*) result.elements.get(), (float*) M2.elements.get(), numElem);
-    return result;
-}
-
-Matrix<CUDAfloat> operator/(Matrix<CUDAfloat> &&M1, Matrix<CUDAfloat> &&M2)
-{
-    return M1 / M2;
-}

@@ -1,4 +1,3 @@
-
 //#define LOGGING_OFF
 #include "../cpp/juzhen.hpp"
 using namespace std;
@@ -55,17 +54,12 @@ void cpu_matrixaccess(){
 }
 
 void cpu_arithmetics(){
-      // srand(time(NULL));
-    auto A = Matrix<float>::randn(8000, 8000);
-    write("/tmp/A.matrix", A);
+    auto A = Matrix<float>::randn(800, 800);
+    auto B = Matrix<float>::randn(800, 800);
 
-    auto B = Matrix<float>::randn(8000, 8000);
-    write("/tmp/B.matrix", A);
     cout<< "timer started..."<<endl;
     auto t1 = Clock::now();
-    // Matrix<float> C = A.T()*2.0;
     Matrix<float> && C = (((A+B).T()*100.0f*(A+B)/5.0+1.0f)*2.0f+2.0f).inv()/4.0;
-    // Matrix<float> C = (A*A.T()/8000.0 + B*B.T()/8000.0).inv()-4.0;
     auto t2 = Clock::now();
     cout << "Time taken: " << time_in_ms(t1, t2) <<" ms" << endl;
 
@@ -74,13 +68,11 @@ void cpu_arithmetics(){
 
 void cpu_slowinv(){
     
-    auto A = Matrix<float>::randn(5000, 10000);
+    auto A = Matrix<float>::randn(500, 1000);
     A = A*A.T()/10000.0;
-    // A.read("/tmp/AA.matrix");
 
-    Matrix<float> Astar("Astar", 5000, 5000);
+    Matrix<float> Astar("Astar", 500, 500);
     Astar.zeros();
-    // Astar.read("/tmp/Astar.matrix");
     for (int i = 0; i < 10; i++)
     {
         auto t1 = Clock::now();
@@ -94,7 +86,7 @@ void cpu_slowinv(){
 
 void cpu_dre(){
     cout<<"generating data..."<<endl;
-    int d = 5000, n = 100000;
+    int d = 500, n = 5000;
     auto Xp = Matrix<float>::randn(n,d);
     // Xp.read("/tmp/Xp.matrix");
     auto Xq = Matrix<float>::randn(n, d);
@@ -121,24 +113,6 @@ void cpu_dre(){
 
 #ifndef CPU_ONLY
 void cuda_basic(){
-    // // cuMatrix cuC = cuA*cuB;
-    // auto t1 = Clock::now();
-    // Matrix<float> C;
-    // for(int i = 0; i < 10; i++)
-    // {
-    //     Matrix<float> A("A", 3000,3001,0);
-    //     A.randn();
-    //     Matrix<float> B("B", 3000,3001,0);
-    //     B.randn();
-    //     cuMatrix cuA(handle, A);
-    //     cuMatrix cuB(handle, B);
-    //     C = cuA.T()*cuB.T()*cuA*cuB.T()*cuA*cuB.T();
-    // }
-    // auto t2 = Clock::now();
-    // cout << "Time taken: " << time_in_ms(t1, t2) << " ms" << endl;
-    // cout << C.num_row() << " " << C.num_col() << endl;
-
-    // cout << ((cuMatrix &)C).to_host() <<endl;
     {
         cuMatrix A(Matrix<float>("A",{{1,2,3},{4,5,6}}));
         cuMatrix B(Matrix<float>("B",{{1,4},{2,5},{3,6}}));
@@ -206,19 +180,13 @@ void cuda_basic(){
 void cuda_slowinv(){
 
     cout << "generating data..."<<endl;
-    int d = 10000, n=50000;
+    int d = 500, n = 1000;
     auto A = cuMatrix::randn(d,n);
     A = A*A.T()/(float)n;
-    // A.read("/tmp/AA.matrix");
-    // cout<<A<<endl;
 
     cuMatrix Astar("Astar", d, d);
-    // Astar.zeros();
-    // Astar.read("/tmp/Astar.matrix");
-    // cout<<Astar<<endl;
 
     cout<<"allocating"<<endl;
-    // cuMatrix cuA(handle, A); cuMatrix cuAstar(handle, Astar);
     cout<<"process started"<<endl;
     for (int i = 0; i < 10; i++)
     {
@@ -234,18 +202,12 @@ void cuda_slowinv(){
 void cuda_dre(){
 
     cout<<"generating data..."<<endl;
-    int d = 5000, n = 120000;
+    int d = 500, n = 5000;
     auto Xp = cuMatrix::randn(n, d);
-    // Xp.read("/tmp/Xp.matrix");
-
     auto Xq = cuMatrix::randn(n, d);
-    // Xq.read("/tmp/Xq.matrix");
 
     cuMatrix theta("theta", d, 1);
-    // theta.zeros();
 
-    // cuMatrix cuXp(handle, Xp); cuMatrix cuXq(handle, Xq);
-    // cuMatrix cuTheta(handle, theta);
     cout<<"timer started..."<<endl;
     auto t1 = Clock::now();
 
@@ -261,17 +223,17 @@ void cuda_dre(){
         cuTheta_old = theta*1;
     }
     auto t2 = Clock::now();
-    // cout<<cuTheta.to_host().sub(0,10,0,1) <<endl;
-    // idxlist rowidx = shuffle(123,123+234);
-    // cout << (cuTheta.to_host().sub(rowidx,seq(cuTheta.num_col())) 
-    //         - cuTheta.sub(rowidx,seq(cuTheta.num_col()))).norm()<<endl;
+
     cout << "Time taken: " << time_in_ms(t1, t2) << " ms" << endl;
 
 }
 #endif
 
 int compute(){ 
-    spdlog::set_level(spdlog::level::debug);
+    global_rand_gen.seed(0);
+    
+     //spdlog::set_level(spdlog::level::debug);
+    std::cout << __cplusplus << " " << HAS_CONCEPTS << std::endl;
 
     printf("cpu_matrixaccess\n");
     cpu_matrixaccess();

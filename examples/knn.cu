@@ -125,17 +125,26 @@ Matrix<D> predict(const Matrix<D> &Idx, const Matrix<D> &L)
 int compute()
 {
 	std::cout << "K-Nearest Neighbour Prediction for MNIST Dataset: " << std::endl;
-	M::randomnumber_gen.seed(0);
+	global_rand_gen.seed(0);
 
+	std::string base = PROJECT_DIR;
 	std::cout << "Reading data..." << std::endl;
 	Profiler *p1 = new Profiler("data loading");
-	auto X = (CM)read<float>("../X.matrix");
+#ifndef CPU_ONLY
+	auto X = (CM) read<float>(base + "/X.matrix");
+	auto Y = (CM) read<float>(base + "/Y_float.matrix");
+	auto XT = (CM) read<float>(base + "/T.matrix");
+#else
+	auto X = read<float>(base + "/X.matrix");
+	auto Y = read<float>(base + "/Y_float.matrix");
+	auto XT = read<float>(base + "/T.matrix");
+#endif
+
+	auto YT = read<float>(base + "/YT_float.matrix");
+
 	std::cout << "X: " << X.num_row() << "x" << X.num_col() << std::endl;
-	auto Y = (CM)read<float>("../Y_float.matrix");
 	std::cout << "Y: " << Y.num_row() << "x" << Y.num_col() << std::endl;
-	auto XT = (CM)read<float>("../T.matrix");
 	std::cout << "XT: " << XT.num_row() << "x" << XT.num_col() << std::endl;
-	auto YT = read<float>("../YT_float.matrix");
 	std::cout << "YT: " << YT.num_row() << "x" << YT.num_col() << std::endl;
 	delete p1;
 	std::cout << "Data loaded." << std::endl
@@ -146,7 +155,12 @@ int compute()
 	auto nn5 = topk(D, 7);
 	auto pred = predict(nn5, Y);
 
+#ifndef CPU_ONLY
 	M hpred = pred.to_host();
+#else
+	M &hpred = pred;
+#endif
+
 	float miss = 0;
 	for (int i = 0; i < pred.num_col(); i++)
 	{

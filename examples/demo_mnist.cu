@@ -60,21 +60,21 @@ Matrix<float> one_hot(const MatrixI& Y, int k) {
 vector<Matrix<float>> mnist_dataset(){
     const int k = 10;
 
-    std::string base = "../";
-    auto X = read<float>(base + "X.matrix"); 
+    std::string base = PROJECT_DIR;
+    auto X = read<float>(base + "/X.matrix"); 
     std::cout << "size of X: " << X.num_row() << " " << X.num_col() << std::endl;
 
-    auto labels = read<int>(base +"Y.matrix"); 
+    auto labels = read<int>(base +"/Y.matrix"); 
     std::cout << labels.elem(0, 23) << std::endl;
     std::cout << "size of labels: " << labels.num_row() << " " << labels.num_col() << std::endl;
 
     auto Y = one_hot(labels, k);
     std::cout << "size of Y: " << Y.num_row() << " " << Y.num_col() << std::endl;
 
-    auto Xt = read<float>(base + "T.matrix");
+    auto Xt = read<float>(base + "/T.matrix");
     std::cout << "size of Xt: " << Xt.num_row() << " " << Xt.num_col() << std::endl;
 
-    auto labels_t = read<int>(base + "YT.matrix"); 
+    auto labels_t = read<int>(base + "/YT.matrix"); 
     std::cout << "size of labels_t: " << labels_t.num_row() << " " << labels_t.num_col() << std::endl;
 
     auto Yt = one_hot(labels_t, k);

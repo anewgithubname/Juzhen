@@ -88,6 +88,7 @@ class Matrix<CUDAfloat> {
     //NOTE: each matrix does have its own handle, however, for now, 
     //they are all assigned to the global handle. 
     GPU_handle handle;
+    
     Matrix<CUDAfloat>(const char* name, size_t numrow, size_t numcol, int trans, std::shared_ptr<CUDAfloat[]> elements) {
         this->name = name;
         this->numrow = numrow;
@@ -96,16 +97,18 @@ class Matrix<CUDAfloat> {
         this->elements = elements;
         this->handle = global_handle;
     }
+    
+    Matrix<CUDAfloat>(const char* name, size_t numrow, size_t numcol, int trans);
 
 public: 
     static GPU_handle global_handle;
 
-    Matrix<CUDAfloat>(const char* name, size_t numrow, size_t numcol, int trans);
-
-    //constructors and copiers.
+    //constructors
+    Matrix<CUDAfloat>(const char* name, size_t numrow, size_t numcol, std::shared_ptr<CUDAfloat[]> elements): Matrix<CUDAfloat>(name, numrow, numcol, 0, elements) {};
     explicit Matrix<CUDAfloat>(const Matrix<float>& M);
     Matrix<CUDAfloat>(const char* name, size_t numrow, size_t numcol) :Matrix<CUDAfloat>(name, numrow, numcol, 0) {};
 
+    //copy and move constructors, assignment operators
     Matrix<CUDAfloat>(const Matrix<CUDAfloat>& M);
     Matrix<CUDAfloat>(Matrix<CUDAfloat>&& M) noexcept;
     Matrix<CUDAfloat>& operator=(const Matrix<CUDAfloat>& M);
@@ -118,6 +121,9 @@ public:
     // access matrix info
     inline CUDAfloat elem(size_t i, size_t j) const { return elements[idx(i, j)]; }
     inline CUDAfloat &elem(size_t i, size_t j) { return elements[idx(i, j)]; }
+    inline CUDAfloat operator()(size_t i, size_t j) const { return elements[idx(i, j)]; }
+    inline CUDAfloat &operator()(size_t i, size_t j) { return elements[idx(i, j)]; }
+    
     inline size_t num_col() const { return transpose ? numrow : numcol; }
     inline size_t num_row() const { return transpose ? numcol : numrow; }
     inline size_t get_transpose() const { return transpose; }
@@ -145,6 +151,9 @@ public:
     Matrix<CUDAfloat> scale(float s1) const { return add(0, s1); }
     void scale(float s1);
     
+    void reciprocal(double l);
+    Matrix<CUDAfloat> reciprocal(double l) const;
+
     float norm() const;
     const Matrix<CUDAfloat> T() const;
 
@@ -190,9 +199,6 @@ public:
     //Matrix<float> columns(idxlist clist) const { return to_host().columns(clist); }
 
     //our friends
-    friend Matrix<CUDAfloat> operator/(double l, const Matrix<CUDAfloat>& rM);
-    friend Matrix<CUDAfloat> operator/(double l, Matrix<CUDAfloat>&& rM);
-    friend Matrix<CUDAfloat> operator/(const Matrix<CUDAfloat>& lM, const Matrix<CUDAfloat>& rM);
     friend Matrix<CUDAfloat> sum(const Matrix<CUDAfloat>& M, int dim);
     friend Matrix<CUDAfloat> exp(const Matrix<CUDAfloat>& M);
     friend Matrix<CUDAfloat> exp(Matrix<CUDAfloat>&& M);
@@ -381,8 +387,6 @@ Matrix<CUDAfloat> elemwise(Function func, Matrix<CUDAfloat>&& M)
     return std::move(M);
 }
 
-Matrix<CUDAfloat> operator/(const Matrix<CUDAfloat> &M1, const Matrix<CUDAfloat> &M2);
-Matrix<CUDAfloat> operator/(Matrix<CUDAfloat> &&M1, Matrix<CUDAfloat> &&M2);
 Matrix<CUDAfloat> hadmd(const Matrix<CUDAfloat>& M1, const Matrix<CUDAfloat>& M2);
 Matrix<CUDAfloat> hadmd(const Matrix<CUDAfloat>& M1, Matrix<CUDAfloat>&& M2);
 Matrix<CUDAfloat> hadmd(Matrix<CUDAfloat>&& M1, const Matrix<CUDAfloat>& M2);
