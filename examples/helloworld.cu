@@ -9,16 +9,6 @@ int compute() {
 
     std::cout << "Source Dir Folder:" << PROJECT_DIR << std::endl;
 
-    // //spdlog::set_level(spdlog::level::debug);
-    // {
-    //     auto d = CM::randn(1000000, 1).to_host();
-    //     std::vector<float> data(d.data(), d.data() + d.num_row());
-    //     int num_bins = 50;
-    //     print_histogram(data, num_bins);
-    // }
-
-    // HLINE;
-
     {
         auto A = M::rand(2, 3);
         std::cout << A << std::endl;
