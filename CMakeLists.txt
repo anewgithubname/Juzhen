@@ -6,7 +6,7 @@ set(CMAKE_CXX_STANDARD_REQUIRED ON)
 add_definitions(-DPROJECT_DIR="${CMAKE_SOURCE_DIR}")
 
 # do you need GPU support? CUDA 11.8 is required
-set(CPU_ONLY ON)
+set(CPU_ONLY OFF)
 # are you on ARM? if so, you need to compile the external libraries yourself
 set(ARM OFF)
 
