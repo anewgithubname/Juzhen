@@ -10,15 +10,14 @@ void cpu_matrixaccess(){
         Matrix<float> A = {"A", {{1,2,3},{4,5,6}}};
         Matrix<float> B = {"B", {{7,8},{9,8},{7,6}}};
     
-        cout << hstack(std::vector<Matrix<float>>({A.T(),B,A.T(),B,A.T(),B})) <<endl << endl;
+        cout << hstack<float>({A.T(),B,A.T(),B,A.T(),B}) <<endl << endl;
     }
     {
         cout << "big vstack" << endl;
         Matrix<float> &&A = {"A", 5000,5000}; A.zeros();
         Matrix<float> &&B = {"B", 5000,5000}; B.zeros();
-        vector<Matrix<float>> matrices = {A.T(),B,A.T(),B,A.T(),B};
         auto t1 = Clock::now();
-        cout << vstack(matrices).num_col() << endl;
+        cout << vstack<float>({A.T(),B,A.T(),B,A.T(),B}).num_col() << endl;
         auto t2 = Clock::now();
         cout << "time: " << time_in_ms(t1,t2) << "ms." << endl <<endl;
     }
@@ -117,10 +116,9 @@ void cuda_basic(){
         cuMatrix A(Matrix<float>("A",{{1,2,3},{4,5,6}}));
         cuMatrix B(Matrix<float>("B",{{1,4},{2,5},{3,6}}));
 
-        cout <<hstack(vector<cuMatrix>({A,B.T()})).to_host()<<endl;
+        cout <<hstack({A,B.T()}).to_host()<<endl;
 
-        auto matrices = {A, B.T()};
-        cout <<vstack(matrices).to_host()<<endl;
+        cout <<vstack({A, B.T()}).to_host()<<endl;
 
         auto t1 = Clock::now();
         cuMatrix AA = cuMatrix::randn(5000, 10000);
@@ -232,7 +230,7 @@ void cuda_dre(){
 int compute(){ 
     global_rand_gen.seed(0);
     
-     //spdlog::set_level(spdlog::level::debug);
+    spdlog::set_level(spdlog::level::debug);
     std::cout << __cplusplus << " " << HAS_CONCEPTS << std::endl;
 
     printf("cpu_matrixaccess\n");

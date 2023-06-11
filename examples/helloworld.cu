@@ -1,49 +1,42 @@
+
 #include "../cpp/juzhen.hpp"
+
 #define HLINE std::cout << "--------------------------------" << std::endl
 
 int compute() {
+    //spdlog::set_level(spdlog::level::debug);
     global_rand_gen.seed(0);
 #ifndef CPU_ONLY
     GPUSampler sampler(1);
 #endif
 
-    std::cout << "Source Dir Folder:" << PROJECT_DIR << std::endl;
-
     {
-        auto A = M::rand(2, 3);
+        auto A = M::rand(3, 4);
         std::cout << A << std::endl;
     
-        auto B = M::rand(3, 2);
+        auto B = M::rand(3, 3);
         std::cout << B << std::endl;
+        
+        auto AB = vstack<float>({A.columns(0, 2).T(), B.columns(0,2).T()}); 
+        std::cout << AB << std::endl;
 
-        auto C = sin(A) / log(exp(A) + exp(B));
+        auto C = M::randn(4, 3);
         std::cout << C << std::endl;
+        auto D = elemwise([=](float e) {return e-1; }, C);
+        std::cout << D << std::endl;
+        
+
+        // auto C = exp(A) + B;
+        // std::cout << C << std::endl;
+
+        // auto C2 = A + exp(B);
+        // std::cout << C2 << std::endl;
+
+        // HLINE;
+        // auto C3 = exp(A+B) + exp(B);
+        // std::cout << C3 << std::endl;
+
     }
-    
-    HLINE;
-
-    {
-#ifndef CPU_ONLY
-        auto C = CM::zeros(5000, 5000);
-
-        auto A = CM::randn(5000, 5001);
-        auto B = CM::randn(5001, 5000);
-#else
-        auto C = M::zeros(5000, 5000);
-
-        auto A = M::randn(5000, 5001);
-        auto B = M::randn(5001, 5000);
-#endif
-        TIC(bench); LOG_INFO("benchmark started...");
-        for (int i = 0; i < 10; i++)
-        {
-            C += A * B / A.num_col();
-        }
-        std::cout << "C's norm is " << C.norm() << "." << std::endl;
-        TOC(bench); LOG_INFO("benchmark finished.");
-    }
-
-    HLINE;
   
     return 0;
 }

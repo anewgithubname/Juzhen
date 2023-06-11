@@ -1,14 +1,15 @@
-cmake_minimum_required(VERSION 3.12)
+cmake_minimum_required(VERSION 3.20 FATAL_ERROR)
 
-set(CMAKE_CXX_STANDARD 17)
-set(CMAKE_CXX_STANDARD_REQUIRED ON)
 # set the project directory as a macro, so that we can use it in the code
 add_definitions(-DPROJECT_DIR="${CMAKE_SOURCE_DIR}")
 
 # do you need GPU support? CUDA 11.8 is required
-set(CPU_ONLY ON)
+set(CPU_ONLY OFF)
+
 # are you on ARM? if so, you need to compile the external libraries yourself
 set(ARM OFF)
+
+set(CMAKE_CXX_STANDARD 20)
 
 if(CPU_ONLY)
     message("BUILD WITHOUT GPU SUPPORT!")
@@ -19,18 +20,29 @@ else()
     # if we are on Unix, we need to specify the CUDA toolkit location
     # CUDA 11.8 is required
     if(UNIX) 
-        set(CUDA_TOOLKIT_ROOT_DIR "/usr/local/cuda-11.8")
-        set(CMAKE_CUDA_COMPILER /usr/local/cuda-11.8/bin/nvcc)
+        set(CUDA_TOOLKIT_ROOT_DIR "/usr/local/cuda-12.1")
+        set(CMAKE_CUDA_COMPILER /usr/local/cuda-12.1/bin/nvcc)
+        set(CMAKE_CUDA_HOST_COMPILER /usr/bin/clang++-15)
     else()
-        set(CUDA_TOOLKIT_ROOT_DIR "C:/Program Files/NVIDIA GPU Computing Toolkit/CUDA/v11.8")
+        set(CUDA_TOOLKIT_ROOT_DIR "C:/Program Files/NVIDIA GPU Computing Toolkit/CUDA/v12.1")
     endif()
     set(CMAKE_CUDA_ARCHITECTURES 61)
     project(animated_octo_sniffle LANGUAGES CXX CUDA)
     find_package(CUDA REQUIRED)
+
+    set(CMAKE_CUDA_STANDARD 20)
+
+    if(NOT DEFINED CMAKE_CUDA20_STANDARD_COMPILE_OPTION)
+        set(CMAKE_CUDA20_STANDARD_COMPILE_OPTION "")
+        set(CMAKE_CUDA20_EXTENSION_COMPILE_OPTION "")
+    endif()
+
+    set(CMAKE_CUDA_FLAGS "-std=c++20")
 endif()
 
 if(UNIX) # if we are on linux, look for any BLAS
     set(BLAS_VENDOR "OpenBLAS")
+    # set(BLAS_ROOT "/opt/OpenBLAS")
     find_package(BLAS REQUIRED)
 else() # if we are on windows, use the provided OpenBLAS library
     set(OpenBLAS_LIBRARIES "${PROJECT_SOURCE_DIR}/external/OpenBLAS/lib/libopenblas.lib")
@@ -57,6 +69,7 @@ endif()
 target_precompile_headers(juzhen PRIVATE cpp/juzhen.hpp)
 target_include_directories(juzhen PUBLIC "external/spdlog/include")
 target_include_directories(juzhen PUBLIC ${OpenBLAS_INCLUDE_DIRS})
+target_include_directories(juzhen PUBLIC ${Boost_INCLUDE_DIRS})
 
 if(NOT CPU_ONLY) # if we are on GPU, we need to include the cuda headers
     target_include_directories(juzhen PUBLIC ${CUDA_INCLUDE_DIRS})
@@ -77,11 +90,12 @@ macro(GENERATE_PROJ TARGETNAME FILE)
     add_dependencies(${TARGETNAME} juzhen)
     target_include_directories(${TARGETNAME} PUBLIC "external/spdlog/include")
     target_include_directories(${TARGETNAME} PUBLIC ${OpenBLAS_INCLUDE_DIRS})
+    target_include_directories(${TARGETNAME} PUBLIC ${Boost_INCLUDE_DIRS})
 
     
     if(NOT CPU_ONLY) # if we are on GPU, we need to link the cuda libraries
         target_include_directories(${TARGETNAME} PUBLIC ${CUDA_INCLUDE_DIRS})
-        target_link_libraries(${TARGETNAME} spdlog::spdlog ${BLAS_LIBRARIES} ${OpenBLAS_LIBRARIES} juzhen ${CUDA_LIBRARIES} ${CUDA_cublas_LIBRARY} ${CUDA_curand_LIBRARY})
+        target_link_libraries(${TARGETNAME} spdlog::spdlog ${BLAS_LIBRARIES} ${OpenBLAS_LIBRARIES} juzhen ${CUDA_LIBRARIES} ${CUDA_cublas_LIBRARY} ${CUDA_curand_LIBRARY} ${CUDA_cusolver_LIBRARY})
         target_compile_options(${TARGETNAME} PRIVATE $<$<COMPILE_LANGUAGE:CUDA>:--extended-lambda>)
     else()
         target_link_libraries(${TARGETNAME} spdlog::spdlog ${BLAS_LIBRARIES} ${OpenBLAS_LIBRARIES} juzhen)

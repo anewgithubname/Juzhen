@@ -48,8 +48,7 @@ inline Matrix<float> ones(int m, int n) { return Matrix<float>::ones(m, n); }
 vector<Matrix<float>> dataset(int n, int d){
 
     // regression dataset generation
-    auto vecX = vector<Matrix<float>>{Matrix<float>::randn(d, n/2), Matrix<float>::randn(d, n/2) + 0};
-    auto X = hstack(vecX);
+    auto X = hstack<float>({Matrix<float>::randn(d, n/2), Matrix<float>::randn(d, n/2) + 0});
 
     Matrix<float> Y("One_hot", 2, X.num_col());
     Y.zeros();

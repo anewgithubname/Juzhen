@@ -312,9 +312,9 @@ int main()
     int ret = 1;
 
     {
-        MemoryDeleter<int> mdi;
-        MemoryDeleter<float> md;
-        MemoryDeleter<CUDAfloat> gpumd;
+        Memory<int> mdi;
+        Memory<float> md;
+        Memory<CUDAfloat> gpumd;
 #ifndef CPU_ONLY
         // GPUMemoryDeleter gpumd;
         CuBLASErrorCheck(cublasCreate(&Matrix<CUDAfloat>::global_handle));

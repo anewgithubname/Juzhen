@@ -6,15 +6,15 @@ GPU_handle Matrix<CUDAfloat>::global_handle = NULL;
 
 Matrix<CUDAfloat>::Matrix(const Matrix<float>& M)
 {
-    static Profiler profiler("gpu copy");
+    static Profiler profiler("upload to CUDA memory");
     this->handle = global_handle;
     this->name = "cu_" + M.name;
     this->numrow = M.numrow;
     this->numcol = M.numcol;
     this->transpose = M.transpose;
-    CUDAfloat* p = MemoryDeleter<CUDAfloat>::allocate( numcol * numrow);
-    elements = shared_ptr<CUDAfloat[]>(p, [](auto p) {
-        MemoryDeleter<CUDAfloat>::free(p);
+    CUDAfloat* p = Memory<CUDAfloat>::allocate( numcol * numrow);
+    elements = shared_ptr<CUDAfloat[]>(p, [](CUDAfloat* p) {
+        Memory<CUDAfloat>::free(p);
         });
 
     profiler.start();
@@ -33,9 +33,9 @@ Matrix<CUDAfloat>::Matrix(const char* name, size_t numrow, size_t numcol, int tr
     this->numcol = numcol;
     this->numrow = numrow;
     transpose = trans;
-    CUDAfloat* p = MemoryDeleter<CUDAfloat>::allocate( numcol * numrow);
-    elements.reset(p, [](auto p) {
-        MemoryDeleter<CUDAfloat>::free(p);
+    CUDAfloat* p = Memory<CUDAfloat>::allocate( numcol * numrow);
+    elements.reset(p, [](CUDAfloat* p) {
+        Memory<CUDAfloat>::free(p);
         });
 
     zeros();
@@ -49,8 +49,8 @@ Matrix<CUDAfloat>::Matrix(const Matrix<CUDAfloat>& M) {
     this->numcol = M.numcol;
     this->transpose = M.transpose;
     elements = std::shared_ptr<CUDAfloat[]>(
-        MemoryDeleter<CUDAfloat>::allocate(  numcol * numrow), [](auto p) {
-            MemoryDeleter<CUDAfloat>::free(p);
+        Memory<CUDAfloat>::allocate(  numcol * numrow), [](CUDAfloat* p) {
+            Memory<CUDAfloat>::free(p);
         });
 
     cudaError_t stat = cudaMemcpy(elements.get(), M.elements.get(), numcol * numrow * sizeof(float), cudaMemcpyDeviceToDevice);
@@ -80,8 +80,8 @@ Matrix<CUDAfloat>& Matrix<CUDAfloat>::operator=(const Matrix<CUDAfloat>& M) {
     this->numcol = M.numcol;
     this->transpose = M.transpose;
     elements = std::shared_ptr<CUDAfloat[]>(
-        MemoryDeleter<CUDAfloat>::allocate(  numcol * numrow), [](auto p) {
-            MemoryDeleter<CUDAfloat>::free(p);
+        Memory<CUDAfloat>::allocate(  numcol * numrow), [](CUDAfloat* p) {
+            Memory<CUDAfloat>::free(p);
         });
 
     cudaError_t stat = cudaMemcpy(elements.get(), M.elements.get(), numcol * numrow * sizeof(float), cudaMemcpyDeviceToDevice);
@@ -249,7 +249,7 @@ __global__ void divKernel(float *d_out, float d_in1, float *d_in2, size_t numEle
     }
 }
 
-Matrix<CUDAfloat> Matrix<CUDAfloat>::reciprocal(double l) const{
+Matrix<CUDAfloat> Matrix<CUDAfloat>::eleminv(double l) const{
     Matrix<CUDAfloat> result("elem_rec", numrow, numcol, transpose);
 
     size_t numElem = numrow * numcol;
@@ -258,7 +258,7 @@ Matrix<CUDAfloat> Matrix<CUDAfloat>::reciprocal(double l) const{
     return result;
 }
 
-void Matrix<CUDAfloat>::reciprocal(double l){
+void Matrix<CUDAfloat>::eleminv(double l){
     LOG_DEBUG("rval l/rM called!");
 
     size_t numElem = numrow * numcol;

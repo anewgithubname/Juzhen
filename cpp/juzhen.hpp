@@ -11,6 +11,7 @@ int compute();
 
 #include "core.hpp"
 #include "matrix.hpp"
+#include "operators.hpp"
 
 typedef Matrix<float> M;
 

@@ -64,14 +64,13 @@ int test3()
     B.rows(0, 1, M("T", {{-1,-1,-1}}));
 
     int ret = 0;
-    std::vector<Matrix<float>> vecA = {A, B};
-    if ((vstack(vecA) - M("C", {{1, 1, 3}, {1, 1, 5}, {-1, -1, -1}, {9, 10, 11}})).norm() > 1e-5)
+    if ((vstack<float>({A, B}) - M("C", {{1, 1, 3}, {1, 1, 5}, {-1, -1, -1}, {9, 10, 11}})).norm() > 1e-5)
     {
         LOG_ERROR("vstack failed!");
         ret += 1;
     }
 
-    if ((hstack(vecA) - M("C", {{1, 1, 3, -1, -1, -1}, {1, 1, 5, 9, 10, 11}})).norm() > 1e-5)
+    if ((hstack<float>({A, B}) - M("C", {{1, 1, 3, -1, -1, -1}, {1, 1, 5, 9, 10, 11}})).norm() > 1e-5)
     {
         LOG_ERROR("hstack failed!");
         ret += 1;
@@ -94,18 +93,16 @@ int test4()
     B.rows(0, 1, CM(M("T", {{-1,-1,-1}})));
 
     int ret = 0;
-    std::vector<Matrix<CUDAfloat>> vecA = {A, B};
-    if ((vstack(vecA).to_host() - M("C", {{1, 1, 3}, {1, 1, 5}, {-1, -1, -1}, {9, 10, 11}})).norm() > 1e-5)
+    if ((vstack({A, B}).to_host() - M("C", {{1, 1, 3}, {1, 1, 5}, {-1, -1, -1}, {9, 10, 11}})).norm() > 1e-5)
     {
         LOG_ERROR("vstack failed!");
         ret += 1;
     }
 
-    vecA = {A, B};
-    if ((hstack(vecA).to_host() - M("C", {{1, 1, 3, -1, -1, -1}, {1, 1, 5, 9, 10, 11}})).norm() > 1e-5)
+    if ((hstack({A, B}).to_host() - M("C", {{1, 1, 3, -1, -1, -1}, {1, 1, 5, 9, 10, 11}})).norm() > 1e-5)
     {
         LOG_ERROR("hstack failed!");
-        std::cout << hstack(vecA).to_host() << std::endl;
+        std::cout << hstack({A, B}).to_host() << std::endl;
         ret += 1;
     }
 

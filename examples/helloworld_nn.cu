@@ -23,13 +23,8 @@
 
  */
 
-// #define CPU_ONLY
-
 #include "../cpp/layer.hpp"
 #include "../cpp/juzhen.hpp"
-#include <math.h>
-#include <ctime>
-#include <thread>
 
 using namespace std;
 using namespace Juzhen;
@@ -43,7 +38,6 @@ inline Matrix<CUDAfloat> ones(int m, int n) { return Matrix<CUDAfloat>::ones(m, 
 inline Matrix<float> randn(int m, int n) { return Matrix<float>::randn(m, n); }
 inline Matrix<float> ones(int m, int n) { return Matrix<float>::ones(m, n); }
 #endif
-#define MatrixI Matrix<int> 
 
 int compute() {
 #ifndef CPU_ONLY
