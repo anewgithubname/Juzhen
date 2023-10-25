@@ -66,10 +66,15 @@ typedef cublasHandle_t GPU_handle;
 // allocate CUDA memory
 template <>
 inline CUDAfloat* Memory<CUDAfloat>::_alloc(size_t size) {
+    STATIC_TIC;
+    // if size = 0, allocate 1 element, this is to avoid error when size = 0
+    if(size == 0) size = 1; 
     CUDAfloat* ptr = NULL;
     cudaMalloc(&ptr, size * sizeof(CUDAfloat));
     //CudaErrorCheck(cudaMalloc(&ptr, size * sizeof(CUDAfloat)));
     if (ptr == NULL) throw std::bad_alloc();
+    
+    STATIC_TOC;
     return ptr;
 }
 

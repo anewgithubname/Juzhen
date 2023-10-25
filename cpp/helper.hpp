@@ -22,6 +22,8 @@
 #ifndef HELPER_HPP
 #define HELPER_HPP
 
+// #include <fmt/format.h>
+
 #ifndef LOGGING_OFF
 #ifndef SPDLOG_COMPILED_LIB
 #define SPDLOG_COMPILED_LIB

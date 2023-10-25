@@ -25,6 +25,8 @@
 
 #ifndef LAYER2_HPP
 #define LAYER2_HPP
+
+#include <tuple>
 #include <cfloat>
 #include <list>  
 #include "core.hpp"
@@ -44,8 +46,13 @@ namespace Juzhen
 		Matrix<D> weights, bias, val;
 		//batch size
 		int nb;
+		// learning rates for w and b
 		double lrW, lrb;
+		// do we need to update weights and bias?
+		bool need_update = true;
+
 	public:
+		
 		Layer(int m, int n, int nb) :
 			weights("weights", m, n), bias("bias", m, 1), val("output", m, nb) {
 
@@ -81,9 +88,21 @@ namespace Juzhen
 			using namespace std;
 			cout << weights << endl << bias << endl << lrW << endl << lrb << endl;
 		}
-		
-		template <class Mat>
-		friend void setlr(std::list<Layer<Mat>*> neuralnet, double lr);
+
+		template <class Data>
+		friend void setlr(std::list<Layer<Data>*> neuralnet, double lr);
+
+		template <class Data> 
+		friend void freeze(std::list<Layer<Data>*> neuralnet);
+
+		template <class Data> 
+		friend void unfreeze(std::list<Layer<Data>*> neuralnet);
+
+		template <class Data>
+		friend Matrix<Data> grad(std::list<Layer<Data>*> neuralnet, const Matrix<Data> &input);
+
+		template <class Data>
+		friend Matrix<Data> backprop(std::list<Layer<Data>*> neuralnet, const Matrix<Data>& input);
 	};
 
 	/**
@@ -95,7 +114,7 @@ namespace Juzhen
 		LinearLayer(int m, int n, int nb) : Layer<D>(m, n, nb) {
 		}
 		virtual const Matrix<D> grad(const Matrix<D>& input) const override {
-			return 1.0*Matrix<D>::ones(Layer<D>::weights.num_row(), input.num_col());
+			return Matrix<D>::ones(Layer<D>::weights.num_row(), input.num_col());
 		}
 
 		virtual void eval(const Matrix<D>& input) override {
@@ -229,8 +248,10 @@ namespace Juzhen
 			// <compute curr_grad .* (W^T * pre_grad), 1> 
 			auto gb = sum(t, 1);
 
-			// gradient update
-			tt->update(gW, gb);
+			if(tt->need_update) {
+				// gradient update
+				tt->update(gW, gb);
+			}
 
 			// compute W ^ T * curr_grad
 			return tt->W().T() * t;
@@ -238,18 +259,67 @@ namespace Juzhen
 	}
 
 	template <class D>
+	Matrix<D> grad(std::list<Layer<D>*> neuralnet, const Matrix<D> &input, const Matrix<D> &W){
+		/*
+		* least square layer 
+		*/
+		class SumLayer : public Layer<D> {
+			int indim = 0;
+			// you cannot change the output once you set it. 
+			const Matrix<D>& W;
+		public:
+			SumLayer(int indim, int nb, const Matrix<D> &W) : Layer<D>(2, 2, nb), W(W) {
+				this->indim = indim;
+			}
+
+			virtual const Matrix<D> grad(const Matrix<D>& input) const override {
+				return W;
+			}
+
+			virtual void eval(const Matrix<D>& input) override {
+				Layer<D>::val = sum(sum(hadmd(W, input),1),0);
+			}
+		};
+
+		auto L0 = neuralnet.back();
+        freeze(neuralnet);
+        
+		// forward-backward pass
+		forward(neuralnet, input);
+        SumLayer sumL(input.num_row(), input.num_col(), W);
+        neuralnet.push_front(&sumL);
+        auto ret = backprop(neuralnet, input);
+        neuralnet.pop_front();
+
+        unfreeze(neuralnet);
+		
+		return ret;
+	}
+
+	template <class D>
 	void setlr(std::list<Layer<D>*> neuralnet, double lr)
 	{
-		if (neuralnet.size() == 0) {
-			return;
-		}
-		else {
-			neuralnet.back()->lrW = lr;
-			neuralnet.back()->lrb = lr;
-
-			neuralnet.pop_back();
-			return setlr(neuralnet, lr);
+		for(auto& l : neuralnet) {
+			l->lrW = lr;
+			l->lrb = lr;
 		}
 	}
+
+	template <class D>
+	void freeze(std::list<Layer<D>*> neuralnet)
+	{
+		for(auto& l : neuralnet) {
+			l->need_update = false;
+		}
+	}
+
+	template <class D>
+	void unfreeze(std::list<Layer<D>*> neuralnet)
+	{
+		for(auto& l : neuralnet) {
+			l->need_update = true;
+		}
+	}
+
 }
 #endif	

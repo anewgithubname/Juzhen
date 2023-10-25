@@ -135,6 +135,8 @@ class Memory {
 */
 template <class D>
 D* Memory<D>::_alloc(size_t size) {
+    // if size = 0, allocate 1 element, this is to avoid error when size = 0
+    if(size == 0) size = 1;
     return new D[size];
 }
 

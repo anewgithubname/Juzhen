@@ -9,7 +9,7 @@ set(CPU_ONLY OFF)
 # are you on ARM? if so, you need to compile the external libraries yourself
 set(ARM OFF)
 
-set(CMAKE_CXX_STANDARD 20)
+set(CMAKE_CXX_STANDARD 17)
 
 if(CPU_ONLY)
     message("BUILD WITHOUT GPU SUPPORT!")
@@ -24,20 +24,20 @@ else()
         set(CMAKE_CUDA_COMPILER /usr/local/cuda-12.1/bin/nvcc)
         set(CMAKE_CUDA_HOST_COMPILER /usr/bin/clang++-15)
     else()
-        set(CUDA_TOOLKIT_ROOT_DIR "C:/Program Files/NVIDIA GPU Computing Toolkit/CUDA/v12.1")
+        set(CUDA_TOOLKIT_ROOT_DIR "C:/Program Files/NVIDIA GPU Computing Toolkit/CUDA/v11.8")
     endif()
     set(CMAKE_CUDA_ARCHITECTURES 61)
     project(animated_octo_sniffle LANGUAGES CXX CUDA)
     find_package(CUDA REQUIRED)
 
-    set(CMAKE_CUDA_STANDARD 20)
+    set(CMAKE_CUDA_STANDARD 17)
 
     if(NOT DEFINED CMAKE_CUDA20_STANDARD_COMPILE_OPTION)
         set(CMAKE_CUDA20_STANDARD_COMPILE_OPTION "")
         set(CMAKE_CUDA20_EXTENSION_COMPILE_OPTION "")
     endif()
 
-    set(CMAKE_CUDA_FLAGS "-std=c++20")
+    set(CMAKE_CUDA_FLAGS "-std=c++17")
 endif()
 
 if(UNIX) # if we are on linux, look for any BLAS

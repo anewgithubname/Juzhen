@@ -256,6 +256,13 @@ void copy(Matrix<CUDAfloat> &dest, const Matrix<CUDAfloat> &src) {
 }
 
 Matrix<CUDAfloat> hstack(vector<MatrixView<CUDAfloat>> matrices) {
+    // remove matrix size of zero, otherwise, it will cause CUBLAS error
+    auto t = std::remove_if(matrices.begin(), matrices.end(),
+                            [](const MatrixView<CUDAfloat> &m) {
+                                return m.num_row() == 0 || m.num_col() == 0;
+                            });
+    matrices.erase(t, matrices.end());
+
     size_t num_row = matrices[0].num_row();
     size_t num_col = 0;
     for (size_t i = 0; i < matrices.size(); i++) {
@@ -286,7 +293,7 @@ Matrix<CUDAfloat> hstack(vector<MatrixView<CUDAfloat>> matrices) {
 }
 
 const Matrix<CUDAfloat> vstack(vector<MatrixView<CUDAfloat>> matrices) {
-    for (size_t i = 0; i < matrices.size(); i++) {
+    for (size_t i = 0; i < matrices.size(); i++) {        
         matrices[i].transpose = !matrices[i].transpose;
     }
 

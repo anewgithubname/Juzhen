@@ -378,6 +378,7 @@ Matrix<D> Matrix<D>::slice(const idxlist &rowidx, const idxlist &colidx) const {
     }
     return M;
 }
+
 template <class D>
 Matrix<D> Matrix<D>::dot(const Matrix<D> &B) const {
     STATIC_TIC;
