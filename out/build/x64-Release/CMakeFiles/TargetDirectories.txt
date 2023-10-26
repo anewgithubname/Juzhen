@@ -1,0 +1,12 @@
+C:/Users/songa/Dropbox/Juzhen/out/build/x64-Release/CMakeFiles/juzhen.dir
+C:/Users/songa/Dropbox/Juzhen/out/build/x64-Release/CMakeFiles/testbasic.dir
+C:/Users/songa/Dropbox/Juzhen/out/build/x64-Release/CMakeFiles/helloworld_nn.dir
+C:/Users/songa/Dropbox/Juzhen/out/build/x64-Release/CMakeFiles/helloworld.dir
+C:/Users/songa/Dropbox/Juzhen/out/build/x64-Release/CMakeFiles/demo.dir
+C:/Users/songa/Dropbox/Juzhen/out/build/x64-Release/CMakeFiles/knn.dir
+C:/Users/songa/Dropbox/Juzhen/out/build/x64-Release/CMakeFiles/demo_classification.dir
+C:/Users/songa/Dropbox/Juzhen/out/build/x64-Release/CMakeFiles/demo_mnist.dir
+C:/Users/songa/Dropbox/Juzhen/out/build/x64-Release/CMakeFiles/pagerank.dir
+C:/Users/songa/Dropbox/Juzhen/out/build/x64-Release/CMakeFiles/test.dir
+C:/Users/songa/Dropbox/Juzhen/out/build/x64-Release/CMakeFiles/edit_cache.dir
+C:/Users/songa/Dropbox/Juzhen/out/build/x64-Release/CMakeFiles/rebuild_cache.dir

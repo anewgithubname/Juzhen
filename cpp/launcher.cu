@@ -27,15 +27,14 @@
 #include "../external/xpu_info/xpu_info.hpp"
 
 void PrintLogo() {
-    // print ubuntu logo
-
-std::cout <<"    _           _                " << std::endl;
-std::cout <<"   (_)_   _ ___| |__   ___ _ __  " << std::endl;
-std::cout <<"   | | | | |_  / '_ \\ / _ \\ '_ \\ "<< std::endl;
-std::cout <<"   | | |_| |/ /| | | |  __/ | | |"<< std::endl;
-std::cout <<"  _/ |\\__,_/___|_| |_|\\___|_| |_|"<< std::endl;
-std::cout <<" |__/                            "<< std::endl;
-std::cout <<"                                 "<< std::endl;
+    // print Juzhen Logo
+    std::cout <<"    _           _                " << std::endl;
+    std::cout <<"   (_)_   _ ___| |__   ___ _ __  " << std::endl;
+    std::cout <<"   | | | | |_  / '_ \\ / _ \\ '_ \\ "<< std::endl;
+    std::cout <<"   | | |_| |/ /| | | |  __/ | | |"<< std::endl;
+    std::cout <<"  _/ |\\__,_/___|_| |_|\\___|_| |_|"<< std::endl;
+    std::cout <<" |__/                            "<< std::endl;
+    std::cout <<"                                 "<< std::endl;
 }
 
 void PrintSeparationLine() {
@@ -66,7 +65,6 @@ int main()
         Memory<float> md;
         Memory<CUDAfloat> gpumd;
 #ifndef CPU_ONLY
-        // GPUMemoryDeleter gpumd;
         CuBLASErrorCheck(cublasCreate(&Matrix<CUDAfloat>::global_handle));
 #endif
         PrintSeparationLine();

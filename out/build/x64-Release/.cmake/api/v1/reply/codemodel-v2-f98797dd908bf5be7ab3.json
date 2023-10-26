@@ -1,0 +1,132 @@
+{
+	"configurations" : 
+	[
+		{
+			"directories" : 
+			[
+				{
+					"build" : ".",
+					"jsonFile" : "directory-.-RelWithDebInfo-d0094a50bb2071803777.json",
+					"minimumCMakeVersion" : 
+					{
+						"string" : "3.20"
+					},
+					"projectIndex" : 0,
+					"source" : ".",
+					"targetIndexes" : 
+					[
+						0,
+						1,
+						2,
+						3,
+						4,
+						5,
+						6,
+						7,
+						8
+					]
+				}
+			],
+			"name" : "RelWithDebInfo",
+			"projects" : 
+			[
+				{
+					"directoryIndexes" : 
+					[
+						0
+					],
+					"name" : "animated_octo_sniffle",
+					"targetIndexes" : 
+					[
+						0,
+						1,
+						2,
+						3,
+						4,
+						5,
+						6,
+						7,
+						8
+					]
+				}
+			],
+			"targets" : 
+			[
+				{
+					"directoryIndex" : 0,
+					"id" : "demo::@6890427a1f51a3e7e1df",
+					"jsonFile" : "target-demo-RelWithDebInfo-6b6766eb06c7741b2831.json",
+					"name" : "demo",
+					"projectIndex" : 0
+				},
+				{
+					"directoryIndex" : 0,
+					"id" : "demo_classification::@6890427a1f51a3e7e1df",
+					"jsonFile" : "target-demo_classification-RelWithDebInfo-6e65d6582f2fbc6fd914.json",
+					"name" : "demo_classification",
+					"projectIndex" : 0
+				},
+				{
+					"directoryIndex" : 0,
+					"id" : "demo_mnist::@6890427a1f51a3e7e1df",
+					"jsonFile" : "target-demo_mnist-RelWithDebInfo-73014147189557b081e6.json",
+					"name" : "demo_mnist",
+					"projectIndex" : 0
+				},
+				{
+					"directoryIndex" : 0,
+					"id" : "helloworld::@6890427a1f51a3e7e1df",
+					"jsonFile" : "target-helloworld-RelWithDebInfo-ccf03b53043d4b46992b.json",
+					"name" : "helloworld",
+					"projectIndex" : 0
+				},
+				{
+					"directoryIndex" : 0,
+					"id" : "helloworld_nn::@6890427a1f51a3e7e1df",
+					"jsonFile" : "target-helloworld_nn-RelWithDebInfo-ddbe0d7596d47394e90b.json",
+					"name" : "helloworld_nn",
+					"projectIndex" : 0
+				},
+				{
+					"directoryIndex" : 0,
+					"id" : "juzhen::@6890427a1f51a3e7e1df",
+					"jsonFile" : "target-juzhen-RelWithDebInfo-ff99ef3f0ebae84d2395.json",
+					"name" : "juzhen",
+					"projectIndex" : 0
+				},
+				{
+					"directoryIndex" : 0,
+					"id" : "knn::@6890427a1f51a3e7e1df",
+					"jsonFile" : "target-knn-RelWithDebInfo-47d1094adad0651bdec9.json",
+					"name" : "knn",
+					"projectIndex" : 0
+				},
+				{
+					"directoryIndex" : 0,
+					"id" : "pagerank::@6890427a1f51a3e7e1df",
+					"jsonFile" : "target-pagerank-RelWithDebInfo-fa96c8bc2c36b2a68cf7.json",
+					"name" : "pagerank",
+					"projectIndex" : 0
+				},
+				{
+					"directoryIndex" : 0,
+					"id" : "testbasic::@6890427a1f51a3e7e1df",
+					"jsonFile" : "target-testbasic-RelWithDebInfo-7ec69f22231d155135af.json",
+					"name" : "testbasic",
+					"projectIndex" : 0
+				}
+			]
+		}
+	],
+	"kind" : "codemodel",
+	"paths" : 
+	{
+		"build" : "C:/Users/songa/Dropbox/Juzhen/out/build/x64-Release",
+		"source" : "C:/Users/songa/Dropbox/Juzhen"
+	},
+	"version" : 
+	{
+		"major" : 2,
+		"minor" : 5
+	}
+}

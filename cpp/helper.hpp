@@ -22,14 +22,12 @@
 #ifndef HELPER_HPP
 #define HELPER_HPP
 
-// #include <fmt/format.h>
-
 #ifndef LOGGING_OFF
 #ifndef SPDLOG_COMPILED_LIB
 #define SPDLOG_COMPILED_LIB
 #endif
 #include <spdlog/spdlog.h>
-#include "spdlog/sinks/stdout_sinks.h"
+#include <spdlog/sinks/stdout_sinks.h>
 #endif
 #include <chrono>
 typedef std::chrono::high_resolution_clock Clock;
