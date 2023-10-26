@@ -1,3 +1,6 @@
 [submodule "external/spdlog"]
 	path = external/spdlog
 	url = https://github.com/gabime/spdlog.git
+[submodule "external/OpenBLAS"]
+	path = external/OpenBLAS
+	url = https://github.com/OpenMathLib/OpenBLAS.git
