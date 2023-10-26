@@ -1,5 +1,8 @@
 cmake_minimum_required(VERSION 3.20 FATAL_ERROR)
 
+add_subdirectory(external/spdlog)
+add_subdirectory(external/OpenBLAS)
+
 # set the project directory as a macro, so that we can use it in the code
 add_definitions(-DPROJECT_DIR="${CMAKE_SOURCE_DIR}")
 
@@ -44,10 +47,11 @@ if(UNIX) # if we are on linux, look for any BLAS
     set(BLAS_VENDOR "OpenBLAS")
     # set(BLAS_ROOT "/opt/OpenBLAS")
     find_package(BLAS REQUIRED)
-else() # if we are on windows, use the provided OpenBLAS library
-    set(OpenBLAS_LIBRARIES "${PROJECT_SOURCE_DIR}/external/OpenBLAS/lib/libopenblas.lib")
+# else() # if we are on windows, use the provided OpenBLAS library
+    # set(OpenBLAS_LIBRARIES "${PROJECT_SOURCE_DIR}/external/OpenBLAS/lib/libopenblas.lib")
 endif()
-set(OpenBLAS_INCLUDE_DIRS "external/OpenBLAS/include")
+find_package(BLAS REQUIRED)
+# set(OpenBLAS_INCLUDE_DIRS "external/OpenBLAS/")
 
 if(UNIX) # if we are on Unix, we need to specify the location of the external libraries
     if(ARM)
@@ -107,12 +111,12 @@ macro(GENERATE_PROJ TARGETNAME FILE)
         endif()
     endif()
 
-    if(WIN32) # if we are on Windows, we need to copy the dll to the build folder
-        add_custom_command(TARGET ${TARGETNAME} POST_BUILD # Adds a post-build event to MyTest
-            COMMAND ${CMAKE_COMMAND} -E copy_if_different # which executes "cmake - E copy_if_different..."
-            "${PROJECT_SOURCE_DIR}/external/OpenBLAS/bin/libopenblas.dll" # <--this is in-file
-            $<TARGET_FILE_DIR:${TARGETNAME}>) # <--this is out-file path
-    endif()
+    # if(WIN32) # if we are on Windows, we need to copy the dll to the build folder
+    #     add_custom_command(TARGET ${TARGETNAME} POST_BUILD # Adds a post-build event to MyTest
+    #         COMMAND ${CMAKE_COMMAND} -E copy_if_different # which executes "cmake - E copy_if_different..."
+    #         "${PROJECT_SOURCE_DIR}/external/OpenBLAS/bin/libopenblas.dll" # <--this is in-file
+    #         $<TARGET_FILE_DIR:${TARGETNAME}>) # <--this is out-file path
+    # endif()
 endmacro()
 
 GENERATE_PROJ(testbasic tests/testbasic.cu)

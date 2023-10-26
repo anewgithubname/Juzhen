@@ -151,13 +151,13 @@ class Profiler {
 //CBLAS declarations
 extern "C"
 {
-    void sgesv_(int *N, int *NRHS, float *A, int *lda, int *IPIV, float *B, int *ldb, int *INFO);
+    // void sgesv_(int *N, int *NRHS, float *A, int *lda, int *IPIV, float *B, int *ldb, int *INFO);
 
-    // LU decomoposition of a general matrix
-    void sgetrf_(int *M, int *N, float *A, int *lda, int *IPIV, int *INFO);
-    void dgetrf_(int *M, int *N, double *A, int *lda, int *IPIV, int *INFO);
+    // // LU decomoposition of a general matrix
+    // void sgetrf_(int *M, int *N, float *A, int *lda, int *IPIV, int *INFO);
+    // void dgetrf_(int *M, int *N, double *A, int *lda, int *IPIV, int *INFO);
 
-    void sgetrs_(char *TRANS, int *N, int *NRHS, float *A, int *lda, int *IPIV, float *B, int *ldb, int *INFO);
+    // void sgetrs_(char *TRANS, int *N, int *NRHS, float *A, int *lda, int *IPIV, float *B, int *ldb, int *INFO);
 
     // generate inverse of a matrix given its LU decomposition
     void sgetri_(int *N, float *A, int *lda, int *IPIV, float *WORK, int *lwork, int *INFO);
