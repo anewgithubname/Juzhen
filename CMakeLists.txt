@@ -43,24 +43,8 @@ else()
     set(CMAKE_CUDA_FLAGS "-std=c++17")
 endif()
 
-if(UNIX) # if we are on linux, look for any BLAS
-    set(BLAS_VENDOR "OpenBLAS")
-    # set(BLAS_ROOT "/opt/OpenBLAS")
-    find_package(BLAS REQUIRED)
-# else() # if we are on windows, use the provided OpenBLAS library
-    # set(OpenBLAS_LIBRARIES "${PROJECT_SOURCE_DIR}/external/OpenBLAS/lib/libopenblas.lib")
-endif()
-find_package(BLAS REQUIRED)
-# set(OpenBLAS_INCLUDE_DIRS "external/OpenBLAS/")
-
-if(UNIX) # if we are on Unix, we need to specify the location of the external libraries
-    if(ARM)
-        set(spdlog_DIR "external/arm-linux-gnueabihf/spdlog/lib/arm-linux-gnueabihf/cmake/spdlog")
-    else()
-        set(spdlog_DIR "external/spdlog/lib/cmake/spdlog")
-    endif()
-endif()
-find_package(spdlog REQUIRED)
+set(OpenBLAS_INCLUDE_DIRS "external/OpenBLAS/")
+set(spdlog_INCLUDE_DIRS "external/spdlog/include")
 
 find_package(Boost REQUIRED)
 
@@ -111,12 +95,12 @@ macro(GENERATE_PROJ TARGETNAME FILE)
         endif()
     endif()
 
-    # if(WIN32) # if we are on Windows, we need to copy the dll to the build folder
-    #     add_custom_command(TARGET ${TARGETNAME} POST_BUILD # Adds a post-build event to MyTest
-    #         COMMAND ${CMAKE_COMMAND} -E copy_if_different # which executes "cmake - E copy_if_different..."
-    #         "${PROJECT_SOURCE_DIR}/external/OpenBLAS/bin/libopenblas.dll" # <--this is in-file
-    #         $<TARGET_FILE_DIR:${TARGETNAME}>) # <--this is out-file path
-    # endif()
+    if(WIN32) # if we are on Windows, we need to copy the dll to the build folder
+        add_custom_command(TARGET ${TARGETNAME} POST_BUILD # Adds a post-build event to MyTest
+            COMMAND ${CMAKE_COMMAND} -E copy_if_different # which executes "cmake - E copy_if_different..."
+            "${PROJECT_SOURCE_DIR}/external/OpenBLAS/bin/libopenblas.dll" # <--this is in-file
+            $<TARGET_FILE_DIR:${TARGETNAME}>) # <--this is out-file path
+    endif()
 endmacro()
 
 GENERATE_PROJ(testbasic tests/testbasic.cu)
