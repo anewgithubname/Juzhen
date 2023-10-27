@@ -42,9 +42,15 @@ else()
     set(CMAKE_CUDA_FLAGS "-std=c++17")
 endif()
 
-find_package(BLAS REQUIRED)
-# set(OpenBLAS_INCLUDE_DIRS "${PROJECT_SOURCE_DIR}/external/OpenBLAS/include")
-# set(OpenBLAS_LIBRARIES "${PROJECT_SOURCE_DIR}/external/OpenBLAS/lib/libopenblas.a")
+if(UNIX) # if we are on linux, look for any BLAS
+    set(BLAS_VENDOR "OpenBLAS")
+    # set(BLAS_ROOT "/opt/OpenBLAS")
+    find_package(BLAS REQUIRED)
+else() # if we are on windows, use the provided OpenBLAS library
+    set(OpenBLAS_LIBRARIES "${PROJECT_SOURCE_DIR}/external/OpenBLAS/lib/libopenblas.lib")
+endif()
+set(OpenBLAS_INCLUDE_DIRS "external/OpenBLAS/include")
+
 set(spdlog_INCLUDE_DIRS "${PROJECT_SOURCE_DIR}/external/spdlog/include")
 
 find_package(Boost REQUIRED)
