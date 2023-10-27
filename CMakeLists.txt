@@ -1,7 +1,6 @@
 cmake_minimum_required(VERSION 3.20 FATAL_ERROR)
 
 add_subdirectory(external/spdlog)
-add_subdirectory(external/OpenBLAS)
 
 # set the project directory as a macro, so that we can use it in the code
 add_definitions(-DPROJECT_DIR="${CMAKE_SOURCE_DIR}")
@@ -43,8 +42,10 @@ else()
     set(CMAKE_CUDA_FLAGS "-std=c++17")
 endif()
 
-set(OpenBLAS_INCLUDE_DIRS "external/OpenBLAS/")
-set(spdlog_INCLUDE_DIRS "external/spdlog/include")
+find_package(BLAS REQUIRED)
+# set(OpenBLAS_INCLUDE_DIRS "${PROJECT_SOURCE_DIR}/external/OpenBLAS/include")
+# set(OpenBLAS_LIBRARIES "${PROJECT_SOURCE_DIR}/external/OpenBLAS/lib/libopenblas.a")
+set(spdlog_INCLUDE_DIRS "${PROJECT_SOURCE_DIR}/external/spdlog/include")
 
 find_package(Boost REQUIRED)
 

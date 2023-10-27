@@ -62,4 +62,5 @@ vsproj/*
 build/*
 *.matrix
 
+out/**
 !external/**
