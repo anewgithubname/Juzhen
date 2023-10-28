@@ -23,7 +23,7 @@
 
  */
 
-#include "../cpp/layer.hpp"
+#include "../ml/layer.hpp"
 #include "../cpp/juzhen.hpp"
 
 using namespace std;

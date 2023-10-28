@@ -25,7 +25,7 @@
 
 // #define CPU_ONLY
 
-#include "../cpp/layer.hpp"
+#include "../ml/layer.hpp"
 #include "../cpp/juzhen.hpp"
 #include <math.h>
 #include <ctime>

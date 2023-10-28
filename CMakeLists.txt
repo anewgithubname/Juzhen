@@ -56,9 +56,9 @@ set(spdlog_INCLUDE_DIRS "${PROJECT_SOURCE_DIR}/external/spdlog/include")
 find_package(Boost REQUIRED)
 
 if(NOT CPU_ONLY)
-    add_library(juzhen cpp/launcher.cu cpp/cumatrix.cu cpp/cukernels.cu cpp/cumatrix.cuh cpp/juzhen.hpp cpp/core.hpp cpp/matrix.hpp cpp/helper.hpp cpp/layer.hpp)
+    add_library(juzhen cpp/launcher.cu cpp/cumatrix.cu cpp/cukernels.cu cpp/cumatrix.cuh cpp/juzhen.hpp cpp/core.hpp cpp/matrix.hpp cpp/helper.hpp ml/layer.hpp)
 else()
-    add_library(juzhen cpp/launcher.cu cpp/juzhen.hpp cpp/core.hpp cpp/matrix.hpp cpp/helper.hpp cpp/layer.hpp)
+    add_library(juzhen cpp/launcher.cu cpp/juzhen.hpp cpp/core.hpp cpp/matrix.hpp cpp/helper.hpp ml/layer.hpp)
 endif()
 
 target_precompile_headers(juzhen PRIVATE cpp/juzhen.hpp)

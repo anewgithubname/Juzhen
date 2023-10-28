@@ -62,5 +62,9 @@ vsproj/*
 build/*
 *.matrix
 
+x64/**
 out/**
 !external/**
+cmake-build-debug/**
+cmake-build-release/**
+.idea/**
