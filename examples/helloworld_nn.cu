@@ -1,6 +1,6 @@
 /**
  * @file helloworld_nn.cpp
- * @brief MNIST implementation
+ * @brief basic NN regression example
  * @author Song Liu (song.liu@bristol.ac.uk)
  *
  * This file contains all essential matrix operations.

@@ -1,6 +1,6 @@
 /**
- * @file helloworld_nn.cpp
- * @brief MNIST implementation
+ * @file demo_classification.cu
+ * @brief basic logisitc classification on synthetic data
  * @author Song Liu (song.liu@bristol.ac.uk)
  *
  * This file contains all essential matrix operations.

@@ -152,7 +152,7 @@ namespace Juzhen
 		const Matrix<D>& output;
 		Matrix<D> oneK1;
 	public:
-		LogisticLayer(int nb, const Matrix<D>& output) : 
+		LogisticLayer(size_t nb, const Matrix<D>& output) : 
 			Layer<D>(2, 2, nb), 
 			output(output), 
 			oneK1("oneK1", output.num_row(), 1) {

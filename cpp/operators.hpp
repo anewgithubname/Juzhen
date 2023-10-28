@@ -1,4 +1,3 @@
-#pragma once
 /**
  * @file operator.hpp
  * @brief Operator Definitions
@@ -23,6 +22,8 @@
     along with this program.  If not, see <https://www.gnu.org/licenses/>.
 
  */
+
+#pragma once
 
 #include "core.hpp"
 
