@@ -6,7 +6,7 @@ add_subdirectory(external/spdlog)
 add_definitions(-DPROJECT_DIR="${CMAKE_SOURCE_DIR}")
 
 # do you need GPU support? CUDA 11.8 is required
-set(CPU_ONLY OFF)
+set(CPU_ONLY ON)
 
 # are you on ARM? if so, you need to compile the external libraries yourself
 set(ARM OFF)
@@ -111,6 +111,7 @@ macro(GENERATE_PROJ TARGETNAME FILE)
 endmacro()
 
 GENERATE_PROJ(testbasic tests/testbasic.cu)
+GENERATE_PROJ(testEigen tests/testEigen.cu)
 GENERATE_PROJ(helloworld_nn examples/helloworld_nn.cu)
 GENERATE_PROJ(helloworld examples/helloworld.cu)
 GENERATE_PROJ(demo examples/demo.cu)
@@ -123,3 +124,4 @@ enable_testing()
 
 add_test(test0 testbasic)
 add_test(test1 demo)
+add_test(test2 testEigen)
