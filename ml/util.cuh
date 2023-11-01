@@ -72,6 +72,16 @@ Matrix<T> kernel_gau(Matrix<T> &&b, float sigma) {
 }
 
 template <class T>
+Matrix<T> relu(Matrix<T> &&M) {
+    return elemwise([=] __GPU_CPU__(float x) { return x > 0.0 ? x : 0.0; }, M);
+}
+
+template <class T>
+Matrix<T> d_relu(Matrix<T> &&M) {
+    return elemwise([=] __GPU_CPU__(float x) { return x > 0.0 ? 1.0 : 0.0; }, M);
+}
+
+template <class T>
 inline int argmin(std::vector<T> a) {
     // replace all nan with inf
     std::replace_if(a.begin(), a.end(), [](T x) { return std::isnan(x); },
@@ -108,6 +118,11 @@ struct adam_state{
         :iteration(1), alpha(0.01), beta1(0.9), beta2(0.999), eps(1e-8){
         m = Matrix<T>::zeros(theta.num_row(), theta.num_col());
         v = Matrix<T>::zeros(theta.num_row(), theta.num_col());
+    }
+    adam_state(double alpha, size_t nrow, size_t ncol)
+        :iteration(1), alpha(alpha), beta1(0.9), beta2(0.999), eps(1e-8){
+        m = Matrix<T>::zeros(nrow, ncol);
+        v = Matrix<T>::zeros(nrow, ncol);
     }
 };
 

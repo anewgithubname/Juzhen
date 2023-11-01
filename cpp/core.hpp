@@ -225,6 +225,8 @@ class Matrix {
     friend Matrix<Data> read(std::string filename);
     template <class Data>
     friend void write(std::string filename, const Matrix<Data> &M);
+    template <class Data>
+    friend void write(FILE *f, const Matrix<Data> &M);
 
     friend class Memory<D>;
     friend class Matrix<CUDAfloat>;
@@ -568,6 +570,15 @@ Matrix<D> read(std::string filename) {
 }
 
 template <class D>
+void write(FILE *f, const Matrix<D> &M) {
+    // write int variables to the file.
+    putw(M.numrow, f);
+    putw(M.numcol, f);
+    putw(M.transpose, f);
+    fwrite(M.elements.get(), sizeof(CUDAfloat), M.numcol * M.numrow, f);
+}
+
+template <class D>
 /*
     Write matrix M to file
     M: the matrix to be written
@@ -577,10 +588,7 @@ void write(std::string filename, const Matrix<D> &M) {
     FILE *f = fopen(filename.c_str(), "wb");
     // write int variables to the file.
 
-    putw(M.numrow, f);
-    putw(M.numcol, f);
-    putw(M.transpose, f);
-    fwrite(M.elements.get(), sizeof(D), M.numcol * M.numrow, f);
+    write(f, M);
 
     fclose(f);
 }

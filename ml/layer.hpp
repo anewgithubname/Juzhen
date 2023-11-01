@@ -26,11 +26,10 @@
 #ifndef LAYER2_HPP
 #define LAYER2_HPP
 
-#include <tuple>
-#include <cfloat>
-#include <list>  
 #include "../cpp/core.hpp"
 #include "../cpp/matrix.hpp"
+#include "./util.cuh"
+
 #ifndef CPU_ONLY
 #include "../cpp/cumatrix.cuh"
 #endif
@@ -51,18 +50,20 @@ namespace Juzhen
 		// do we need to update weights and bias?
 		bool need_update = true;
 
+		adam_state<D> adamW, adamb;
+
 	public:
 		
 		Layer(int m, int n, int nb) :
-			weights("weights", m, n), bias("bias", m, 1), val("output", m, nb) {
+			weights("weights", m, n), bias("bias", m, 1), val("output", m, nb), adamW(.0001, m, n), adamb(.0001, m, 1) {
 
 			//intitialize parameters and gradients
 			this->nb = nb;
-			weights = Matrix<D>::randn(m, n) * .1;
-			bias = Matrix<D>::randn(m, 1) * .1;
+			weights = Matrix<D>::randn(m, n) * .001;
+			bias = Matrix<D>::randn(m, 1) * .001;
 			val.zeros();
-			lrW = .01;
-			lrb = .01;
+			lrW = .1;
+			lrb = .1;
 		}
 		virtual const Matrix<D> grad(const Matrix<D>& input) const {
 			// TODO: each time make a new matrix, not efficient
@@ -70,9 +71,9 @@ namespace Juzhen
 		}
 
 		// this function will destroy gW and gb
-		void update(Matrix<D>& gW, Matrix<D>& gb) {
-			weights -= lrW * std::move(gW);
-			bias -= lrb * std::move(gb);
+		void update(Matrix<D>&& gW, Matrix<D>&& gb) {
+			weights -= lrW * adam_update(std::move(gW), adamW);
+			bias -= lrb * adam_update(std::move(gb), adamb);
 		}
 
 		virtual void eval(const Matrix<D>& input) {
@@ -119,6 +120,26 @@ namespace Juzhen
 			Layer<D>::val = Layer<D>::weights * input + Layer<D>::bias * Matrix<D>::ones(1, input.num_col());
 		}
 	};
+
+    /*
+     * relu layer
+     */
+    template <class D>
+    class ReluLayer : public Layer<D> {
+
+    public:
+        ReluLayer(int m, int n, int nb) : Layer<D>(m, n, nb) {
+        }
+        const Matrix<D> grad(const Matrix<D>& input) const override {
+            return d_relu(Layer<D>::weights * input + Layer<D>::bias * Matrix<D>::ones(1, input.num_col()));
+        }
+
+        void eval(const Matrix<D>& input) override {
+            Layer<D>::val = relu(Layer<D>::weights * input + Layer<D>::bias * Matrix<D>::ones(1, input.num_col()));
+        }
+
+    };
+
 	
 	/*
 	* least square layer 
@@ -131,11 +152,11 @@ namespace Juzhen
 		LossLayer(int nb, const Matrix<D>& output) : Layer<D>(1, 1, nb), output(output) {
 		}
 
-		virtual const Matrix<D> grad(const Matrix<D>& input) const override {
+		const Matrix<D> grad(const Matrix<D>& input) const override {
 			return 2.0* (input - output) / Layer<D>::nb;
 		}
 
-		virtual void eval(const Matrix<D>& input) override {
+		void eval(const Matrix<D>& input) override {
 			Layer<D>::val = sum(square(output - input), 1) / Layer<D>::nb;
 		}
 	};
@@ -156,12 +177,12 @@ namespace Juzhen
 			oneK1.ones();
 		}
 
-		virtual const Matrix<D> grad(const Matrix<D>& input) const override {
+		const Matrix<D> grad(const Matrix<D>& input) const override {
 			auto Z = oneK1 * sum(exp(input), 0);
 			return - (output - exp(input) / std::move(Z)) / Layer<D>::nb;
 		}
 
-		virtual void eval(const Matrix<D>& input) override {
+		void eval(const Matrix<D>& input) override {
 			Layer<D>::val = sum(hadmd(input, output), 0) - log(sum(exp(input),0));
 			Layer<D>::val = - sum(Layer<D>::val, 1) / Layer<D>::nb;
 		}
@@ -174,32 +195,33 @@ namespace Juzhen
 	template <class D>
 	class ZeroOneLayer : public Layer<D> {
 		// you cannot change the output once you set it. 
-		const Matrix<D>& output;
+		const Matrix<float> output;
 		Matrix<D> oneK1;
 	public:
 		ZeroOneLayer(int nb, const Matrix<D>& output) :
 			Layer<D>(1, 1, nb),
-			output(output),
+			output(std::move(output.to_host())),
 			oneK1("oneK1", output.num_row(), 1) {
 			oneK1.ones();
 		}
 
-		virtual const Matrix<D> grad(const Matrix<D>& input) const override {
-			LOG_ERROR("not supported!");
+		const Matrix<D> grad(const Matrix<D>& input) const override {
+			LOG_ERROR("you cannot differentiate zero-one layer!");
 			ERROR_OUT;
 		}
 
-		virtual void eval(const Matrix<D>& input) override {
+		void eval(const Matrix<D>& input) override {
 			// compute test accuracy
 			double err = 0;
-			int k = input.num_row();
-			int nt = input.num_col();
+            auto input_t = input.to_host();
+			int k = input_t.num_row();
+			int nt = input_t.num_col();
 			for (int i = 0; i < nt; i++) {
 				double max = - DBL_MAX;
 				int pred = -1;
 				for (int j = 0; j < k; j++) {
-					if (input.elem(j, i) > max) {
-						max = input.elem(j, i);
+					if (input_t.elem(j, i) > max) {
+						max = input_t.elem(j, i);
 						pred = j;
 					}
 				}
@@ -208,14 +230,14 @@ namespace Juzhen
 					err++;
 				}
 			}
-			Layer<D>::val = Matrix<D>("val", { { err / nt } });
+			Layer<D>::val = Matrix<D>::ones(1, 1) * err / nt;
 		}
 	};
 
 	// evaluate a neural network, with input. 
 	template <class D>
 	const Matrix<D>& forward(std::list<Layer<D>*> neuralnet, const Matrix<D>& input) {
-		if (neuralnet.size() == 0) {
+		if (neuralnet.empty()) {
 			return input;
 		}
 		else {
@@ -232,7 +254,7 @@ namespace Juzhen
 	Matrix<D> backprop(std::list<Layer<D>*> neuralnet, const Matrix<D>& input) {
 		auto tt = neuralnet.back();
 		neuralnet.pop_back();
-		if (neuralnet.size() == 0) {
+		if (neuralnet.empty()) {
 			return tt->grad(input);
 		}
 		else {
@@ -247,7 +269,7 @@ namespace Juzhen
 
 			if(tt->need_update) {
 				// gradient update
-				tt->update(gW, gb);
+				tt->update(std::move(gW), std::move(gb));
 			}
 
 			// compute W ^ T * curr_grad
@@ -269,11 +291,11 @@ namespace Juzhen
 				this->indim = indim;
 			}
 
-			virtual const Matrix<D> grad(const Matrix<D>& input) const override {
+			const Matrix<D> grad(const Matrix<D>& input) const override {
 				return W;
 			}
 
-			virtual void eval(const Matrix<D>& input) override {
+			void eval(const Matrix<D>& input) override {
 				Layer<D>::val = sum(sum(hadmd(W, input),1),0);
 			}
 		};
