@@ -1,3 +1,28 @@
+/**
+ * @file knn.cu
+ * @brief k nearest neighbour example
+ * @author Song Liu (song.liu@bristol.ac.uk)
+ *
+ * This file contains all essential matrix operations.
+ * Whatever you do, please keep it as simple as possible.
+ *
+    Copyright (C) 2022 Song Liu (song.liu@bristol.ac.uk)
+
+    This program is free software: you can redistribute it and/or modify
+    it under the terms of the GNU General Public License as published by
+    the Free Software Foundation, either version 3 of the License, or
+    (at your option) any later version.
+
+    This program is distributed in the hope that it will be useful,
+    but WITHOUT ANY WARRANTY; without even the implied warranty of
+    MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
+    GNU General Public License for more details.
+
+    You should have received a copy of the GNU General Public License
+    along with this program.  If not, see <https://www.gnu.org/licenses/>.
+
+ */
+
 #include "../cpp/juzhen.hpp"
 
 #ifndef CPU_ONLY
@@ -9,39 +34,8 @@
 template <class T>
 Matrix<T> comp_dist(const Matrix<T> &a, const Matrix<T> &b)
 {
-	// auto t1 = square(b);
-	// std::cout << t1 << std::endl;
-	// auto t2 = sum(square(b),1);
-	// std::cout << t2 << std::endl;
-	// auto t3 = sum(square(a), 1) * Matrix<T>::ones(1, b.num_row()) + Matrix<T>::ones(a.num_row(), 1) * sum(square(b), 1).T();
-	// std::cout << t3 << std::endl;
-	// auto t4 = 2 * a * b.T();
-	// std::cout << t4 << std::endl;
 	return sum(square(a), 1) * Matrix<T>::ones(1, b.num_row()) + Matrix<T>::ones(a.num_row(), 1) * sum(square(b), 1).T() - 2 * a * b.T();
 }
-
-template <class T>
-Matrix<T> kernel_gau(Matrix<T> &&b, float sigma)
-{
-	return exp(-b / (2 * sigma * sigma));
-}
-
-// template <class T>
-// float comp_med(const Matrix<T> &a)
-// {
-// 	TIC;
-// 	const float *s = (float *)comp_dist(a, a).data();
-// 	size_t n = a.num_row() * a.num_row();
-// #ifndef CPU_ONLY
-// 	thrust::device_vector<float> vec(s, s + n);
-// 	thrust::sort(vec.begin(), vec.end());
-// #else
-// 	std::vector<T> vec(s, s + n);
-// 	std::sort(vec.begin(), vec.end());
-// #endif
-// 	TOC;
-// 	return sqrt(vec[n / 2]);
-// }
 
 /*
 Find the index of the minimum element in an array.

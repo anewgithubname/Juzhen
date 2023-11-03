@@ -110,7 +110,7 @@ ans =
 You can also use a higher level Neural Net API to write Neural Net applications: 
 ```c++
 //helloworldnn.cu
-#include "cpp/layer.hpp"
+#include "ml/layer.hpp"
 
 using namespace std;
 using namespace Juzhen;

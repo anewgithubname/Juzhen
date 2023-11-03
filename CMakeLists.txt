@@ -6,12 +6,12 @@ add_subdirectory(external/spdlog)
 add_definitions(-DPROJECT_DIR="${CMAKE_SOURCE_DIR}")
 
 # do you need GPU support? CUDA 11.8 is required
-set(CPU_ONLY ON)
+set(CPU_ONLY OFF)
 
 # are you on ARM? if so, you need to compile the external libraries yourself
 set(ARM OFF)
 
-set(CMAKE_CXX_STANDARD 17)
+set(CMAKE_CXX_STANDARD 20)
 
 if(CPU_ONLY)
     message("BUILD WITHOUT GPU SUPPORT!")
@@ -22,24 +22,24 @@ else()
     # if we are on Unix, we need to specify the CUDA toolkit location
     # CUDA 11.8 is required
     if(UNIX) 
-        set(CUDA_TOOLKIT_ROOT_DIR "/usr/local/cuda-11.8")
-        set(CMAKE_CUDA_COMPILER /usr/local/cuda-11.8/bin/nvcc)
+        set(CUDA_TOOLKIT_ROOT_DIR "/usr/local/cuda-12.3")
+        set(CMAKE_CUDA_COMPILER /usr/local/cuda-12.3/bin/nvcc)
         set(CMAKE_CUDA_HOST_COMPILER /usr/bin/g++-10)
     else()
-        set(CUDA_TOOLKIT_ROOT_DIR "C:/Program Files/NVIDIA GPU Computing Toolkit/CUDA/v11.8")
+        set(CUDA_TOOLKIT_ROOT_DIR "C:/Program Files/NVIDIA GPU Computing Toolkit/CUDA/v12.3")
     endif()
     set(CMAKE_CUDA_ARCHITECTURES 61)
     project(animated_octo_sniffle LANGUAGES CXX CUDA)
     find_package(CUDA REQUIRED)
 
-    set(CMAKE_CUDA_STANDARD 17)
+    set(CMAKE_CUDA_STANDARD 20)
 
     if(NOT DEFINED CMAKE_CUDA20_STANDARD_COMPILE_OPTION)
         set(CMAKE_CUDA20_STANDARD_COMPILE_OPTION "")
         set(CMAKE_CUDA20_EXTENSION_COMPILE_OPTION "")
     endif()
 
-    set(CMAKE_CUDA_FLAGS "-std=c++17")
+    set(CMAKE_CUDA_FLAGS "-std=c++20")
 endif()
 
 if(UNIX) # if we are on linux, look for any BLAS
@@ -56,9 +56,9 @@ set(spdlog_INCLUDE_DIRS "${PROJECT_SOURCE_DIR}/external/spdlog/include")
 find_package(Boost REQUIRED)
 
 if(NOT CPU_ONLY)
-    add_library(juzhen cpp/launcher.cu cpp/cumatrix.cu cpp/cukernels.cu cpp/cumatrix.cuh cpp/juzhen.hpp cpp/core.hpp cpp/matrix.hpp cpp/helper.hpp cpp/layer.hpp)
+    add_library(juzhen cpp/launcher.cu cpp/cumatrix.cu cpp/cukernels.cu cpp/cumatrix.cuh cpp/juzhen.hpp cpp/core.hpp cpp/matrix.hpp cpp/helper.hpp ml/layer.hpp)
 else()
-    add_library(juzhen cpp/launcher.cu cpp/juzhen.hpp cpp/core.hpp cpp/matrix.hpp cpp/helper.hpp cpp/layer.hpp)
+    add_library(juzhen cpp/launcher.cu cpp/juzhen.hpp cpp/core.hpp cpp/matrix.hpp cpp/helper.hpp ml/layer.hpp)
 endif()
 
 target_precompile_headers(juzhen PRIVATE cpp/juzhen.hpp)
@@ -111,6 +111,7 @@ macro(GENERATE_PROJ TARGETNAME FILE)
 endmacro()
 
 GENERATE_PROJ(testbasic tests/testbasic.cu)
+GENERATE_PROJ(testEigen tests/testEigen.cu)
 GENERATE_PROJ(helloworld_nn examples/helloworld_nn.cu)
 GENERATE_PROJ(helloworld examples/helloworld.cu)
 GENERATE_PROJ(demo examples/demo.cu)
@@ -123,3 +124,4 @@ enable_testing()
 
 add_test(test0 testbasic)
 add_test(test1 demo)
+add_test(test2 testEigen)

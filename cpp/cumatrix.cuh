@@ -273,7 +273,9 @@ class Matrix<CUDAfloat> {
     friend Matrix<CUDAfloat> hadmd(const Matrix<CUDAfloat>& M1,
                                    Matrix<CUDAfloat>&& M2);
     friend Matrix<CUDAfloat> hadmd(Matrix<CUDAfloat>&& M1,
-                                   const Matrix<CUDAfloat>& M2);
+                                  const Matrix<CUDAfloat>& M2);
+    
+    friend void read<CUDAfloat>(FILE *fp, Matrix<CUDAfloat>& M);
 };
 
 struct GPUSampler {
@@ -439,5 +441,13 @@ Matrix<CUDAfloat>& fill(Matrix<CUDAfloat>& M, double a);
 void copy(Matrix<CUDAfloat>& dest, const Matrix<CUDAfloat>& src);
 Matrix<CUDAfloat> hstack(std::vector<MatrixView<CUDAfloat>> matrices);
 const Matrix<CUDAfloat> vstack(std::vector<MatrixView<CUDAfloat>> matrices);
+
+// specialization, as they will be called by 
+// fun(Matrix<D> M) where D is a template parameter
+
+template <>
+void write(FILE *fp, const Matrix<CUDAfloat>& M);
+template <>
+void read(FILE *fp, Matrix<CUDAfloat>& M);
 
 #endif

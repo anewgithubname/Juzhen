@@ -1,4 +1,3 @@
-#pragma once
 /**
  * @file operator.hpp
  * @brief Operator Definitions
@@ -24,11 +23,13 @@
 
  */
 
+#pragma once
+
 #include "core.hpp"
 
 // operator overloads
 
-#define HAS_CONCEPTS 0
+#define HAS_CONCEPTS 1
 
 #pragma region Definitions of Concepts
 // The four rules for implementing a matrix class

@@ -222,9 +222,13 @@ class Matrix {
     friend Matrix<Data> hadmd(const Matrix<Data> &M1, const Matrix<Data> &M2);
 
     template <class Data>
+    friend void read(FILE *f, Matrix<Data> &M);
+    template <class Data>
     friend Matrix<Data> read(std::string filename);
     template <class Data>
     friend void write(std::string filename, const Matrix<Data> &M);
+    template <class Data>
+    friend void write(FILE *f, const Matrix<Data> &M);
 
     friend class Memory<D>;
     friend class Matrix<CUDAfloat>;
@@ -547,6 +551,16 @@ Matrix<D> Matrix<D>::eleminv(double l) const {
     return M;
 }
 
+template <class D>
+void read(FILE *f, Matrix<D> &M){
+    // read int variables to the file.
+    size_t numrow = getw(f);
+    size_t numcol = getw(f);
+    size_t transpose = getw(f);
+
+    int bytesread = fread(M.elements.get(), sizeof(D), numcol * numrow, f);
+}
+
 /*
  * Read Matrix from a File
  *
@@ -568,6 +582,15 @@ Matrix<D> read(std::string filename) {
 }
 
 template <class D>
+void write(FILE *f, const Matrix<D> &M) {
+    // write int variables to the file.
+    putw(M.numrow, f);
+    putw(M.numcol, f);
+    putw(M.transpose, f);
+    fwrite(M.elements.get(), sizeof(CUDAfloat), M.numcol * M.numrow, f);
+}
+
+template <class D>
 /*
     Write matrix M to file
     M: the matrix to be written
@@ -577,10 +600,7 @@ void write(std::string filename, const Matrix<D> &M) {
     FILE *f = fopen(filename.c_str(), "wb");
     // write int variables to the file.
 
-    putw(M.numrow, f);
-    putw(M.numcol, f);
-    putw(M.transpose, f);
-    fwrite(M.elements.get(), sizeof(D), M.numcol * M.numrow, f);
+    write(f, M);
 
     fclose(f);
 }

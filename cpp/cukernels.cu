@@ -363,3 +363,17 @@ Matrix<CUDAfloat> hadmd(Matrix<CUDAfloat> &&M1, const Matrix<CUDAfloat> &M2) {
 Matrix<CUDAfloat> hadmd(Matrix<CUDAfloat> &&M1, Matrix<CUDAfloat> &&M2) {
     return hadmd(M1, std::move(M2));
 }
+
+template <>
+void write(FILE *fp, const Matrix<CUDAfloat>& M) {
+    write(fp, M.to_host());
+}
+
+template <>
+void read(FILE *fp, Matrix<CUDAfloat>& M) {
+    Matrix<float> tmp("tmp", M.num_row(), M.num_col());
+    read(fp, tmp);
+
+    M.numrow = tmp.numrow; M.numcol = tmp.numcol; M.transpose = tmp.transpose;
+    cudaMemcpy(M.elements.get(), tmp.elements.get(), tmp.num_row() * tmp.num_col() * sizeof(float), cudaMemcpyHostToDevice);
+}

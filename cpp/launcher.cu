@@ -62,7 +62,8 @@ int main()
 
     {
         Memory<int> mdi;
-        Memory<float> md;
+        Memory<float> md32;
+        Memory<double> md64;
         Memory<CUDAfloat> gpumd;
 #ifndef CPU_ONLY
         CuBLASErrorCheck(cublasCreate(&Matrix<CUDAfloat>::global_handle));

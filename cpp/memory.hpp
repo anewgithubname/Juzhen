@@ -1,13 +1,9 @@
-#pragma once
-#include "helper.hpp"
-
 /**
  * @file memory.hpp
  * @brief Memory Control Module
  * @author Song Liu (song.liu@bristol.ac.uk)
  *
- * This file contains all essential matrix operations.
- * Whatever you do, please keep it as simple as possible.
+ * This file contains all memory related operations.
  *
     Copyright (C) 2023 Song Liu (song.liu@bristol.ac.uk)
 
@@ -25,6 +21,9 @@
     along with this program.  If not, see <https://www.gnu.org/licenses/>.
 
  */
+
+#pragma once
+#include "helper.hpp"
 
 template <class D>
 struct MemorySpace {
