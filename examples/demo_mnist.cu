@@ -78,12 +78,13 @@ vector<Matrix<float>> mnist_dataset(){
     std::cout << "size of labels_t: " << labels_t.num_row() << " " << labels_t.num_col() << std::endl;
 
     auto Yt = one_hot(labels_t, k);
-    std::cout << "size of Y: " << Yt.num_row() << " " << Yt.num_col() << std::endl;
+    std::cout << "size of Yt: " << Yt.num_row() << " " << Yt.num_col() << std::endl;
 
     return {X, Y, Xt, Yt};
 }
 
 int compute() {
+    Profiler p("compute");
     // spdlog::set_level(spdlog::level::debug);
 #ifndef CPU_ONLY
     GPUSampler sampler(1);
@@ -108,13 +109,20 @@ int compute() {
 #endif
 
     // define layers
-    Layer<FLOAT> L0(1024, d, batchsize), L1(128, 1024, batchsize);
+    ReluLayer<FLOAT> L0(1024, d, batchsize), L1(128, 1024, batchsize);
     LinearLayer<FLOAT> L2(k, 128, batchsize);
     // logistic loss
     ZeroOneLayer<FLOAT> L3t(XT.num_col(), YT);
 
     // nns are linked lists containing layers
     list<Layer<FLOAT>*> trainnn({ &L2, &L1, &L0 }), testnn({ &L3t, &L2, &L1, &L0 });
+
+    //if file exists, load weights
+    FILE *fp = fopen((std::string(PROJECT_DIR) + "/mnist.weights").c_str(), "r");
+    if (fp) {
+        fclose(fp);
+        loadweights(trainnn, std::string(PROJECT_DIR) + "/mnist.weights");
+    }
 
     // sgd
     int iter = 0;
@@ -148,5 +156,6 @@ int compute() {
         iter++;
     }
 
+    dumpweights(trainnn, std::string(PROJECT_DIR) + "/mnist.weights");
     return 0;
 }

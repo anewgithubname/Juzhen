@@ -23,6 +23,7 @@
 
  */
 
+#include <fstream>
 #include "../cpp/juzhen.hpp"
 
 #define HLINE std::cout << "--------------------------------" << std::endl
@@ -48,6 +49,11 @@ int compute() {
         std::cout << C << std::endl;
         auto D = elemwise([=](float e) {return e-1; }, C);
         std::cout << D << std::endl;
+
+        //write matrices to files
+        std::fstream fout("A.matrix");
+        fout << A;
+        fout.close();
         
 
         // auto C = exp(A) + B;

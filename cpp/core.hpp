@@ -222,6 +222,8 @@ class Matrix {
     friend Matrix<Data> hadmd(const Matrix<Data> &M1, const Matrix<Data> &M2);
 
     template <class Data>
+    friend void read(FILE *f, Matrix<Data> &M);
+    template <class Data>
     friend Matrix<Data> read(std::string filename);
     template <class Data>
     friend void write(std::string filename, const Matrix<Data> &M);
@@ -547,6 +549,16 @@ Matrix<D> Matrix<D>::eleminv(double l) const {
     for (size_t i = 0; i < numrow * numcol; i++)
         M.elements[i] = l / elements[i];
     return M;
+}
+
+template <class D>
+void read(FILE *f, Matrix<D> &M){
+    // read int variables to the file.
+    size_t numrow = getw(f);
+    size_t numcol = getw(f);
+    size_t transpose = getw(f);
+
+    int bytesread = fread(M.elements.get(), sizeof(D), numcol * numrow, f);
 }
 
 /*

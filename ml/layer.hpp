@@ -26,6 +26,7 @@
 #ifndef LAYER2_HPP
 #define LAYER2_HPP
 
+#include <cfloat>
 #include "../cpp/core.hpp"
 #include "../cpp/matrix.hpp"
 #include "./util.cuh"
@@ -62,8 +63,8 @@ namespace Juzhen
 			weights = Matrix<D>::randn(m, n) * .001;
 			bias = Matrix<D>::randn(m, 1) * .001;
 			val.zeros();
-			lrW = .1;
-			lrb = .1;
+			lrW = 1;
+			lrb = 1;
 		}
 		virtual const Matrix<D> grad(const Matrix<D>& input) const {
 			// TODO: each time make a new matrix, not efficient
@@ -195,12 +196,13 @@ namespace Juzhen
 	template <class D>
 	class ZeroOneLayer : public Layer<D> {
 		// you cannot change the output once you set it. 
-		const Matrix<float> output;
+		const Matrix<D>& output;
 		Matrix<D> oneK1;
+
 	public:
 		ZeroOneLayer(int nb, const Matrix<D>& output) :
 			Layer<D>(1, 1, nb),
-			output(std::move(output.to_host())),
+			output(output),
 			oneK1("oneK1", output.num_row(), 1) {
 			oneK1.ones();
 		}
@@ -212,25 +214,8 @@ namespace Juzhen
 
 		void eval(const Matrix<D>& input) override {
 			// compute test accuracy
-			double err = 0;
-            auto input_t = input.to_host();
-			int k = input_t.num_row();
-			int nt = input_t.num_col();
-			for (int i = 0; i < nt; i++) {
-				double max = - DBL_MAX;
-				int pred = -1;
-				for (int j = 0; j < k; j++) {
-					if (input_t.elem(j, i) > max) {
-						max = input_t.elem(j, i);
-						pred = j;
-					}
-				}
-				if (output.elem(pred,i) == 0) { //TODO: dangerous
-					// cout << "Prediction error: " << pred.elem(0,i) << " " << labels_t.elem(0,i) << endl;
-					err++;
-				}
-			}
-			Layer<D>::val = Matrix<D>::ones(1, 1) * err / nt;
+			auto pred = predict_one_hot(input);
+			Layer<D>::val = 1 - sum(sum(hadmd(pred, output), 0),1)/input.num_col();
 		}
 	};
 
@@ -340,5 +325,38 @@ namespace Juzhen
 		}
 	}
 
+	template <class D>
+	void dumpweights(std::list<Layer<D>*> neuralnet, std::string filename)
+	{
+		FILE *fp = fopen(filename.c_str(), "wb");
+
+		for(auto& l : neuralnet) {
+			auto layertype = typeid(*l).name();
+			fwrite(layertype, sizeof(char), strlen(layertype), fp);
+			write(fp, l->W());
+			write(fp, l->b());
+		}
+		
+		fclose(fp);
+	}
+
+	template <class D>
+	void loadweights(std::list<Layer<D>*> neuralnet, std::string filename){
+		FILE *fp = fopen(filename.c_str(), "rb");
+
+		for(auto& l : neuralnet) {
+			auto layertype = typeid(*l).name();
+			char buf[100];
+			fread(buf, sizeof(char), strlen(layertype), fp); buf[strlen(layertype)] = '\0';
+			if(strcmp(buf, layertype) != 0) {
+				LOG_ERROR("layer type mismatch");
+				ERROR_OUT;
+			}
+			read(fp, l->W());
+			read(fp, l->b());
+		}
+		
+		fclose(fp);
+	}
 }
-#endif	
+#endif

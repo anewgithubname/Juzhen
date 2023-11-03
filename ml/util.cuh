@@ -142,3 +142,26 @@ Matrix<T> adam_update(Matrix<T> &&g, adam_state<T> &state){
     iteration++;
     return std::move(g);
 }
+
+template <class T>
+Matrix<T> predict_one_hot(const Matrix<T>& input){
+    //finding the maximum of input for each column
+    auto colmax = reduce(
+
+        [] __GPU_CPU__(float *v, float *vdes, int lenv, int lendes){
+            double max = - DBL_MAX;
+            for(int i = 0; i < lenv; i++){
+                if(v[i] > max){
+                    max = v[i];
+                }
+            }
+            vdes[0] = max;
+        },
+        
+        input, 0, 1);
+
+    //substraction of the maximum from each column
+    auto sub = input - Matrix<T>::ones(input.num_row(), 1) * colmax;
+    //converting it to zero one matrix
+    return elemwise([] __GPU_CPU__ (float x){return x > -1e-5 ? 1 : 0;}, std::move(sub));
+}
