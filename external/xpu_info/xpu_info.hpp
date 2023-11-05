@@ -15,6 +15,7 @@
 
 #include <bitset>
 #include <array>
+#include <sstream>
 #include <string>
 #include <intrin.h>
 class CPUInfo
@@ -201,53 +202,116 @@ private:
 const CPUInfo::InstructionSet_Internal CPUInfo::CPU_Rep;
 #endif
 
-void DisplayCPU()
+std::string trim(const std::string& str,
+                 const std::string& whitespace = " \t")
 {
+    const auto strBegin = str.find_first_not_of(whitespace);
+    if (strBegin == std::string::npos)
+        return ""; // no content
+
+    const auto strEnd = str.find_last_not_of(whitespace);
+    const auto strRange = strEnd - strBegin + 1;
+
+    return str.substr(strBegin, strRange);
+}
+
+std::string getCPUInfo(){
 #if !defined(_WIN64) && defined(__x86_64__) // Linux, x86_64
-   using namespace std;
-   char CPUBrandString[0x40];
-   unsigned int CPUInfo[4] = {0, 0, 0, 0};
+    using namespace std;
+    char CPUBrandString[0x40];
+    unsigned int CPUInfo[4] = {0, 0, 0, 0};
 
-   __cpuid(0x80000000, CPUInfo[0], CPUInfo[1], CPUInfo[2], CPUInfo[3]);
-   unsigned int nExIds = CPUInfo[0];
 
-   memset(CPUBrandString, 0, sizeof(CPUBrandString));
+    __cpuid(0x80000000, CPUInfo[0], CPUInfo[1], CPUInfo[2], CPUInfo[3]);
+    unsigned int nExIds = CPUInfo[0];
 
-   for (unsigned int i = 0x80000000; i <= nExIds; ++i)
-   {
-       __cpuid(i, CPUInfo[0], CPUInfo[1], CPUInfo[2], CPUInfo[3]);
+    memset(CPUBrandString, 0, sizeof(CPUBrandString));
 
-       if (i == 0x80000002)
-           memcpy(CPUBrandString, CPUInfo, sizeof(CPUInfo));
-       else if (i == 0x80000003)
-           memcpy(CPUBrandString + 16, CPUInfo, sizeof(CPUInfo));
-       else if (i == 0x80000004)
-           memcpy(CPUBrandString + 32, CPUInfo, sizeof(CPUInfo));
-   }
+    for (unsigned int i = 0x80000000; i <= nExIds; ++i)
+    {
+        __cpuid(i, CPUInfo[0], CPUInfo[1], CPUInfo[2], CPUInfo[3]);
 
-   cout << "CPU: " << CPUBrandString << endl;
+        if (i == 0x80000002)
+            memcpy(CPUBrandString, CPUInfo, sizeof(CPUInfo));
+        else if (i == 0x80000003)
+            memcpy(CPUBrandString + 16, CPUInfo, sizeof(CPUInfo));
+        else if (i == 0x80000004)
+            memcpy(CPUBrandString + 32, CPUInfo, sizeof(CPUInfo));
+    }
+
+    return trim(CPUBrandString);
 #elif defined(_WIN64)
-    std::cout << "CPU: ";
-    std::cout << CPUInfo::Brand() << std::endl;
+    return trim(CPUInfo::Brand());
 #endif
 }
 
-#ifndef CPU_ONLY
-void DisplayGPU()
+void DisplayCPU()
 {
     using namespace std;
 
+    cout << "CPU: " << getCPUInfo() << endl;
+}
+
+
+#ifndef CPU_ONLY
+
+std::string getGPUInfo(){
+    using namespace std;
     int devCount;
     cudaGetDeviceCount(&devCount);
-    wcout << "GPU: ";
+    stringstream ss;
 
     for (int i = 0; i < devCount; ++i)
     {
         cudaDeviceProp props;
         cudaGetDeviceProperties(&props, i);
-        wcout << i << ": " << props.name << " " << std::setprecision(2) << props.totalGlobalMem/1024.0/1024/1024 << "GB";
+        ss << i << ": " << props.name << " " << std::setprecision(2) << props.totalGlobalMem/1024.0/1024/1024 << "GB";
     }
     
-    cout << endl ;
+    return ss.str();
+}
+
+#else
+
+std::string getGPUInfo(){
+    return "N/A";
+}
+
+#endif
+
+void DisplayGPU()
+{
+    using namespace std;
+
+    cout << "GPU: " << getGPUInfo() << endl;
+}
+
+#if !defined(_WIN64) && defined(__x86_64__) // Linux, x86_64
+#include <unistd.h>
+
+unsigned long long getTotalSystemMemory()
+{
+    long pages = sysconf(_SC_PHYS_PAGES);
+    long page_size = sysconf(_SC_PAGE_SIZE);
+    return pages * page_size;
+}
+#elif defined(_WIN64)
+
+#include <windows.h>
+
+unsigned long long getTotalSystemMemory()
+{
+    MEMORYSTATUSEX status;
+    status.dwLength = sizeof(status);
+    GlobalMemoryStatusEx(&status);
+    return status.ullTotalPhys;
 }
 #endif
+
+
+std::string getRAMInfo(){
+    using namespace std;
+    stringstream ss;
+    ss << std::setprecision(2) << (double)getTotalSystemMemory() / 1024.0 / 1024 / 1024 << "GB";
+    return ss.str();
+}

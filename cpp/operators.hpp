@@ -29,7 +29,7 @@
 
 // operator overloads
 
-#define HAS_CONCEPTS 1
+#define HAS_CONCEPTS 0
 
 #pragma region Definitions of Concepts
 // The four rules for implementing a matrix class

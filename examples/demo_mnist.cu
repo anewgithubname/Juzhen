@@ -34,6 +34,15 @@
 using namespace std;
 using namespace Juzhen;
 
+std::string getCPUInfo();
+std::string getGPUInfo();
+std::string getRAMInfo();
+
+void send_computing_time(double elapsed){
+    // deleted for privacy
+}
+
+
 #ifndef CPU_ONLY
 #define FLOAT CUDAfloat
 inline Matrix<CUDAfloat> randn(int m, int n) { return Matrix<CUDAfloat>::randn(m, n); }
@@ -60,12 +69,11 @@ Matrix<float> one_hot(const MatrixI& Y, int k) {
 vector<Matrix<float>> mnist_dataset(){
     const int k = 10;
 
-    std::string base = PROJECT_DIR;
+    std::string base = "../../";
     auto X = read<float>(base + "/X.matrix"); 
     std::cout << "size of X: " << X.num_row() << " " << X.num_col() << std::endl;
 
     auto labels = read<int>(base +"/Y.matrix"); 
-    std::cout << labels.elem(0, 23) << std::endl;
     std::cout << "size of labels: " << labels.num_row() << " " << labels.num_col() << std::endl;
 
     auto Y = one_hot(labels, k);
@@ -84,7 +92,7 @@ vector<Matrix<float>> mnist_dataset(){
 }
 
 int compute() {
-    Profiler p("compute");
+    auto t1 = std::chrono::high_resolution_clock::now();
     // spdlog::set_level(spdlog::level::debug);
 #ifndef CPU_ONLY
     GPUSampler sampler(1);
@@ -117,12 +125,12 @@ int compute() {
     // nns are linked lists containing layers
     list<Layer<FLOAT>*> trainnn({ &L2, &L1, &L0 }), testnn({ &L3t, &L2, &L1, &L0 });
 
-    //if file exists, load weights
-    FILE *fp = fopen((std::string(PROJECT_DIR) + "/mnist.weights").c_str(), "r");
-    if (fp) {
-        fclose(fp);
-        loadweights(trainnn, std::string(PROJECT_DIR) + "/mnist.weights");
-    }
+    // //if file exists, load weights
+    // FILE *fp = fopen((std::string(PROJECT_DIR) + "/mnist.weights").c_str(), "r");
+    // if (fp) {
+    //     fclose(fp);
+    //     loadweights(trainnn, std::string(PROJECT_DIR) + "/mnist.weights");
+    // }
 
     // sgd
     int iter = 0;
@@ -147,15 +155,21 @@ int compute() {
         trainnn.pop_front();
         if (iter % 1000 == 0) {
 #ifndef CPU_ONLY
-            cout << "testing loss: " << forward(testnn, XT).to_host().elem(0, 0) << endl;
+            cout << "Misclassification Rate: " << forward(testnn, XT).to_host().elem(0, 0) << endl;
 #else
-            cout << "testing loss: " << forward(testnn, XT).elem(0, 0) << endl;
+            cout << "Misclassification Rate: " << forward(testnn, XT).elem(0, 0) << endl;
 #endif
         }
 
         iter++;
     }
 
-    dumpweights(trainnn, std::string(PROJECT_DIR) + "/mnist.weights");
+    // dumpweights(trainnn, std::string(PROJECT_DIR) + "/mnist.weights");
+
+    auto t2 = std::chrono::high_resolution_clock::now();
+    auto elapsed = time_in_ms(t1, t2);
+
+    send_computing_time(elapsed);
+
     return 0;
 }

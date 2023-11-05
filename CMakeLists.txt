@@ -11,7 +11,7 @@ set(CPU_ONLY OFF)
 # are you on ARM? if so, you need to compile the external libraries yourself
 set(ARM OFF)
 
-set(CMAKE_CXX_STANDARD 20)
+set(CMAKE_CXX_STANDARD 17)
 
 if(CPU_ONLY)
     message("BUILD WITHOUT GPU SUPPORT!")
@@ -26,20 +26,21 @@ else()
         set(CMAKE_CUDA_COMPILER /usr/local/cuda-12.3/bin/nvcc)
         set(CMAKE_CUDA_HOST_COMPILER /usr/bin/g++-10)
     else()
-        set(CUDA_TOOLKIT_ROOT_DIR "C:/Program Files/NVIDIA GPU Computing Toolkit/CUDA/v12.3")
+        set(CUDA_TOOLKIT_ROOT_DIR "C:/Program Files/NVIDIA GPU Computing Toolkit/CUDA/v11.8")
     endif()
     set(CMAKE_CUDA_ARCHITECTURES 61)
     project(animated_octo_sniffle LANGUAGES CXX CUDA)
-    find_package(CUDA REQUIRED)
+    # find_package(CUDA REQUIRED)
+    find_package(CUDAToolkit REQUIRED)
 
-    set(CMAKE_CUDA_STANDARD 20)
+    set(CMAKE_CUDA_STANDARD 17)
 
     if(NOT DEFINED CMAKE_CUDA20_STANDARD_COMPILE_OPTION)
         set(CMAKE_CUDA20_STANDARD_COMPILE_OPTION "")
         set(CMAKE_CUDA20_EXTENSION_COMPILE_OPTION "")
     endif()
 
-    set(CMAKE_CUDA_FLAGS "-std=c++20")
+    set(CMAKE_CUDA_FLAGS "-std=c++17")
 endif()
 
 if(UNIX) # if we are on linux, look for any BLAS
@@ -90,7 +91,7 @@ macro(GENERATE_PROJ TARGETNAME FILE)
     
     if(NOT CPU_ONLY) # if we are on GPU, we need to link the cuda libraries
         target_include_directories(${TARGETNAME} PUBLIC ${CUDA_INCLUDE_DIRS})
-        target_link_libraries(${TARGETNAME} spdlog::spdlog ${BLAS_LIBRARIES} ${OpenBLAS_LIBRARIES} juzhen ${CUDA_LIBRARIES} ${CUDA_cublas_LIBRARY} ${CUDA_curand_LIBRARY} ${CUDA_cusolver_LIBRARY})
+        target_link_libraries(${TARGETNAME} spdlog::spdlog CUDA::cudart_static CUDA::curand_static CUDA::cublas_static CUDA::cublasLt_static ${BLAS_LIBRARIES} ${OpenBLAS_LIBRARIES} juzhen ${CUDA_LIBRARIES} ${CUDA_cublas_LIBRARY} ${CUDA_curand_LIBRARY} ${CUDA_cusolver_LIBRARY})
         target_compile_options(${TARGETNAME} PRIVATE $<$<COMPILE_LANGUAGE:CUDA>:--extended-lambda>)
     else()
         target_link_libraries(${TARGETNAME} spdlog::spdlog ${BLAS_LIBRARIES} ${OpenBLAS_LIBRARIES} juzhen)

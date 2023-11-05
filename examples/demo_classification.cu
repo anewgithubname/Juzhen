@@ -48,7 +48,7 @@ inline Matrix<float> ones(int m, int n) { return Matrix<float>::ones(m, n); }
 vector<Matrix<float>> dataset(int n, int d){
 
     // regression dataset generation
-    auto X = hstack<float>({Matrix<float>::randn(d, n/2), Matrix<float>::randn(d, n/2) + 0});
+    auto X = hstack<float>({Matrix<float>::randn(d, n/2)-2, Matrix<float>::randn(d, n/2) + 2});
 
     Matrix<float> Y("One_hot", 2, X.num_col());
     Y.zeros();
@@ -80,7 +80,7 @@ int compute() {
     auto X = vecXY[0]; 
     auto Y = vecXY[1];
 
-    auto vecXtYt = dataset(10*n, d);
+    auto vecXtYt = dataset(n, d);
 #ifndef CPU_ONLY
     auto XT = Matrix<CUDAfloat>(vecXtYt[0]);
 #else
@@ -94,17 +94,17 @@ int compute() {
 #endif
 
     // define layers
-    Layer<FLOAT> L0(16, d, batchsize), L1(4, 16, batchsize);
-    LinearLayer<FLOAT> L2(k, 4, batchsize);
+    ReluLayer<FLOAT> L0(4096, d, batchsize), L1(128, 4096, batchsize);
+    LinearLayer<FLOAT> L2(k, 128, batchsize);
     // least sqaure loss
-    LogisticLayer<FLOAT> L3t(XT.num_col(), YT);
+    ZeroOneLayer<FLOAT> L3t(XT.num_col(), YT);
 
     // nns are linked lists containing layers
     list<Layer<FLOAT>*> trainnn({ &L2, &L1, &L0 }), testnn({ &L3t, &L2, &L1, &L0 });
 
     // sgd
     int iter = 0;
-    while (iter < 10000) {
+    while (iter < 2000+1) {
         int batch_id = (iter % numbatches);
 
         // obtaining batches
@@ -125,14 +125,15 @@ int compute() {
         trainnn.pop_front();
         if (iter % 1000 == 0) {
 #ifndef CPU_ONLY
-            cout << "testing loss: " << forward(testnn, XT).to_host().elem(0, 0) << endl;
+            cout << "Misclassification Rate: " << forward(testnn, XT).to_host().elem(0, 0) << endl;
 #else
-            cout << "testing loss: " << forward(testnn, XT).elem(0, 0) << endl;
+            cout << "Misclassification Rate: " << forward(testnn, XT).elem(0, 0) << endl;
 #endif
         }
 
         iter++;
     }
 
+    dumpweights(trainnn, std::string(PROJECT_DIR) + "/classify.weights");
     return 0;
 }
