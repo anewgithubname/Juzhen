@@ -89,8 +89,20 @@ Matrix<float> one_hot(const MatrixI& Y, int k) {
 
 vector<Matrix<float>> mnist_dataset(){
     const int k = 10;
+    std::string base = PROJECT_DIR + std::string("/datasets/MNIST");
 
-    std::string base = PROJECT_DIR;
+    // check if *.matrix files exist
+    FILE *fp = fopen((base + "/X.matrix").c_str(), "r");
+    if (!fp) {
+        // unzip dataset.zip to the folder 
+        std::string command = "unzip " + base + "/dataset.zip -d " + base;
+        int result = system(command.c_str());
+        if (result != 0) {
+            ERROR_OUT;
+        }
+    }
+
+
     auto X = read<float>(base + "/X.matrix"); 
     std::cout << "size of X: " << X.num_row() << " " << X.num_col() << std::endl;
 

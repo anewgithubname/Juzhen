@@ -59,11 +59,13 @@ vs_solution/*
 vsproj/*
 .vs/*
 *.DS_store
-build/*
+
+build
+out
+
 *.matrix
 
 x64/**
-out/**
 !external/**
 cmake-build-debug/**
 cmake-build-release/**
