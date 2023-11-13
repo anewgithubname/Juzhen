@@ -39,9 +39,30 @@ std::string getGPUInfo();
 std::string getRAMInfo();
 
 void send_computing_time(double elapsed){
-    // deleted for privacy
-}
 
+    std::cout << "Elapsed time: " << elapsed << " ms" << std::endl;
+
+    std::string CPU = getCPUInfo(), GPU = getGPUInfo(), MEM = getRAMInfo();
+    std::string jsonData = "{\\\"cpu\\\":\\\"" + CPU + "\\\", \\\"gpu\\\":\\\"" + 
+                GPU + "\\\", \\\"ram\\\":\\\"" + MEM + "\\\", \\\"time\\\":\\\"" + 
+                std::to_string(elapsed) + "\\\"}";
+
+    std::string server = BENCHMARKSERVER;
+    // Prepare the curl command. Notice the escape of double quotes for Windows command line.
+    std::string command = "curl -X POST -H \"Content-Type: application/json\" -d \"" 
+                            + jsonData + "\" http://" + server +":5000/update";
+
+    std::cout << command << std::endl;
+    std::cout << "See your ranking at: http://" + server + ".com:8080" << std::endl;
+    // Execute the curl command using system()
+    int result = system(command.c_str());
+
+    // Check the result of the system call
+    if (result != 0) {
+        // Handle the error case
+        ERROR_OUT;
+    }
+}
 
 #ifndef CPU_ONLY
 #define FLOAT CUDAfloat
@@ -69,7 +90,7 @@ Matrix<float> one_hot(const MatrixI& Y, int k) {
 vector<Matrix<float>> mnist_dataset(){
     const int k = 10;
 
-    std::string base = "../../";
+    std::string base = PROJECT_DIR;
     auto X = read<float>(base + "/X.matrix"); 
     std::cout << "size of X: " << X.num_row() << " " << X.num_col() << std::endl;
 

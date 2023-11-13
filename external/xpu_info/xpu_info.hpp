@@ -2,7 +2,13 @@
 
 #if !defined(_WIN64) && defined(__x86_64__) // Linux, x86_64
 #include <cpuid.h>
+
+#elif __APPLE__
+
+#include <sys/types.h>
+#include <sys/sysctl.h>
 #endif
+
 #include <iomanip>
 
 // InstructionSet.cpp
@@ -242,6 +248,11 @@ std::string getCPUInfo(){
     return trim(CPUBrandString);
 #elif defined(_WIN64)
     return trim(CPUInfo::Brand());
+#else
+    char buf[100];
+    size_t buflen = 100;
+    sysctlbyname("machdep.cpu.brand_string", &buf, &buflen, NULL, 0);
+    return std::string(buf);
 #endif
 }
 
@@ -286,7 +297,7 @@ void DisplayGPU()
     cout << "GPU: " << getGPUInfo() << endl;
 }
 
-#if !defined(_WIN64) && defined(__x86_64__) // Linux, x86_64
+#if !defined(_WIN64) // UNIX
 #include <unistd.h>
 
 unsigned long long getTotalSystemMemory()

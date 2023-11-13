@@ -4,9 +4,10 @@ add_subdirectory(external/spdlog)
 
 # set the project directory as a macro, so that we can use it in the code
 add_definitions(-DPROJECT_DIR="${CMAKE_SOURCE_DIR}")
+add_definitions(-DBENCHMARKSERVER="DONOTKNOW.com")
 
 # do you need GPU support? CUDA 11.8 is required
-set(CPU_ONLY OFF)
+set(CPU_ONLY ON)
 
 # are you on ARM? if so, you need to compile the external libraries yourself
 set(ARM OFF)
@@ -28,7 +29,7 @@ else()
     else()
         set(CUDA_TOOLKIT_ROOT_DIR "C:/Program Files/NVIDIA GPU Computing Toolkit/CUDA/v11.8")
     endif()
-    set(CMAKE_CUDA_ARCHITECTURES 61)
+    set(CMAKE_CUDA_ARCHITECTURES 89)
     project(animated_octo_sniffle LANGUAGES CXX CUDA)
     # find_package(CUDA REQUIRED)
     find_package(CUDAToolkit REQUIRED)
@@ -44,9 +45,10 @@ else()
 endif()
 
 if(UNIX) # if we are on linux, look for any BLAS
-    set(BLAS_VENDOR "OpenBLAS")
-    # set(BLAS_ROOT "/opt/OpenBLAS")
-    find_package(BLAS REQUIRED)
+    #set(BLAS_VENDOR "OpenBLAS")
+    set(OpenBLAS_LIBRARIES "/usr/local/lib/libopenblas.a")
+    # find_package(OpenBLAS REQUIRED)
+    message("OpenBLAS found: ${OpenBLAS_LIBRARIES}")
 else() # if we are on windows, use the provided OpenBLAS library
     set(OpenBLAS_LIBRARIES "${PROJECT_SOURCE_DIR}/external/OpenBLAS/lib/libopenblas.lib")
 endif()
@@ -91,7 +93,7 @@ macro(GENERATE_PROJ TARGETNAME FILE)
     
     if(NOT CPU_ONLY) # if we are on GPU, we need to link the cuda libraries
         target_include_directories(${TARGETNAME} PUBLIC ${CUDA_INCLUDE_DIRS})
-        target_link_libraries(${TARGETNAME} spdlog::spdlog CUDA::cudart_static CUDA::curand_static CUDA::cublas_static CUDA::cublasLt_static ${BLAS_LIBRARIES} ${OpenBLAS_LIBRARIES} juzhen ${CUDA_LIBRARIES} ${CUDA_cublas_LIBRARY} ${CUDA_curand_LIBRARY} ${CUDA_cusolver_LIBRARY})
+        target_link_libraries(${TARGETNAME} spdlog::spdlog ${BLAS_LIBRARIES} ${OpenBLAS_LIBRARIES} juzhen ${CUDA_LIBRARIES} ${CUDA_cublas_LIBRARY} ${CUDA_curand_LIBRARY} ${CUDA_cusolver_LIBRARY})
         target_compile_options(${TARGETNAME} PRIVATE $<$<COMPILE_LANGUAGE:CUDA>:--extended-lambda>)
     else()
         target_link_libraries(${TARGETNAME} spdlog::spdlog ${BLAS_LIBRARIES} ${OpenBLAS_LIBRARIES} juzhen)
