@@ -46,11 +46,11 @@ int main()
     //spdlog::set_pattern("%^[%l]%$, %v");
     //spdlog::set_level(spdlog::level::debug);
 
-    std::cout << "Welcome to Juzhen (Beta)!"<< std::endl; 
+    std::cout << "Welcome to Juzhen (Beta)!" << " ";
     std::cout << "https://github.com/anewgithubname/Juzhen" << std::endl;
     PrintLogo();
-    std::cout << "song.liu@bristol.ac.uk."<< std::endl;
-    std::cout << "https://allmodelsarewrong.net" << std::endl;
+    std::cout << "song.liu@bristol.ac.uk, "; 
+    std::cout << "https://allmodelsarewrong.net" << std::endl << std::endl;
     std::cout << "Listing Computing Devices:" << std::endl;
 
     PrintSeparationLine();

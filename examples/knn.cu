@@ -121,7 +121,7 @@ int compute()
 	std::cout << "K-Nearest Neighbour Prediction for MNIST Dataset: " << std::endl;
 	global_rand_gen.seed(0);
 
-	std::string base = PROJECT_DIR;
+	std::string base = PROJECT_DIR + std::string("/datasets/MNIST");
 	std::cout << "Reading data..." << std::endl;
 	Profiler *p1 = new Profiler("data loading");
 #ifndef CPU_ONLY

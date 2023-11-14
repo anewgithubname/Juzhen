@@ -5,7 +5,7 @@
 
 Juzhen is a set of C++ APIs for matrix operations. It provides a higher level interface for lower-level numerical calculation software like [CBLAS](http://www.netlib.org/blas/) and [CUDA](https://en.wikipedia.org/wiki/CUDA). It supports Neural Net API similar to the ones used in PyTorch or Tensorflow. 
 
-This API is developed under C++20 and CUDA 12.0. 
+This API is developed under C++17 and CUDA 11.8. 
 
 ## Example
 You can perform matrix operations like this:
@@ -30,7 +30,9 @@ int compute(){
 ```
 Then compile: 
 ```bash
+mkdir bin
 clang++ -x c++ -std=c++20 -DCPU_ONLY -DLOGGING_OFF -O3 ./cpp/launcher.cu ./helloworld.cu -o bin/helloworld.out -lopenblas
+bin/helloworld.out
 ```
 
 or on GPU:
@@ -54,7 +56,9 @@ int compute(){
 ```
 Then compile: 
 ```bash
+mkdir bin
 nvcc -std=c++20 -DLOGGING_OFF -O3 ./cpp/launcher.cu ./cpp/cumatrix.cu ./cpp/cukernels.cu ./helloworld.cu -o bin/helloworld.out -lcublas -lcurand
+bin/helloworld.out
 ```
 They both prints out:
 ```
@@ -175,7 +179,9 @@ int compute()
 ```
 Then compile: 
 ```bash
-clang++ -x c++ -std=c++20 -DCPU_ONLY -DLOGGING_OFF -O3 ./cpp/launcher.cu ./helloworldnn.cu -o bin/helloworld.out -lopenblas
+mkdir bin
+clang++ -x c++ -std=c++20 -DCPU_ONLY -DLOGGING_OFF -O3 ./cpp/launcher.cu ./helloworldnn.cu -o bin/helloworldnn.out -lopenblas
+bin/helloworldnn.out
 ```
 
 ## Should I use Juzhen?
@@ -195,26 +201,36 @@ This software is written with educational purposes in mind. If you still want to
 
     - In MacOS, BLAS and LAPACK are parts of [Acclerate Framework](https://developer.apple.com/documentation/accelerate), comes with XCode. 
 
-2. To use Juzhen without GPU support, copy the "cpp" folder to your C++ project directory and add the header file ```juzhen.hpp```. 
+2. To use Juzhen without GPU support, copy the "cpp" folder to your C++ project directory and include the header file ```juzhen.hpp```. 
 
-3. Suppose you wrote your code in ```main.cpp```. Compile it using
+3. Suppose you wrote your code in ```main.cu```. Compile it using
     ```
-    g++ -I cpp/ -D CPU_ONLY -O3 main.cpp -o main.out -llapack -lopenblas 
+    clang++ -x c++ -I cpp/ -DLOGGING_OFF -D CPU_ONLY -O3 cpp/launcher.cu main.cu -o bin/main.out -llapack -lopenblas 
     ```
     Do not forget to link lapack and BLAS! 
 
 4. If you want to use GPU APIs, you need to install [CUDA](https://developer.nvidia.com/cuda-toolkit) and compile your code using [```nvcc```](https://en.wikipedia.org/wiki/Nvidia_CUDA_Compiler):
     ```
-    nvcc -I cpp/ -O3 main.cpp cpp/cudam.cpp cpp/cukernels.cu -o main.out -lcublas -lcurand -llapack -lopenblas 
+    nvcc -I cpp/ -O3 -DLOGGING_OFF main.cu cpp/cumatrix.cu cpp/cukernels.cu cpp/launcher.cu -o bin/main.out -lcublas -lcurand -llapack -lopenblas --extended-labmda 
     ```
     Note that we dropped ```-D CPU_ONLY``` flag. 
 
 ## Examples Code:
-1. [helloworld-cpu](examples/helloworld.cpp)
-2. [helloworld-gpu](examples/helloworld_gpu.cpp)
-3. [Binary Logistic Regression using a linear model](examples/logisticregression_simple.cpp).
-4. Classifying MNIST digits using one hidden layer neural net (on [CPU](examples/logisticregression_MNIST.cpp)/[GPU](examples/logisticregression_MNIST_GPU.cpp)).
-5. [Regression using neural net APIs](examples/helloworld_nn.cpp) (on CPU and GPU).
+1. [helloworld-cpu](examples/helloworld.cu)
+2. [Regression using neural net APIs](examples/helloworld_nn.cu) (on CPU or GPU).
+3. [Binary Logistic Regression using a neural network](examples/demo_classification.cu).
+4. [KNN classification on MNIST Dataset](examples/knn.cu).
+5. [10 Class Logistic Regression using a neural network](examples/demo_mnist.cu).
+
+``` bash
+# to build all examples, using CMAKE
+mkdir build 
+cd build && cmake ..
+cmake --build . --config=Release
+
+# to run
+./helloworld
+```
 
 <!-- ## Compile and Run Examples:
 1. Helloworld CPU
@@ -299,8 +315,7 @@ using namespace std;
 
 int compute(){
 
-    Matrix<float> A("A", 500, 1000);
-    A.randn();
+    Matrix<float> A = Matrix<float>::randn(500, 1000);
 
     {Profiler p; //start the profiler
         for (int i = 0; i < 1000; i++)
@@ -308,13 +323,15 @@ int compute(){
             auto &&C = A * A.T();
         }
     }// profiler will automatically stop and print out elapsed time when the current scope exits. 
+
+    return 0;
 }
 ```
 Compile and Run:
 ```bash
-$ g++ -I cpp/ -D CPU_ONLY -O3 main.cpp -o main.out -llapack -lopenblas 
+$ clang++ -x c++ -I cpp/ -DLOGGING_OFF -D CPU_ONLY -O3 cpp/launcher.cu main.cu -o bin/main.out -llapack -lopenblas  
 
-$ ./main.out 
+$ bin/main.out 
 Time: 1247.48 ms
 Total memory released: 2.86102 MB.
 ```
@@ -335,5 +352,7 @@ Elapsed time is 0.759065 seconds.
 2. Currently, Hadamard multiplication does not support in place transpose on GPU. 
 ## Benchmark on some CPUs/GPUs
 Benchmark using MNIST example, time collected by the built-in profiling tool. 
+
+See: http://statslearning.com:8080/
 
 ![](benchmark.png)
