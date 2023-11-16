@@ -146,7 +146,7 @@ class Matrix {
 
     Matrix<D> inv();  // using LU decomposition
     D norm() const;   // using single for loop
-    const Matrix<D> T() const;
+    Matrix<D> T() const;
 
     // Matrix slicers
     Matrix<D> columns(size_t start, size_t end) const;
@@ -337,7 +337,7 @@ D Matrix<D>::norm() const {
 }
 //"fake" matrix transposition. It does not copy the data.
 template <class D>
-const Matrix<D> Matrix<D>::T() const {
+Matrix<D> Matrix<D>::T() const {
     std::string newname = name + "_T";
     Matrix<D> MT(newname.c_str(), numrow, numcol, !transpose, elements);
     return MT;

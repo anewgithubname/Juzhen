@@ -45,7 +45,7 @@ namespace Juzhen
 	protected:
 		Matrix<D> weights, bias, val;
 		//batch size
-		int nb;
+        size_t nb;
 		// learning rates for w and b
 		double lrW, lrb;
 		// do we need to update weights and bias?
@@ -55,18 +55,17 @@ namespace Juzhen
 
 	public:
 		
-		Layer(int m, int n, int nb) :
-			weights("weights", m, n), bias("bias", m, 1), val("output", m, nb), adamW(.0001, m, n), adamb(.0001, m, 1) {
+		Layer(size_t m, size_t n, size_t nb) :
+			weights("weights", m, n), bias("bias", m, 1), val("output", m, nb), adamW(.0001, m, n), adamb(.0001, m, 1), nb(nb) {
 
 			//intitialize parameters and gradients
-			this->nb = nb;
 			weights = Matrix<D>::randn(m, n) * .001;
 			bias = Matrix<D>::randn(m, 1) * .001;
 			val.zeros();
 			lrW = 1;
 			lrb = 1;
 		}
-		virtual const Matrix<D> grad(const Matrix<D>& input) const {
+		virtual Matrix<D> grad(const Matrix<D>& input) const {
 			// TODO: each time make a new matrix, not efficient
 			return d_tanh(weights * input + bias * Matrix<D>::ones(1, input.num_col()));
 		}
@@ -110,13 +109,13 @@ namespace Juzhen
 	template <class D>
 	class LinearLayer : public Layer<D> {
 	public:
-		LinearLayer(int m, int n, int nb) : Layer<D>(m, n, nb) {
+		LinearLayer(size_t m, size_t n, size_t nb) : Layer<D>(m, n, nb) {
 		}
-		virtual const Matrix<D> grad(const Matrix<D>& input) const override {
+		Matrix<D> grad(const Matrix<D>& input) const override {
 			return Matrix<D>::ones(Layer<D>::weights.num_row(), input.num_col());
 		}
 
-		virtual void eval(const Matrix<D>& input) override {
+		void eval(const Matrix<D>& input) override {
 			// TODO: each time make a new matrix, not efficient
 			Layer<D>::val = Layer<D>::weights * input + Layer<D>::bias * Matrix<D>::ones(1, input.num_col());
 		}
@@ -129,9 +128,9 @@ namespace Juzhen
     class ReluLayer : public Layer<D> {
 
     public:
-        ReluLayer(int m, int n, int nb) : Layer<D>(m, n, nb) {
+        ReluLayer(size_t m, size_t n, size_t nb) : Layer<D>(m, n, nb) {
         }
-        const Matrix<D> grad(const Matrix<D>& input) const override {
+        Matrix<D> grad(const Matrix<D>& input) const override {
             return d_relu(Layer<D>::weights * input + Layer<D>::bias * Matrix<D>::ones(1, input.num_col()));
         }
 
@@ -153,7 +152,7 @@ namespace Juzhen
 		LossLayer(int nb, const Matrix<D>& output) : Layer<D>(1, 1, nb), output(output) {
 		}
 
-		const Matrix<D> grad(const Matrix<D>& input) const override {
+		Matrix<D> grad(const Matrix<D>& input) const override {
 			return 2.0* (input - output) / Layer<D>::nb;
 		}
 
@@ -178,7 +177,7 @@ namespace Juzhen
 			oneK1.ones();
 		}
 
-		const Matrix<D> grad(const Matrix<D>& input) const override {
+		Matrix<D> grad(const Matrix<D>& input) const override {
 			auto Z = oneK1 * sum(exp(input), 0);
 			return - (output - exp(input) / std::move(Z)) / Layer<D>::nb;
 		}
@@ -200,14 +199,14 @@ namespace Juzhen
 		Matrix<D> oneK1;
 
 	public:
-		ZeroOneLayer(int nb, const Matrix<D>& output) :
+		ZeroOneLayer(size_t nb, const Matrix<D>& output) :
 			Layer<D>(1, 1, nb),
 			output(output),
 			oneK1("oneK1", output.num_row(), 1) {
 			oneK1.ones();
 		}
 
-		const Matrix<D> grad(const Matrix<D>& input) const override {
+		Matrix<D> grad(const Matrix<D>&) const override {
 			LOG_ERROR("you cannot differentiate zero-one layer!");
 			ERROR_OUT;
 		}
@@ -268,15 +267,13 @@ namespace Juzhen
 		* least square layer 
 		*/
 		class SumLayer : public Layer<D> {
-			int indim = 0;
-			// you cannot change the output once you set it. 
+			// you cannot change the output once you set it.
 			const Matrix<D>& W;
 		public:
-			SumLayer(int indim, int nb, const Matrix<D> &W) : Layer<D>(2, 2, nb), W(W) {
-				this->indim = indim;
+            explicit SumLayer(const Matrix<D> &W): Layer<D>(2, 2, 2), W(W) {
 			}
 
-			const Matrix<D> grad(const Matrix<D>& input) const override {
+			Matrix<D> grad(const Matrix<D>&) const override {
 				return W;
 			}
 
@@ -285,12 +282,11 @@ namespace Juzhen
 			}
 		};
 
-		auto L0 = neuralnet.back();
         freeze(neuralnet);
         
 		// forward-backward pass
 		forward(neuralnet, input);
-        SumLayer sumL(input.num_row(), input.num_col(), W);
+        SumLayer sumL(W);
         neuralnet.push_front(&sumL);
         auto ret = backprop(neuralnet, input);
         neuralnet.pop_front();

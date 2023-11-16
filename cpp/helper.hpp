@@ -77,10 +77,6 @@ inline idxlist shuffle(int end){
     return shuffle(0, end);
 }
 
-inline int rand_number(){
-    return rand() % 10;
-}
-
 inline double time_in_ms(Clock::time_point start, Clock::time_point end) {
     return std::chrono::duration_cast<std::chrono::nanoseconds>(end - start).count()/1000000.0;
 }

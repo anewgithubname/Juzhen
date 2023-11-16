@@ -1,8 +1,8 @@
 # %%
 import torch, torchvision
 # default device is gpu 
-# device = 'cpu'
-device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
+device = 'cuda'
+# device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
 
 #convert the images to flattened tensors
 dataset = torchvision.datasets.MNIST(root='/tmp', download=True, transform=torchvision.transforms.ToTensor())

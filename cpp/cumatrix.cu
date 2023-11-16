@@ -1,6 +1,6 @@
 /**
  * @file cumatrix.cu
- * @brief some non-kenrel implementation of CUDA matrix class
+ * @brief some non-kernel implementation of CUDA matrix class
  * @author Song Liu (song.liu@bristol.ac.uk)
  *
     Copyright (C) 2021 Song Liu (song.liu@bristol.ac.uk)
@@ -170,7 +170,7 @@ float Matrix<CUDAfloat>::norm() const
     float res;
     CuBLASErrorCheck(
         cublasSnrm2(handle, numrow * numcol, (float *) elements.get(), 1, &res)
-    );
+    )
     return res;
 }
 
@@ -186,7 +186,7 @@ Matrix<CUDAfloat> Matrix<CUDAfloat>::dot(const Matrix<CUDAfloat>& B) const
         cublasSgemm(handle, transA, transB,
         num_row(), B.num_col(), num_col(), &one, (float *) elements.get(), numrow,
         (float *) B.elements.get(), B.numrow, &one, (float *) C.elements.get(), C.numrow) 
-    );
+    )
     STATIC_TOC;
     return C;
 }
@@ -198,7 +198,7 @@ Matrix<CUDAfloat> Matrix<CUDAfloat>::add(float a, float s1) const
 
     CuBLASErrorCheck(  
         cublasSaxpy(handle, numrow * numcol, &s1, (float *) elements.get(), 1, (float *) C.elements.get(), 1)
-    );
+    )
     return C;
 }
 
@@ -214,7 +214,7 @@ void Matrix<CUDAfloat>::scale(float s1){
     size_t numelems = numrow * numcol;
     CuBLASErrorCheck( 
         cublasSscal(handle, numelems, (const float *) &s1, (float *)elements.get(), 1)
-    );
+    )
 }
 
 //s1*M + s2*B
@@ -228,7 +228,7 @@ Matrix<CUDAfloat> Matrix<CUDAfloat>::add(const Matrix<CUDAfloat>& B, float s1, f
     CuBLASErrorCheck(
         cublasSgeam(handle, transA, transB, num_row(), num_col(), &s1, (float *) elements.get(), numrow,
         &s2, (float *) B.elements.get(), B.numrow, (float *) C.elements.get(), C.numrow)
-    );
+    )
 
     return C;
 }
@@ -241,7 +241,7 @@ void Matrix<CUDAfloat>::add(const Matrix<CUDAfloat>& B, float s1, float s2) {
     CuBLASErrorCheck(
         cublasSgeam(handle, transA, transB, numrow, numcol, &s1, (float*)elements.get(), numrow,
             &s2, (float*)B.elements.get(), B.numrow, (float*)elements.get(), numrow)
-    );
+    )
 
 }
 
@@ -286,7 +286,7 @@ void Matrix<CUDAfloat>::eleminv(double l){
     divKernel <<<cudaConfig(numElem)>>> ((float*) elements.get(), (float)l, (float*) elements.get(), numElem);
 }
 
-const Matrix<CUDAfloat> Matrix<CUDAfloat>::T() const
+Matrix<CUDAfloat> Matrix<CUDAfloat>::T() const
 {
     string newname = name + "_T";
     Matrix<CUDAfloat> MT(newname.c_str(), numrow, numcol, !transpose, elements);
@@ -311,11 +311,11 @@ Matrix<CUDAfloat> sum(const Matrix<CUDAfloat>& M, int dim)
         cublasSgemv(M.handle, cudaTransM, M.numrow, M.numcol,
         &one, (float *) M.elements.get(), M.numrow, (float *) ones.elements.get(),
         1, &zero, (float *) sumM.elements.get(), 1)
-    );
+    )
 
     if (dim == 0)
     {
-        sumM.transpose = 1;
+        sumM.transpose = true;
     }
     return sumM;
 }
@@ -372,7 +372,7 @@ Matrix<CUDAfloat> Matrix<CUDAfloat>::randn(size_t m, size_t n) {
 }
 
 Matrix<CUDAfloat> Matrix<CUDAfloat>::rand(size_t m, size_t n) {
-    static Profiler p("rand gen"); p.start();
+    static Profiler profiler("rand gen"); profiler.start();
     auto& gen = GPUSampler::gen;
     Matrix<CUDAfloat> M("randn", m, n);
 
@@ -399,7 +399,7 @@ Matrix<CUDAfloat> Matrix<CUDAfloat>::rand(size_t m, size_t n) {
             ERROR_OUT;
         }
     }
-    p.end();
+    profiler.end();
     return M;
 }
 

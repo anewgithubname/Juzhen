@@ -62,6 +62,7 @@ vsproj/*
 
 build
 out
+venv
 
 *.matrix
 
@@ -70,6 +71,8 @@ x64/**
 cmake-build-debug/**
 cmake-build-release/**
 .idea/**
+cmake-build-release
+cmake-build-debug
 
 benchmark.csv
 sending_comptime.cpp

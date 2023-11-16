@@ -26,9 +26,6 @@
 // #define CPU_ONLY
 
 #include "../ml/layer.hpp"
-#include "../cpp/juzhen.hpp"
-#include <math.h>
-#include <ctime>
 #include <thread>
 
 using namespace std;
@@ -43,13 +40,13 @@ void send_computing_time(double elapsed){
     std::cout << "Elapsed time: " << elapsed << " ms" << std::endl;
 
     std::string CPU = getCPUInfo(), GPU = getGPUInfo(), MEM = getRAMInfo();
-    std::string jsonData = "{\\\"cpu\\\":\\\"" + CPU + "\\\", \\\"gpu\\\":\\\"" + 
-                GPU + "\\\", \\\"ram\\\":\\\"" + MEM + "\\\", \\\"time\\\":\\\"" + 
+    std::string jsonData = R"({\"cpu\":\")" + CPU + R"(\", \"gpu\":\")" +
+                GPU + R"(\", \"ram\":\")" + MEM + R"(\", \"time\":\")" +
                 std::to_string(elapsed) + "\\\"}";
 
     std::string server = BENCHMARKSERVER;
     // Prepare the curl command. Notice the escape of double quotes for Windows command line.
-    std::string command = "curl -X POST -H \"Content-Type: application/json\" -d \"" 
+    std::string command = R"(curl -X POST -H "Content-Type: application/json" -d ")"
                             + jsonData + "\" http://" + server +":5000/update";
 
     std::cout << command << std::endl;
@@ -135,7 +132,7 @@ int compute() {
     auto X = vecXY[0]; 
     auto Y = vecXY[1];
     
-    const int numbatches = X.num_col() / batchsize;
+    const size_t numbatches = X.num_col() / batchsize;
 
 #ifndef CPU_ONLY
     auto XT = Matrix<CUDAfloat>(vecXY[2]);
@@ -168,7 +165,7 @@ int compute() {
     // sgd
     int iter = 0;
     while (iter < 10000) {
-        int batch_id = (iter % numbatches);
+        size_t batch_id = (iter % numbatches);
 
         // obtaining batches
 #ifndef CPU_ONLY

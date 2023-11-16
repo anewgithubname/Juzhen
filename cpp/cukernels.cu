@@ -284,7 +284,7 @@ Matrix<CUDAfloat> hstack(vector<MatrixView<CUDAfloat>> matrices) {
                 num_row, matrices[i].num_col(), &alpha,
                 (float *)matrices[i].data(), matrices[i].num_col(), &beta,
                 (float *)&result.elements.get()[col_index * num_row], num_row,
-                (float *)&result.elements.get()[col_index * num_row], num_row));
+                (float *)&result.elements.get()[col_index * num_row], num_row))
         }
         col_index += matrices[i].num_col();
     }
@@ -316,7 +316,7 @@ Matrix<CUDAfloat> hadmd(const Matrix<CUDAfloat> &M1,
                                  M1.numcol, &s1, (float *)M2.elements.get(),
                                  M2.numrow, &s2, (float *)result.elements.get(),
                                  result.numrow, (float *)result.elements.get(),
-                                 result.numrow));
+                                 result.numrow))
 
     size_t numElem = M1.numrow * M1.numcol;
     productKernel<<<cudaConfig(numElem)>>>((float *)result.elements.get(),
