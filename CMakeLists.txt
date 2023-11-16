@@ -7,7 +7,7 @@ add_definitions(-DPROJECT_DIR="${CMAKE_SOURCE_DIR}")
 add_definitions(-DBENCHMARKSERVER="DONOTKNOW.com")
 
 # do you need GPU support? CUDA 11.8 is required
-set(CPU_ONLY ON)
+set(CPU_ONLY OFF)
 
 # are you on ARM? if so, you need to compile the external libraries yourself
 set(ARM OFF)
@@ -59,9 +59,11 @@ set(spdlog_INCLUDE_DIRS "${PROJECT_SOURCE_DIR}/external/spdlog/include")
 find_package(Boost REQUIRED)
 
 if(NOT CPU_ONLY)
-    add_library(juzhen cpp/launcher.cu cpp/cumatrix.cu cpp/cukernels.cu cpp/cumatrix.cuh cpp/juzhen.hpp cpp/core.hpp cpp/matrix.hpp cpp/helper.hpp ml/layer.hpp)
+    add_library(juzhen cpp/launcher.cu cpp/cumatrix.cu cpp/cukernels.cu cpp/cumatrix.cuh cpp/juzhen.hpp cpp/core.hpp cpp/matrix.hpp
+            cpp/helper.hpp ml/layer.hpp ml/dataloader.hpp)
 else()
-    add_library(juzhen cpp/launcher.cu cpp/juzhen.hpp cpp/core.hpp cpp/matrix.hpp cpp/helper.hpp ml/layer.hpp)
+    add_library(juzhen cpp/launcher.cu cpp/juzhen.hpp cpp/core.hpp cpp/matrix.hpp cpp/helper.hpp ml/layer.hpp
+            ml/dataloader.hpp)
 endif()
 
 target_precompile_headers(juzhen PRIVATE cpp/juzhen.hpp)
