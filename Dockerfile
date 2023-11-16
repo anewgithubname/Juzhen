@@ -20,7 +20,7 @@ RUN apt-get install -y libopenblas-dev cmake unzip libboost-dev
 # RUN echo 'export PATH=/usr/local/cuda/bin:$PATH' >> ~/.bashrc && \
 #     echo 'export LD_LIBRARY_PATH=/usr/local/cuda/lib64:$LD_LIBRARY_PATH' >> ~/.bashrc
 
-RUN nvcc --version
+# RUN nvcc --version
 RUN git clone https://github.com/anewgithubname/Juzhen.git
 WORKDIR /Juzhen
 RUN unzip datasets/MNIST/dataset.zip -d datasets/MNIST/
