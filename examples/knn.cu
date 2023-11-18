@@ -124,17 +124,28 @@ int compute()
 	std::string base = PROJECT_DIR + std::string("/datasets/MNIST");
 	std::cout << "Reading data..." << std::endl;
 	Profiler *p1 = new Profiler("data loading");
-#ifndef CPU_ONLY
-	auto X = (CM) read<float>(base + "/X.matrix");
-	auto Y = (CM) read<float>(base + "/Y_float.matrix");
-	auto XT = (CM) read<float>(base + "/T.matrix");
-#else
-	auto X = read<float>(base + "/X.matrix");
-	auto Y = read<float>(base + "/Y_float.matrix");
-	auto XT = read<float>(base + "/T.matrix");
-#endif
 
-	auto YT = read<float>(base + "/YT_float.matrix");
+	auto Yint = read<int>(base + "/train_y.matrix");
+	//convert to float for GPU computation, as GPU cannot handle int
+	Matrix<float> Yhost("Y", Yint.num_row(), Yint.num_col());
+	for (int i = 0; i < Yint.num_row(); i++)
+	{
+		for (int j = 0; j < Yint.num_col(); j++)
+		{
+			Yhost(i, j) = (float)Yint(i, j);
+		}
+	}
+	auto YT = read<int>(base + "/test_y.matrix");
+
+#ifndef CPU_ONLY
+	auto X = (CM) read<float>(base + "/train_x.matrix");
+	auto Y = (CM) Yhost;
+	auto XT = (CM) read<float>(base + "/test_x.matrix");
+#else
+	auto X = read<float>(base + "/train_x.matrix");
+	auto Y = std::move(Yhost);
+	auto XT = read<float>(base + "/test_x.matrix");
+#endif
 
 	std::cout << "X: " << X.num_row() << "x" << X.num_col() << std::endl;
 	std::cout << "Y: " << Y.num_row() << "x" << Y.num_col() << std::endl;

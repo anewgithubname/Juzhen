@@ -50,7 +50,7 @@ void send_computing_time(double elapsed){
                             + jsonData + "\" http://" + server +":5000/update";
 
     std::cout << command << std::endl;
-    std::cout << "See your ranking at: http://" + server + ".com:8080" << std::endl;
+    std::cout << "See your ranking at: http://" + server + ":8080" << std::endl;
     // Execute the curl command using system()
     int result = system(command.c_str());
 
@@ -89,7 +89,7 @@ vector<Matrix<float>> mnist_dataset(){
     std::string base = PROJECT_DIR + std::string("/datasets/MNIST");
 
     // check if *.matrix files exist
-    FILE *fp = fopen((base + "/X.matrix").c_str(), "r");
+    FILE *fp = fopen((base + "/train_x.matrix").c_str(), "r");
     if (!fp) {
         // unzip dataset.zip to the folder 
         std::string command = "unzip " + base + "/dataset.zip -d " + base;
@@ -100,19 +100,19 @@ vector<Matrix<float>> mnist_dataset(){
     }
 
 
-    auto X = read<float>(base + "/X.matrix"); 
+    auto X = read<float>(base + "/train_x.matrix"); 
     std::cout << "size of X: " << X.num_row() << " " << X.num_col() << std::endl;
 
-    auto labels = read<int>(base +"/Y.matrix"); 
+    auto labels = read<int>(base +"/train_y.matrix"); 
     std::cout << "size of labels: " << labels.num_row() << " " << labels.num_col() << std::endl;
 
     auto Y = one_hot(labels, k);
     std::cout << "size of Y: " << Y.num_row() << " " << Y.num_col() << std::endl;
 
-    auto Xt = read<float>(base + "/T.matrix");
+    auto Xt = read<float>(base + "/test_x.matrix");
     std::cout << "size of Xt: " << Xt.num_row() << " " << Xt.num_col() << std::endl;
 
-    auto labels_t = read<int>(base + "/YT.matrix"); 
+    auto labels_t = read<int>(base + "/test_y.matrix"); 
     std::cout << "size of labels_t: " << labels_t.num_row() << " " << labels_t.num_col() << std::endl;
 
     auto Yt = one_hot(labels_t, k);

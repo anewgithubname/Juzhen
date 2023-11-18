@@ -4,10 +4,10 @@ add_subdirectory(external/spdlog)
 
 # set the project directory as a macro, so that we can use it in the code
 add_definitions(-DPROJECT_DIR="${CMAKE_SOURCE_DIR}")
-add_definitions(-DBENCHMARKSERVER="DONOTKNOW.com")
+add_definitions(-DBENCHMARKSERVER="statslearning.com")
 
 # do you need GPU support? CUDA 11.8 is required
-set(CPU_ONLY OFF)
+set(CPU_ONLY ON)
 
 # are you on ARM? if so, you need to compile the external libraries yourself
 set(ARM OFF)
@@ -23,13 +23,13 @@ else()
     # if we are on Unix, we need to specify the CUDA toolkit location
     # CUDA 11.8 is required
     if(UNIX) 
-        set(CUDA_TOOLKIT_ROOT_DIR "/usr/local/cuda-12.2")
-        set(CMAKE_CUDA_COMPILER /usr/local/cuda-12.2/bin/nvcc)
+        set(CUDA_TOOLKIT_ROOT_DIR "/usr/local/cuda-12.3")
+        set(CMAKE_CUDA_COMPILER /usr/local/cuda-12.3/bin/nvcc)
         set(CMAKE_CUDA_HOST_COMPILER /usr/bin/g++-10)
     else()
         set(CUDA_TOOLKIT_ROOT_DIR "C:/Program Files/NVIDIA GPU Computing Toolkit/CUDA/v11.8")
     endif()
-    set(CMAKE_CUDA_ARCHITECTURES 61)
+    set(CMAKE_CUDA_ARCHITECTURES 89)
     project(animated_octo_sniffle LANGUAGES CXX CUDA)
     # find_package(CUDA REQUIRED)
     find_package(CUDAToolkit REQUIRED)
@@ -45,9 +45,9 @@ else()
 endif()
 
 if(UNIX) # if we are on linux, look for any BLAS
-    #set(BLAS_VENDOR "OpenBLAS")
-    set(OpenBLAS_LIBRARIES "/usr/local/lib/libopenblas.a")
-    # find_package(OpenBLAS REQUIRED)
+    set(BLAS_VENDOR "OpenBLAS")
+    # set(OpenBLAS_LIBRARIES "/usr/local/lib/libopenblas.a")
+    find_package(BLAS REQUIRED)
     message("OpenBLAS found: ${OpenBLAS_LIBRARIES}")
 else() # if we are on windows, use the provided OpenBLAS library
     set(OpenBLAS_LIBRARIES "${PROJECT_SOURCE_DIR}/external/OpenBLAS/lib/libopenblas.lib")
@@ -117,6 +117,7 @@ endmacro()
 
 GENERATE_PROJ(testbasic tests/testbasic.cu)
 GENERATE_PROJ(testEigen tests/testEigen.cu)
+GENERATE_PROJ(testDataLoader tests/testDataLoader.cu)
 GENERATE_PROJ(helloworld_nn examples/helloworld_nn.cu)
 GENERATE_PROJ(helloworld examples/helloworld.cu)
 GENERATE_PROJ(demo examples/demo.cu)
@@ -130,3 +131,4 @@ enable_testing()
 add_test(test0 testbasic)
 add_test(test1 demo)
 add_test(test2 testEigen)
+add_test(test3 testDataLoader)

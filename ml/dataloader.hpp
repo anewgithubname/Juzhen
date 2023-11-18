@@ -10,12 +10,14 @@
 
 namespace Juzhen
 {
-    template <class D>
+    template <class D1, class D2>
     class DataLoader {
         std::string folder;
         std::string split;
 
         size_t batch_size;
+        size_t batch_idx;
+
         size_t n; 
         size_t d;
 
@@ -23,19 +25,31 @@ namespace Juzhen
         FILE *fp_output;
 
     public:
-        DataLoader(std::string folder, std::string split, size_t batch_size): folder(folder), split(split), batch_size(batch_size) {
-            std::string input_file = folder + "/" + split + "_x.txt";
-            std::string output_file = folder + "/" + split + "_y.txt";
+        DataLoader(std::string folder, std::string split, size_t batch_size): 
+            folder(folder), split(split), batch_size(batch_size), batch_idx(0) {
+        
+            std::string input_file = folder + "/" + split + "_x.matrix";
+            std::string output_file = folder + "/" + split + "_y.matrix";
+            
             fp_input = fopen(input_file.c_str(), "r");
             fp_output = fopen(output_file.c_str(), "r");
 
             if (fp_input == NULL || fp_output == NULL) {
                 std::cout << "Error opening file" << std::endl;
-                exit(1);
+                ERROR_OUT;
             }
 
-            d = getw(fp_input);
-            n = getw(fp_input);
+            d = getw(fp_input); 
+            int dout = getw(fp_output);
+            n = getw(fp_input); 
+            int nout = getw(fp_output);
+            
+            int trans1 = getw(fp_input);
+            int trans2 = getw(fp_output);
+            if( trans1 || trans2 ) {
+                std::cout << "Dataset matrix cannot be transposed!" << std::endl;
+                ERROR_OUT;
+            }
         }
 
         ~DataLoader() {
@@ -43,18 +57,31 @@ namespace Juzhen
             fclose(fp_output);
         }
 
-        std::tuple<Matrix<D>, Matrix<D>> next_batch() {
-            Matrix<D> x(batch_size, d);
-            Matrix<D> y(batch_size, 1);
+        std::tuple<Matrix<D1>, Matrix<D2>> next_batch() {
+            // check if we have reached the end of the dataset
+            if (batch_idx*batch_size >= n) {
+                batch_idx = 0;
+                // skip the first 12 bytes
+                fseek(fp_input, 12, SEEK_SET);
+                fseek(fp_output, 12, SEEK_SET);
+            }
 
-            // determine how many bytes to read given the batch size and the remaining data
-            size_t bytes_to_read = sizeof(D) * d * batch_size;
-            // check how many 
+            // how many samples to read
+            size_t samples_to_read = batch_size;
+            if (n - batch_idx*batch_size < batch_size) {
+                samples_to_read = n - batch_idx*batch_size;
+            }
 
-            // fread(x.data(), sizeof(D), d * batch_size, fp_input);
-            // fread(y.data(), sizeof(D), batch_size, fp_output);
+            Matrix<D1> x("input", d, samples_to_read);
+            Matrix<D2> y("output", 1, samples_to_read);
 
-            // return {x, y};
+            // read the input
+            fread((D1 *)x.data(), sizeof(D1), samples_to_read * d, fp_input);
+            fread((D2 *)y.data(), sizeof(D2), samples_to_read * 1, fp_output);
+
+            // update the batch index
+            batch_idx++;
+            return {std::move(x), std::move(y)};
         }
 
     };
