@@ -4,10 +4,10 @@ add_subdirectory(external/spdlog)
 
 # set the project directory as a macro, so that we can use it in the code
 add_definitions(-DPROJECT_DIR="${CMAKE_SOURCE_DIR}")
-add_definitions(-DBENCHMARKSERVER="statslearning.com")
+add_definitions(-DBENCHMARKSERVER="DONOTKNOW")
 
 # do you need GPU support? CUDA 11.8 is required
-set(CPU_ONLY ON)
+set(CPU_ONLY OFF)
 
 # are you on ARM? if so, you need to compile the external libraries yourself
 set(ARM OFF)

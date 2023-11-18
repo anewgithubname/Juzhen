@@ -7,9 +7,25 @@ int test1()
     
     std::string base = PROJECT_DIR;
 
-    int n_total = 10000;
+    // // load the labels
+    // Matrix<int> labels = read<int>(base + "/datasets/MNIST/train_y.matrix");
+    // // convert to non transpose
+    // Matrix<int> labels2("labels2", labels.num_row(), labels.num_col());
+    // for (int i = 0; i < labels.num_row(); i++)
+    // {
+    //     for (int j = 0; j < labels.num_col(); j++)
+    //     {
+    //         labels2(i, j) = labels(i, j);
+    //     }
+    // }
 
-    DataLoader<float, int> loader(base + "/datasets/MNIST", "test", 34);
+    // std::cout << labels2.columns(0, 10) << std::endl;
+    // write(base + "/datasets/MNIST/train_y.matrix", labels2);
+    // ERROR_OUT;
+
+    int n_total = 60000;
+
+    DataLoader<float, int> loader(base + "/datasets/MNIST", "train", 34);
     //create folder images
     std::string command = "mkdir -p \"" + base + "/datasets/MNIST/images\"";
     system(command.c_str());
