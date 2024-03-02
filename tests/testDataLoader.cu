@@ -7,22 +7,6 @@ int test1()
     
     std::string base = PROJECT_DIR;
 
-    // // load the labels
-    // Matrix<int> labels = read<int>(base + "/datasets/MNIST/train_y.matrix");
-    // // convert to non transpose
-    // Matrix<int> labels2("labels2", labels.num_row(), labels.num_col());
-    // for (int i = 0; i < labels.num_row(); i++)
-    // {
-    //     for (int j = 0; j < labels.num_col(); j++)
-    //     {
-    //         labels2(i, j) = labels(i, j);
-    //     }
-    // }
-
-    // std::cout << labels2.columns(0, 10) << std::endl;
-    // write(base + "/datasets/MNIST/train_y.matrix", labels2);
-    // ERROR_OUT;
-
     int n_total = 60000;
 
     DataLoader<float, int> loader(base + "/datasets/MNIST", "train", 34);
@@ -49,7 +33,7 @@ int test1()
             ofs.close();
         }
         
-        // check if we have insufficient number of samples
+        // check if we have correct number of samples
         if(x.num_col() < 34){
             if(i*34 + x.num_col() == n_total){
                 return 0; 

@@ -149,9 +149,6 @@ class Matrix<CUDAfloat> {
     inline size_t get_transpose() const { return transpose; }
     std::string get_name() const { return name; }
     const CUDAfloat* data() const { return elements.get(); }
-    const std::shared_ptr<CUDAfloat[]> get_shared_ptr() const {
-        return elements;
-    }
 
     // matrix filler
     void ones();

@@ -8,7 +8,7 @@ add_definitions(-DPROJECT_DIR="${CMAKE_SOURCE_DIR}")
 add_definitions(-DBENCHMARKSERVER="DONOTKNOW")
 
 # do you need GPU support? CUDA 11.8 is required
-set(CPU_ONLY ON)
+set(CPU_ONLY OFF)
 
 set(CMAKE_CXX_STANDARD 17)
 
@@ -21,13 +21,13 @@ else()
     # if we are on Unix, we need to specify the CUDA toolkit location
     # CUDA 11.8 is required
     if(UNIX) 
-        set(CUDA_TOOLKIT_ROOT_DIR "/usr/local/cuda-11.8")
-        set(CMAKE_CUDA_COMPILER /usr/local/cuda-11.8/bin/nvcc)
+        set(CUDA_TOOLKIT_ROOT_DIR "/usr/local/cuda-12.2")
+        set(CMAKE_CUDA_COMPILER /usr/local/cuda-12.2/bin/nvcc)
         set(CMAKE_CUDA_HOST_COMPILER /usr/bin/g++-10)
     else()
-        set(CUDA_TOOLKIT_ROOT_DIR "C:/Program Files/NVIDIA GPU Computing Toolkit/CUDA/v11.8")
+        set(CUDA_TOOLKIT_ROOT_DIR "C:/Program Files/NVIDIA GPU Computing Toolkit/CUDA/v12.3")
     endif()
-    set(CMAKE_CUDA_ARCHITECTURES 89)
+    set(CMAKE_CUDA_ARCHITECTURES 61)
     project(animated_octo_sniffle LANGUAGES CXX CUDA)
     # find_package(CUDA REQUIRED)
     find_package(CUDAToolkit REQUIRED)

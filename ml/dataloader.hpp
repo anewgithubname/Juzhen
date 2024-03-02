@@ -1,9 +1,30 @@
-//
-// Created by songa on 16/11/2023.
-//
+/**
+ * @file dataloader.cu
+ * @brief Dataset loader
+ * @author Song Liu (song.liu@bristol.ac.uk)
+ *
+ * This file contains all essential matrix operations.
+ * Whatever you do, please keep it as simple as possible.
+ *
+    Copyright (C) 2022 Song Liu (song.liu@bristol.ac.uk)
 
-#ifndef ANIMATED_OCTO_SNIFFLE_DATALOADER_HPP
-#define ANIMATED_OCTO_SNIFFLE_DATALOADER_HPP
+    This program is free software: you can redistribute it and/or modify
+    it under the terms of the GNU General Public License as published by
+    the Free Software Foundation, either version 3 of the License, or
+    (at your option) any later version.
+
+    This program is distributed in the hope that it will be useful,
+    but WITHOUT ANY WARRANTY; without even the implied warranty of
+    MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
+    GNU General Public License for more details.
+
+    You should have received a copy of the GNU General Public License
+    along with this program.  If not, see <https://www.gnu.org/licenses/>.
+
+ */
+
+#ifndef DATALOADER_HPP
+#define DATALOADER_HPP
 
 #include "../cpp/juzhen.hpp"
 
@@ -31,8 +52,8 @@ namespace Juzhen
             std::string input_file = folder + "/" + split + "_x.matrix";
             std::string output_file = folder + "/" + split + "_y.matrix";
             
-            fp_input = fopen(input_file.c_str(), "r");
-            fp_output = fopen(output_file.c_str(), "r");
+            fp_input = fopen(input_file.c_str(), "rb");
+            fp_output = fopen(output_file.c_str(), "rb");
 
             if (fp_input == NULL || fp_output == NULL) {
                 std::cout << "Error opening file" << std::endl;
@@ -58,7 +79,7 @@ namespace Juzhen
         }
 
         std::tuple<Matrix<D1>, Matrix<D2>> next_batch() {
-            // check if we have reached the end of the dataset
+            // check if at the previous round, we have reached the end of the dataset
             if (batch_idx*batch_size >= n) {
                 batch_idx = 0;
                 // skip the first 12 bytes
@@ -86,4 +107,4 @@ namespace Juzhen
 
     };
 }
-#endif //ANIMATED_OCTO_SNIFFLE_DATALOADER_HPP
+#endif 

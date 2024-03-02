@@ -125,7 +125,6 @@ class Matrix {
     inline int get_transpose() const { return transpose; }
     std::string get_name() const { return name; }
     const D *data() const { return elements.get(); }
-    const std::shared_ptr<D[]> get_shared_ptr() const { return elements; }
 
     // Matrix Fillers
     void zeros() { memset(elements.get(), 0, sizeof(D) * numrow * numcol); }
