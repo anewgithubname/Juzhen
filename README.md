@@ -10,7 +10,6 @@ This API is developed under C++17 and CUDA 11.8.
 ## Example
 You can perform matrix operations like this:
 ```c++
-//helloworld.cu in the project folder
 #include <iostream> 
 #include "cpp/juzhen.hpp"
 using namespace std;
@@ -23,7 +22,6 @@ int compute(){
     cout << B << endl << endl;
 
     cout << log(exp(A*B)+1.0f)/5.0f << endl;
-    // no need to release memory by hand. 
 
     return 0;
 }
@@ -37,7 +35,6 @@ bin/helloworld.out
 
 or on GPU:
 ```c++
-//helloworld.cu in the project folder
 #include <iostream> 
 #include "cpp/juzhen.hpp"
 using namespace std;
