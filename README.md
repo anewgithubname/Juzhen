@@ -21,6 +21,7 @@ int compute(){
     Matrix<float> B = {"B", {{.1,.2},{.3,.4},{.5,.6}}};
     cout << B << endl << endl;
 
+    //compute with matrices as if you are using MATLAB.
     cout << log(exp(A*B)+1.0f)/5.0f << endl;
 
     return 0;
