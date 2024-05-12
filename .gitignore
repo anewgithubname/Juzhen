@@ -77,3 +77,4 @@ cmake-build-debug
 benchmark.csv
 sending_comptime.cpp
 *.pbm
+res/*

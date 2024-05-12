@@ -56,14 +56,14 @@ namespace Juzhen
 	public:
 		
 		Layer(size_t m, size_t n, size_t nb) :
-			weights("weights", m, n), bias("bias", m, 1), val("output", m, nb), adamW(.0001, m, n), adamb(.0001, m, 1), nb(nb) {
+			weights("weights", m, n), bias("bias", m, 1), val("output", m, nb), adamW(.001, m, n), adamb(.001, m, 1), nb(nb) {
 
 			//intitialize parameters and gradients
 			weights = Matrix<D>::randn(m, n) * .001;
 			bias = Matrix<D>::randn(m, 1) * .001;
 			val.zeros();
-			lrW = 1;
-			lrb = 1;
+			lrW = .01;
+			lrb = .01;
 		}
 		virtual Matrix<D> grad(const Matrix<D>& input) const {
 			// TODO: each time make a new matrix, not efficient
@@ -72,8 +72,13 @@ namespace Juzhen
 
 		// this function will destroy gW and gb
 		void update(Matrix<D>&& gW, Matrix<D>&& gb) {
-			weights -= lrW * adam_update(std::move(gW), adamW);
-			bias -= lrb * adam_update(std::move(gb), adamb);
+			// adam update
+			weights -= adam_update(std::move(gW), adamW);
+			bias -= adam_update(std::move(gb), adamb);
+			
+			// //sgd update
+			// weights -= lrW * std::move(gW);
+			// bias -= lrb * std::move(gb);
 		}
 
 		virtual void eval(const Matrix<D>& input) {
@@ -157,7 +162,8 @@ namespace Juzhen
 		}
 
 		void eval(const Matrix<D>& input) override {
-			Layer<D>::val = sum(square(output - input), 1) / Layer<D>::nb;
+			// square -> sum over features -> sum over batch 
+			Layer<D>::val = sum(sum(square(output - input), 0), 1) / Layer<D>::nb;
 		}
 	};
 
@@ -242,13 +248,13 @@ namespace Juzhen
 			return tt->grad(input);
 		}
 		else {
-			// <compute curr_grad .* (W^T * pre_grad), input> 
+			// compute <curr_grad .* (W^T * pre_grad), input> 
 			auto WT_prev_grad = backprop(neuralnet, tt->value());
 			auto curr_grad = tt->grad(input);
 			auto t = hadmd(curr_grad, std::move(WT_prev_grad));
 			auto gW = t * input.T();
 
-			// <compute curr_grad .* (W^T * pre_grad), 1> 
+			// compute <curr_grad .* (W^T * pre_grad), 1> 
 			auto gb = sum(t, 1);
 
 			if(tt->need_update) {

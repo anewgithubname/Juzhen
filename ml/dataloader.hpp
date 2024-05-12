@@ -46,6 +46,13 @@ namespace Juzhen
         FILE *fp_output;
 
     public:
+        /**
+         * @brief Construct a new Data Loader object
+         * 
+         * @param folder dataset folder
+         * @param split train or test
+         * @param batch_size batch size
+         */
         DataLoader(std::string folder, std::string split, size_t batch_size): 
             folder(folder), split(split), batch_size(batch_size), batch_idx(0) {
         
