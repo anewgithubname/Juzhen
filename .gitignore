@@ -78,3 +78,8 @@ benchmark.csv
 sending_comptime.cpp
 *.pbm
 res/*
+
+net.weights
+X0.csv
+X1.csv
+Zt.csv
