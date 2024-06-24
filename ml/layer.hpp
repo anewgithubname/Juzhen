@@ -56,7 +56,7 @@ namespace Juzhen
 	public:
 		
 		Layer(size_t m, size_t n, size_t nb) :
-			weights("weights", m, n), bias("bias", m, 1), val("output", m, nb), adamW(.001, m, n), adamb(.001, m, 1), nb(nb) {
+			weights("weights", m, n), bias("bias", m, 1), val("output", m, nb), adamW(.0001, m, n), adamb(.0001, m, 1), nb(nb) {
 
 			//intitialize parameters and gradients
 			weights = Matrix<D>::randn(m, n) * .001;
@@ -360,5 +360,36 @@ namespace Juzhen
 		
 		fclose(fp);
 	}
+
+	template <class T>
+	Matrix<T> euler_integration(const Matrix<T>& Z0, std::list<Layer<T>*>& trainnn, int steps) {
+		// start euler integration
+		std::cout << "start euler integration: " << std::endl;
+		std::string base = PROJECT_DIR;
+		Profiler p("int");
+		
+		auto Zt = Z0;
+		int n = Z0.num_col();
+
+		float dt = 1.0f / steps;
+		
+		for (int i = 0; i < steps; i++){
+			if (steps > 10 && i % (steps/10) == 0){
+				std::cout << ".";
+				//write Zt to csv
+				writetocsv<float>(base + "/Zt_" + std::to_string(i) + ".csv", Zt.to_host());
+			}
+			
+			float t = (float)i/steps;    
+			auto inpt = vstack({Zt, Matrix<T>::ones(1, n)*t});
+			
+			Zt += forward(trainnn, inpt) * dt;
+		}
+
+		std::cout << "done!" << std::endl;
+		return Zt;
+	}
+
 }
+
 #endif

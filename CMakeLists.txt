@@ -25,7 +25,7 @@ else()
         set(CMAKE_CUDA_COMPILER /usr/local/cuda-12.4/bin/nvcc)
         set(CMAKE_CUDA_HOST_COMPILER /usr/bin/g++-10)
     else()
-        set(CUDA_TOOLKIT_ROOT_DIR "C:/Program Files/NVIDIA GPU Computing Toolkit/CUDA/v12.3")
+        set(CUDA_TOOLKIT_ROOT_DIR "C:/Program Files/NVIDIA GPU Computing Toolkit/CUDA/v12.4")
     endif()
     set(CMAKE_CUDA_ARCHITECTURES 61)
     project(animated_octo_sniffle LANGUAGES CXX CUDA)
@@ -124,6 +124,8 @@ GENERATE_PROJ(demo_classification examples/demo_classification.cu)
 GENERATE_PROJ(demo_mnist examples/demo_mnist.cu)
 GENERATE_PROJ(pagerank examples/pagerank.cu)
 GENERATE_PROJ(demo_rectified examples/demo_rectified.cu)
+GENERATE_PROJ(demo_rectified_infer examples/demo_rectified_infer.cu)
+
 
 enable_testing()
 

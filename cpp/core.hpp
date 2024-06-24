@@ -29,6 +29,9 @@
 #include "helper.hpp"
 #include "memory.hpp"
 
+#include <sstream>
+#include <fstream>
+
 template <class D>
 class Matrix;
 
@@ -603,5 +606,51 @@ void write(std::string filename, const Matrix<D> &M) {
 
     fclose(f);
 }
+
+/*
+    write matrix to csv file
+ */
+template <class T>
+void writetocsv(const std::string& filename, const MatrixView<T>& M) {
+    using namespace std;
+    
+    std::cout << "writing to " << filename << std::endl;
+
+    ofstream myfile;
+
+    myfile.open(filename);
+    for (int i = 0; i < M.num_col(); i++){
+        for (int j = 0; j < M.num_row(); j++){
+            myfile << M.elem(j, i) << ",";
+        }
+        myfile << std::endl;
+    }
+    myfile.close();
+
+}
+
+/*
+    read matrix from csv file
+*/
+template <class T>
+Matrix<T> readfromcsv(const std::string& filename, int n, int d) {
+    std::cout << "reading from " << filename << std::endl;
+    Matrix<T> ret = Matrix<T>::zeros(n, d);
+    std::ifstream file(filename);
+    std::string line;
+    int i = 0;
+    while (std::getline(file, line)) {
+        std::stringstream ss(line);
+        std::string token;
+        int j = 0;
+        while (std::getline(ss, token, ',')) {
+            ret.elem(i, j) = std::stof(token);
+            j++;
+        }
+        i++;
+    }
+    return ret;
+}
+
 
 #endif

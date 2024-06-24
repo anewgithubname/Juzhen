@@ -165,3 +165,52 @@ Matrix<T> predict_one_hot(const Matrix<T>& input){
     //converting it to zero one matrix
     return elemwise([] __GPU_CPU__ (float x){return x > -1e-5 ? 1 : 0;}, std::move(sub));
 }
+
+// convert label Y matrix (1 X n) to one-hot encoding. 
+Matrix<float> one_hot(const Matrix<int>& Y, int k) {
+    Matrix<float> Y_one_hot("One_hot", k, Y.num_col());
+    Y_one_hot.zeros();
+
+    for (int i = 0; i < Y.num_col(); i++) {
+        Y_one_hot.elem(Y.elem(0, i), i) = 1.0;
+    }
+
+    return Y_one_hot;
+}
+
+std::vector<Matrix<float>> mnist_dataset(){
+    const int k = 10;
+    std::string base = PROJECT_DIR + std::string("/datasets/MNIST");
+
+    // check if *.matrix files exist
+    FILE *fp = fopen((base + "/train_x.matrix").c_str(), "r");
+    if (!fp) {
+        // unzip dataset.zip to the folder 
+        std::string command = "unzip " + base + "/dataset.zip -d " + base;
+        int result = system(command.c_str());
+        if (result != 0) {
+            ERROR_OUT;
+        }
+    }
+
+
+    auto X = read<float>(base + "/train_x.matrix"); 
+    // std::cout << "size of X: " << X.num_row() << " " << X.num_col() << std::endl;
+
+    auto labels = read<int>(base +"/train_y.matrix"); 
+    // std::cout << "size of labels: " << labels.num_row() << " " << labels.num_col() << std::endl;
+
+    auto Y = one_hot(labels, k);
+    // std::cout << "size of Y: " << Y.num_row() << " " << Y.num_col() << std::endl;
+
+    auto Xt = read<float>(base + "/test_x.matrix");
+    // std::cout << "size of Xt: " << Xt.num_row() << " " << Xt.num_col() << std::endl;
+
+    auto labels_t = read<int>(base + "/test_y.matrix"); 
+    // std::cout << "size of labels_t: " << labels_t.num_row() << " " << labels_t.num_col() << std::endl;
+
+    auto Yt = one_hot(labels_t, k);
+    // std::cout << "size of Yt: " << Yt.num_row() << " " << Yt.num_col() << std::endl;
+
+    return {X/255.0, Y, Xt/255.0, Yt};
+}
