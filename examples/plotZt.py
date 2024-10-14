@@ -19,7 +19,7 @@ Zt = np.genfromtxt('../Zt.csv', delimiter=',')[:, :-1]
 # %%
 
 # plot the first 16 28 by 28 images from Zt
-for t in range(0,51,5):
+for t in range(0,1001,100):
     Zt = np.genfromtxt('../Zt_'+str(t)+'.csv', delimiter=',')[:, :-1]
     for i in range(49):
         plt.subplot(7, 7, i+1)

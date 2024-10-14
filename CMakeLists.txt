@@ -8,7 +8,7 @@ add_definitions(-DPROJECT_DIR="${CMAKE_SOURCE_DIR}")
 add_definitions(-DBENCHMARKSERVER="DONOTKNOW")
 
 # do you need GPU support? CUDA 11.8 is required
-set(CPU_ONLY OFF)
+set(CPU_ONLY ON)
 
 set(CMAKE_CXX_STANDARD 17)
 
@@ -21,8 +21,8 @@ else()
     # if we are on Unix, we need to specify the CUDA toolkit location
     # CUDA 11.8 is required
     if(UNIX) 
-        set(CUDA_TOOLKIT_ROOT_DIR "/usr/local/cuda-12.4")
-        set(CMAKE_CUDA_COMPILER /usr/local/cuda-12.4/bin/nvcc)
+        set(CUDA_TOOLKIT_ROOT_DIR "/usr/local/cuda-12.6")
+        set(CMAKE_CUDA_COMPILER /usr/local/cuda-12.6/bin/nvcc)
         set(CMAKE_CUDA_HOST_COMPILER /usr/bin/g++-10)
     else()
         set(CUDA_TOOLKIT_ROOT_DIR "C:/Program Files/NVIDIA GPU Computing Toolkit/CUDA/v12.4")
@@ -45,8 +45,10 @@ endif()
 if(UNIX) # if we are on linux, look for any BLAS
     set(BLAS_VENDOR "OpenBLAS")
     # set(OpenBLAS_LIBRARIES "/usr/local/lib/libopenblas.a")
-    find_package(BLAS REQUIRED)
-    message("OpenBLAS found: ${OpenBLAS_LIBRARIES}")
+    # find_package(BLAS REQUIRED)
+    # message("OpenBLAS found: ${OpenBLAS_LIBRARIES}")
+    # set the openblas directory to /opt/OpenBLAS
+    set(OpenBLAS_LIBRARIES "/opt/OpenBLAS/lib/libopenblas.a")
 else() # if we are on windows, use the provided OpenBLAS library
     set(OpenBLAS_LIBRARIES "${PROJECT_SOURCE_DIR}/external/OpenBLAS/lib/libopenblas.lib")
 endif()

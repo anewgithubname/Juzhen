@@ -54,7 +54,7 @@ auto sample_X0(int n, int d) {
     auto vecMNIST = mnist_dataset();
     auto X = hstack<float>({vecMNIST[0], vecMNIST[2]});
     auto Y = hstack<float>({vecMNIST[1], vecMNIST[3]});
-    // selecting only digit 1s
+    // selecting only digit 6s
     
     int digit = 6;
 
@@ -118,17 +118,17 @@ int compute() {
 
     // create a neural network
     // define layers
-    ReluLayer<FLOAT> L0(1024, d+1, batchsize), L1(1024, 1024, batchsize), 
-                     L2(1024, 1024, batchsize), L3(1024, 1024, batchsize), 
-                     L4(1024, 1024, batchsize), L5(1024, 1024, batchsize);
-    LinearLayer<FLOAT> L10(d, 1024, batchsize);
+    ReluLayer<FLOAT> L0(2048, d+1, batchsize), L1(2048, 2048, batchsize), 
+                     L2(2048, 2048, batchsize), L3(2048, 2048, batchsize), 
+                     L4(2048, 2048, batchsize), L5(2048, 2048, batchsize);
+    LinearLayer<FLOAT> L10(d, 2048, batchsize);
 
     // nns are linked lists containing layers
     list<Layer<FLOAT>*> trainnn({ &L10, &L5, &L4, &L3, &L2, &L1, &L0 });
     
     for (int r = 0; r < 1; r++){
         // start the training loop
-        for (int i = 0; i < numbatches * 5000; i++) {
+        for (int i = 0; i < numbatches * 50000; i++) {
             size_t batch_id = i % numbatches;
             
             // obtain batch

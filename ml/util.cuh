@@ -124,6 +124,10 @@ struct adam_state{
         m = Matrix<T>::zeros(nrow, ncol);
         v = Matrix<T>::zeros(nrow, ncol);
     }
+
+    void print_stats(){
+        std::cout << "iteration: " << iteration << " alpha: " << alpha << " beta1: " << beta1 << " beta2: " << beta2 << " eps: " << eps << std::endl << "m: " << m.norm() << std::endl << "v: " << v.norm() << std::endl;
+	}
 };
 
 template <class T>

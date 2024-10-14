@@ -27,7 +27,7 @@
 #define LAYER2_HPP
 
 #include <cfloat>
-#include "../cpp/core.hpp"
+#include "../cpp/core.hpp" 
 #include "../cpp/matrix.hpp"
 #include "./util.cuh"
 
@@ -89,6 +89,8 @@ namespace Juzhen
 		Matrix<D>& W() { return weights; };
 		Matrix<D>& b() { return bias; };
 		const Matrix<D>& value() { return val; }
+		adam_state<D>& adamWstate() { return adamW; }
+		adam_state<D>& adambstate() { return adamb; }
 
 		void print() {
 			using namespace std;
@@ -337,6 +339,26 @@ namespace Juzhen
 			fwrite(layertype, sizeof(char), strlen(layertype), fp);
 			write(fp, l->W());
 			write(fp, l->b());
+			
+			// now dump the adam state
+			fwrite(&l->adamWstate().iteration, sizeof(int), 1, fp);
+			fwrite(&l->adamWstate().alpha, sizeof(float), 1, fp);
+			fwrite(&l->adamWstate().beta1, sizeof(float), 1, fp);
+			fwrite(&l->adamWstate().beta2, sizeof(float), 1, fp);
+			fwrite(&l->adamWstate().eps, sizeof(float), 1, fp);
+
+			write(fp, l->adamWstate().m);
+			write(fp, l->adamWstate().v);
+
+
+			fwrite(&l->adambstate().iteration, sizeof(int), 1, fp);
+			fwrite(&l->adambstate().alpha, sizeof(float), 1, fp);
+			fwrite(&l->adambstate().beta1, sizeof(float), 1, fp);
+			fwrite(&l->adambstate().beta2, sizeof(float), 1, fp);
+			fwrite(&l->adambstate().eps, sizeof(float), 1, fp);
+
+			write(fp, l->adambstate().m);
+			write(fp, l->adambstate().v);
 		}
 		
 		fclose(fp);
@@ -356,28 +378,56 @@ namespace Juzhen
 			}
 			read(fp, l->W());
 			read(fp, l->b());
+
+			std::cout << "before dump adam state" << std::endl;
+			l->adamWstate().print_stats();
+			// now load the adam state
+			fread(&l->adamWstate().iteration, sizeof(int), 1, fp);
+			fread(&l->adamWstate().alpha, sizeof(float), 1, fp);
+			fread(&l->adamWstate().beta1, sizeof(float), 1, fp);
+			fread(&l->adamWstate().beta2, sizeof(float), 1, fp);
+			fread(&l->adamWstate().eps, sizeof(float), 1, fp);
+
+			read(fp, l->adamWstate().m);
+			read(fp, l->adamWstate().v);
+
+			fread(&l->adambstate().iteration, sizeof(int), 1, fp);
+			fread(&l->adambstate().alpha, sizeof(float), 1, fp);
+			fread(&l->adambstate().beta1, sizeof(float), 1, fp);
+			fread(&l->adambstate().beta2, sizeof(float), 1, fp);
+			fread(&l->adambstate().eps, sizeof(float), 1, fp);
+
+			read(fp, l->adambstate().m);
+			read(fp, l->adambstate().v);
+			std::cout << "after dump adam state" << std::endl;
+			l->adamWstate().print_stats();
+
 		}
 		
 		fclose(fp);
 	}
 
 	template <class T>
-	Matrix<T> euler_integration(const Matrix<T>& Z0, std::list<Layer<T>*>& trainnn, int steps) {
+	std::vector<Matrix<T>> euler_integration(const Matrix<T>& Z0, std::list<Layer<T>*>& trainnn, int steps) {
 		// start euler integration
-		std::cout << "start euler integration: " << std::endl;
+		//std::cout << "start euler integration: " << std::endl;
 		std::string base = PROJECT_DIR;
-		Profiler p("int");
+		//Profiler p("int");
 		
+		std::vector<Matrix<T>> ret;
+
 		auto Zt = Z0;
 		int n = Z0.num_col();
 
 		float dt = 1.0f / steps;
 		
 		for (int i = 0; i < steps; i++){
-			if (steps > 10 && i % (steps/10) == 0){
-				std::cout << ".";
+			if (steps > 10 && i % (steps/8) == 0){
+				//std::cout << "step " << i << std::endl;
+				//std::cout << ".";
 				//write Zt to csv
-				writetocsv<float>(base + "/Zt_" + std::to_string(i) + ".csv", Zt.to_host());
+				//writetocsv<float>(base + "/Zt_" + std::to_string(i) + ".csv", Zt.to_host());
+				ret.push_back(Zt);
 			}
 			
 			float t = (float)i/steps;    
@@ -386,8 +436,10 @@ namespace Juzhen
 			Zt += forward(trainnn, inpt) * dt;
 		}
 
-		std::cout << "done!" << std::endl;
-		return Zt;
+		//std::cout << "done!" << std::endl;
+		//return Zt;
+		ret.push_back(Zt);
+		return ret;
 	}
 
 }
