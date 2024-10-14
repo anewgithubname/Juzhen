@@ -43,12 +43,12 @@ else()
 endif()
 
 if(UNIX) # if we are on linux, look for any BLAS
-    set(BLAS_VENDOR "OpenBLAS")
+    # set(BLAS_VENDOR "OpenBLAS")
     # set(OpenBLAS_LIBRARIES "/usr/local/lib/libopenblas.a")
-    # find_package(BLAS REQUIRED)
-    # message("OpenBLAS found: ${OpenBLAS_LIBRARIES}")
+    find_package(BLAS REQUIRED)
+    message("OpenBLAS found: ${OpenBLAS_LIBRARIES}")
     # set the openblas directory to /opt/OpenBLAS
-    set(OpenBLAS_LIBRARIES "/opt/OpenBLAS/lib/libopenblas.a")
+    # set(OpenBLAS_LIBRARIES "/opt/OpenBLAS/lib/libopenblas.a")
 else() # if we are on windows, use the provided OpenBLAS library
     set(OpenBLAS_LIBRARIES "${PROJECT_SOURCE_DIR}/external/OpenBLAS/lib/libopenblas.lib")
 endif()
