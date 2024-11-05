@@ -1,12 +1,12 @@
 /**
- * @file demo_denoising.cu
- * @brief denoising MNIST imaages
+ * @file demo_rectified_infer.cu
+ * @brief using the pretrained retified flow to infer the data
  * @author Song Liu (song.liu@bristol.ac.uk)
  *
  * This is an implementation of the rectified flow
  * https://arxiv.org/abs/2209.03003
  *
-    Copyright (C) 2022 Song Liu (song.liu@bristol.ac.uk)
+    Copyright (C) 2024 Song Liu (song.liu@bristol.ac.uk)
 
     This program is free software: you can redistribute it and/or modify
     it under the terms of the GNU General Public License as published by
@@ -27,6 +27,8 @@
 #include "../cpp/juzhen.hpp"
 #include "../ml/layer.hpp"
 #include "../ml/dataloader.hpp"
+#include "../ml/plotting.hpp"
+
 #include <sstream>
 #include <fstream>
 
@@ -70,27 +72,27 @@ int compute() {
     int n = 6500;
 
     auto X0 = sample_X0(n, d); // reference data
-    plot_histogram(X0.data(), X0.num_row() * X0.num_col(), 23);
+    plot_histogram(X0.to_host().data(), X0.num_row() * X0.num_col(), 23);
 
     const size_t batchsize = 1;
     
     // create a neural network
     // define layers
-    ReluLayer<FLOAT> L0(333, d + 1, batchsize), L1(333, 333, batchsize),
-        L2(333, 333, batchsize), L3(333, 333, batchsize);
-    LinearLayer<FLOAT> L10(d, 333, batchsize);
+    ReluLayer<FLOAT> L0(1011, d + 1, batchsize), L1(1011, 1011, batchsize),
+        L2(1011, 1011, batchsize), L3(1011, 1011, batchsize);
+    LinearLayer<FLOAT> L10(d, 1011, batchsize);
 
     // nns are linked lists containing layers
     list<Layer<FLOAT> *> trainnn({&L10, &L3, &L2, &L1, &L0});
     
-    loadweights(trainnn, base+"/net.weights");
+    loadweights(trainnn, base+"/res/net.weights");
 
     PrintSeparationLine();
     
     X0 = sample_X0(n, d); // reference data
     auto Zt = euler_integration(X0, trainnn, 100).back();
 
-    plot_histogram(Zt.data(), Zt.num_row() * Zt.num_col(), 23);    
+    plot_histogram(Zt.to_host().data(), Zt.num_row() * Zt.num_col(), 23);    
     
     return 0;
 }

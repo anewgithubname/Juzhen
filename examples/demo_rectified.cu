@@ -1,12 +1,12 @@
 /**
- * @file demo_denoising.cu
- * @brief denoising MNIST imaages
+ * @file demo_rectified.cu
+ * @brief training rectified flow
  * @author Song Liu (song.liu@bristol.ac.uk)
  *
  * This is an implementation of the rectified flow
  * https://arxiv.org/abs/2209.03003
  *
-    Copyright (C) 2022 Song Liu (song.liu@bristol.ac.uk)
+    Copyright (C) 2024 Song Liu (song.liu@bristol.ac.uk)
 
     This program is free software: you can redistribute it and/or modify
     it under the terms of the GNU General Public License as published by
@@ -27,6 +27,8 @@
 #include "../cpp/juzhen.hpp"
 #include "../ml/layer.hpp"
 #include "../ml/dataloader.hpp"
+#include "../ml/plotting.hpp"
+
 #include <sstream>
 #include <fstream>
 
@@ -57,7 +59,11 @@ auto sample_X0(int n, int d)
 
 auto sample_X1(int n, int d)
 {
+#ifndef CPU_ONLY
+    return hstack({randn(d, n / 2) * .25 - 1, randn(d, n / 2) * .25 + 1});
+#else
     return hstack<float>({randn(d, n / 2) * .25 - 1, randn(d, n / 2) * .25 + 1});
+#endif
 }
 
 int compute()
@@ -71,21 +77,23 @@ int compute()
     using namespace Juzhen;
     std::string base = PROJECT_DIR;
 
-    int batchsize = 50;
+    int batchsize = 500;
     int d = 1;
-    int n = 10000;
+    int n = 5000;
 
     auto X0 = sample_X0(n, d); // reference data
-    plot_histogram(X0.data(), X0.num_row() * X0.num_col(), 23);
+    plot_histogram(X0.to_host().data(), X0.num_row() * X0.num_col(), 23);
     auto X1 = sample_X1(n, d); // target data
 
     const size_t numbatches = X0.num_col() / batchsize;
 
     // create a neural network
-    // define layers
-    ReluLayer<FLOAT> L0(333, d + 1, batchsize), L1(333, 333, batchsize),
-        L2(333, 333, batchsize), L3(333, 333, batchsize);
-    LinearLayer<FLOAT> L10(d, 333, batchsize);
+    // define layers, out - in - batchsize
+    ReluLayer<FLOAT> L0(1011, d + 1, batchsize), 
+                     L1(1011, 1011, batchsize),
+                     L2(1011, 1011, batchsize), 
+                     L3(1011, 1011, batchsize);
+    LinearLayer<FLOAT> L10(d, 1011, batchsize);
 
     // nns are linked lists containing layers
     list<Layer<FLOAT> *> trainnn({&L10, &L3, &L2, &L1, &L0});
@@ -140,9 +148,9 @@ int compute()
     X0 = sample_X0(n, d); // reference data
     auto Zt = euler_integration(X0, trainnn, 100).back();
 
-    plot_histogram(Zt.data(), Zt.num_row() * Zt.num_col(), 23);
+    plot_histogram(Zt.to_host().data(), Zt.num_row() * Zt.num_col(), 23);
 
-    dumpweights(trainnn, base + "/net.weights");
+    dumpweights(trainnn, base + "/res/net.weights");
 
     return 0;
 }
