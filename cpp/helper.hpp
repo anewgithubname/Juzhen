@@ -141,7 +141,7 @@ class Profiler {
 #define STATIC_TOC profiler.end()
 
 #define TIC(profilerlogger) Profiler *profilerlogger = new Profiler(std::string(__FUNCTION__) + ", " + std::string(__FILE__) + ":" + std::to_string(__LINE__)); profilerlogger->start()
-#define TOC(profilerlogger) delete profilerlogger;
+#define TOC(profilerlogger) delete profilerlogger
 
 #ifndef INTEL_MKL
 //CBLAS declarations
