@@ -21,8 +21,8 @@ else()
     # if we are on Unix, we need to specify the CUDA toolkit location
     # CUDA 11.8 is required
     if(UNIX) 
-        set(CUDA_TOOLKIT_ROOT_DIR "/usr/local/cuda-12.6")
-        set(CMAKE_CUDA_COMPILER /usr/local/cuda-12.6/bin/nvcc)
+        set(CUDA_TOOLKIT_ROOT_DIR "/usr/local/cuda-12.4")
+        set(CMAKE_CUDA_COMPILER /usr/local/cuda-12.4/bin/nvcc)
         set(CMAKE_CUDA_HOST_COMPILER /usr/bin/g++-10)
     else()
         set(CUDA_TOOLKIT_ROOT_DIR "C:/Program Files/NVIDIA GPU Computing Toolkit/CUDA/v12.4")

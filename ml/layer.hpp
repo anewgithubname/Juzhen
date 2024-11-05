@@ -431,7 +431,11 @@ namespace Juzhen
 			}
 			
 			float t = (float)i/steps;    
+#ifdef CPU_ONLY
+			auto inpt = vstack<float>({Zt, Matrix<T>::ones(1, n)*t});
+#else
 			auto inpt = vstack({Zt, Matrix<T>::ones(1, n)*t});
+#endif
 			
 			Zt += forward(trainnn, inpt) * dt;
 		}
