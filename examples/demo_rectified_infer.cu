@@ -1,12 +1,12 @@
 /**
- * @file demo_denoising.cu
- * @brief denoising MNIST imaages
+ * @file demo_rectified_infer.cu
+ * @brief using the pretrained retified flow to infer the data
  * @author Song Liu (song.liu@bristol.ac.uk)
  *
  * This is an implementation of the rectified flow
  * https://arxiv.org/abs/2209.03003
  *
-    Copyright (C) 2022 Song Liu (song.liu@bristol.ac.uk)
+    Copyright (C) 2024 Song Liu (song.liu@bristol.ac.uk)
 
     This program is free software: you can redistribute it and/or modify
     it under the terms of the GNU General Public License as published by
@@ -27,6 +27,8 @@
 #include "../cpp/juzhen.hpp"
 #include "../ml/layer.hpp"
 #include "../ml/dataloader.hpp"
+#include "../ml/plotting.hpp"
+
 #include <sstream>
 #include <fstream>
 
@@ -51,27 +53,9 @@ inline Matrix<float> hs(std::vector<MatrixView<float>> matrices) {return hstack<
 
 void PrintSeparationLine();
 
-auto sample_X0(int n, int d) {
-    auto vecMNIST = mnist_dataset();
-    auto X = hstack<float>({vecMNIST[0], vecMNIST[2]});
-    auto Y = hstack<float>({vecMNIST[1], vecMNIST[3]});
-    // selecting only digit 1s
-    
-    int digit = 6;
-
-    int num1 = sum(Y, 1).elem(digit, 0);
-    std::cout << "num1: " << num1 << std::endl;
-    auto X0 = Matrix<float>::zeros(d, num1);
-
-    int j = 0;
-    for (int i = 0; i < Y.num_col(); i++){
-        if (Y.elem(digit, i) == 1){
-            X0.columns(j, j+1, X.columns(i, i+1));
-            j++;
-        }
-    }
-    
-    return Matrix<CUDAfloat>(X0.columns(0, n));
+auto sample_X0(int n, int d)
+{
+    return randn(d, n);
 }
 
 int compute() {
@@ -84,31 +68,31 @@ int compute() {
     using namespace Juzhen;
     std::string base = PROJECT_DIR;
 
-    int d = 28*28;
+    int d = 1;
     int n = 6500;
 
     auto X0 = sample_X0(n, d); // reference data
-    std::cout << "row of X0: " << X0.num_row() << " col of X0: " << X0.num_col() << std::endl;
-    writetocsv<float>(base + "/X0.csv", X0.to_host());
+    plot_histogram(X0.to_host().data(), X0.num_row() * X0.num_col(), 23);
 
     const size_t batchsize = 1;
     
     // create a neural network
     // define layers
-    ReluLayer<FLOAT> L0(1024, d+1, batchsize), L1(1024, 1024, batchsize), 
-                     L2(1024, 1024, batchsize), L3(1024, 1024, batchsize), 
-                     L4(1024, 1024, batchsize), L5(1024, 1024, batchsize);
-    LinearLayer<FLOAT> L10(d, 1024, batchsize);
+    ReluLayer<FLOAT> L0(1011, d + 1, batchsize), L1(1011, 1011, batchsize),
+        L2(1011, 1011, batchsize), L3(1011, 1011, batchsize);
+    LinearLayer<FLOAT> L10(d, 1011, batchsize);
 
     // nns are linked lists containing layers
-    list<Layer<FLOAT>*> trainnn({ &L10, &L5, &L4, &L3, &L2, &L1, &L0 });
+    list<Layer<FLOAT> *> trainnn({&L10, &L3, &L2, &L1, &L0});
     
-    loadweights(trainnn, base+"/net.weights");
+    loadweights(trainnn, base+"/res/net.weights");
 
     PrintSeparationLine();
     
     X0 = sample_X0(n, d); // reference data
-    auto Zt = euler_integration(X0, trainnn, 51);
+    auto Zt = euler_integration(X0, trainnn, 100).back();
 
+    plot_histogram(Zt.to_host().data(), Zt.num_row() * Zt.num_col(), 23);    
+    
     return 0;
 }
