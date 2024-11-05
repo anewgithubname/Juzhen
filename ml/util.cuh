@@ -25,6 +25,7 @@
 
 #pragma once
 
+#include <iomanip>
 #include "../cpp/juzhen.hpp"
 
 #ifndef CPU_ONLY
