@@ -219,6 +219,7 @@ This software is written with educational purposes in mind. If you still want to
 3. [Binary Logistic Regression using a neural network](examples/demo_classification.cu).
 4. [KNN classification on MNIST Dataset](examples/knn.cu).
 5. [10 Class Logistic Regression using a neural network](examples/demo_mnist.cu).
+6. [Rectified Flow to transform two Gaussians](examples/demo_rectified.cu).
 
 ``` bash
 # to build all examples, using CMAKE
