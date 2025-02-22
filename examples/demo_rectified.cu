@@ -41,12 +41,14 @@ inline Matrix<CUDAfloat> randn(int m, int n) { return Matrix<CUDAfloat>::randn(m
 inline Matrix<CUDAfloat> ones(int m, int n) { return Matrix<CUDAfloat>::ones(m, n); }
 inline Matrix<CUDAfloat> vs(std::vector<MatrixView<CUDAfloat>> matrices) { return vstack(matrices); }
 inline Matrix<CUDAfloat> hs(std::vector<MatrixView<CUDAfloat>> matrices) { return hstack(matrices); }
+inline const float* getdata(const Matrix<CUDAfloat>& m) {return m.to_host().data();}
 #else
 #define FLOAT float
 inline Matrix<float> randn(int m, int n) { return Matrix<float>::randn(m, n); }
 inline Matrix<float> ones(int m, int n) { return Matrix<float>::ones(m, n); }
 inline Matrix<float> vs(std::vector<MatrixView<float>> matrices) { return vstack<float>(matrices); }
 inline Matrix<float> hs(std::vector<MatrixView<float>> matrices) { return hstack<float>(matrices); }
+inline const float* getdata(const Matrix<float>& m) {return m.data();}
 #endif
 #define MatrixI Matrix<int>
 
@@ -82,7 +84,7 @@ int compute()
     int n = 5000;
 
     auto X0 = sample_X0(n, d); // reference data
-    plot_histogram(X0.to_host().data(), X0.num_row() * X0.num_col(), 23);
+    plot_histogram(getdata(X0), X0.num_row() * X0.num_col(), 23);
     auto X1 = sample_X1(n, d); // target data
 
     const size_t numbatches = X0.num_col() / batchsize;
@@ -130,7 +132,7 @@ int compute()
             // std::cout << "training loss: " << loss << std::endl;
             std::string msg = ", training loss: " + std::to_string(loss);
             display_progress_bar((float)i / (numbatches * 1000), msg.c_str());
-            dumpweights(trainnn, base + "/net.weights");
+            dumpweights(trainnn, base + "/res/net.weights");
         }
         else
         {
@@ -148,7 +150,7 @@ int compute()
     X0 = sample_X0(n, d); // reference data
     auto Zt = euler_integration(X0, trainnn, 100).back();
 
-    plot_histogram(Zt.to_host().data(), Zt.num_row() * Zt.num_col(), 23);
+    plot_histogram(getdata(Zt), Zt.num_row() * Zt.num_col(), 23);
 
     dumpweights(trainnn, base + "/res/net.weights");
 

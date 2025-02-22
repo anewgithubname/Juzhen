@@ -422,11 +422,7 @@ namespace Juzhen
 		float dt = 1.0f / steps;
 		
 		for (int i = 0; i < steps; i++){
-			if (steps > 10 && i % (steps/8) == 0){
-				//std::cout << "step " << i << std::endl;
-				//std::cout << ".";
-				//write Zt to csv
-				//writetocsv<float>(base + "/Zt_" + std::to_string(i) + ".csv", Zt.to_host());
+			if(i % 10 == 0) {
 				ret.push_back(Zt);
 			}
 			
@@ -440,8 +436,6 @@ namespace Juzhen
 			Zt += forward(trainnn, inpt) * dt;
 		}
 
-		//std::cout << "done!" << std::endl;
-		//return Zt;
 		ret.push_back(Zt);
 		return ret;
 	}
