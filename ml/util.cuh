@@ -116,8 +116,8 @@ struct adam_state{
     Matrix<T> m, v;
     adam_state(const Matrix<T> &theta)
         :iteration(1), alpha(0.01), beta1(0.9), beta2(0.999), eps(1e-8){
-        m = Matrix<T>::zeros(theta.num_row(), theta.num_col());
-        v = Matrix<T>::zeros(theta.num_row(), theta.num_col());
+        m = zeros_like(theta);
+        v = zeros_like(theta);
     }
     adam_state(double alpha, size_t nrow, size_t ncol)
         :iteration(1), alpha(alpha), beta1(0.9), beta2(0.999), eps(1e-8){

@@ -466,8 +466,13 @@ inline Matrix<D> square(Matrix<D> &&M) {
     return std::move(M);
 }
 
+// M3 = M1 .* M2
 template <class D>
 Matrix<D> hadmd(const Matrix<D> &M1, const Matrix<D> &M2) {
+    // check if the size of the two matrices are the same
+    if (M1.num_row() != M2.num_row() || M1.num_col() != M2.num_col()) {
+        throw std::invalid_argument("Matrix dimensions are not compatible");
+    }
     size_t numcol = M1.num_col();
     size_t numrow = M1.num_row();
     Matrix<D> result("hadmd", M1.num_row(), M1.num_col());
@@ -479,9 +484,13 @@ Matrix<D> hadmd(const Matrix<D> &M1, const Matrix<D> &M2) {
     }
     return result;
 }
-// rvalue overload
+// M2 = M1 .* M2
 template <class D>
 Matrix<D> hadmd(const Matrix<D> &M1, Matrix<D> &&M2) {
+    // check if the size of the two matrices are the same
+    if (M1.num_row() != M2.num_row() || M1.num_col() != M2.num_col()) {
+        throw std::invalid_argument("Matrix dimensions are not compatible");
+    }
     size_t numcol = M1.num_col();
     size_t numrow = M1.num_row();
     for (size_t j = 0; j < numcol; j++)
@@ -489,9 +498,13 @@ Matrix<D> hadmd(const Matrix<D> &M1, Matrix<D> &&M2) {
         for (size_t i = 0; i < numrow; i++) M2.elem(i, j) *= M1.elem(i, j);
     return std::move(M2);
 }
-// rvalue overload
+// M1 = M1 .* M2
 template <class D>
 Matrix<D> hadmd(Matrix<D> &&M1, const Matrix<D> &M2) {
+    // check if the size of the two matrices are the same
+    if (M1.num_row() != M2.num_row() || M1.num_col() != M2.num_col()) {
+        throw std::invalid_argument("Matrix dimensions are not compatible");
+    }
     size_t numcol = M1.num_col();
     size_t numrow = M1.num_row();
     for (size_t j = 0; j < numcol; j++)

@@ -111,6 +111,140 @@ int test4()
 }
 #endif
 
+int test5(){
+#ifndef CPU_ONLY
+    CM A = CM::ones(3, 4);
+    CM B = CM::ones(3, 3);
+#else
+    M A = M::ones(3, 4);
+    M B = M::ones(3, 3);
+#endif
+
+    int count = 0; 
+
+    // add with wrong dimensions
+    try
+    {
+        std::cout << A + B << std::endl;
+    }
+    catch(const std::invalid_argument& e)
+    {
+        std::cout << "Caught exception: " << e.what() << std::endl;
+        count++;
+    }
+
+    // subtract with wrong dimensions
+    try
+    {
+        std::cout << A - B << std::endl;
+    }
+    catch(const std::invalid_argument& e)
+    {
+        std::cout << "Caught exception: " << e.what() << std::endl;
+        count++;
+    }
+
+    // multiply with wrong dimensions
+    try
+    {
+        std::cout << A * B << std::endl;
+    }
+    catch(const std::invalid_argument& e)
+    {
+        std::cout << "Caught exception: " << e.what() << std::endl;
+        count++;
+    }
+
+    // divide with wrong dimensions
+    try
+    {
+        std::cout << A / B << std::endl;
+    }
+    catch(const std::invalid_argument& e)
+    {
+        std::cout << "Caught exception: " << e.what() << std::endl;
+        count++;
+    }
+
+    // hadamard with wrong dimensions
+    try
+    {
+        std::cout << hadmd(A, B) << std::endl;
+    }
+    catch(const std::invalid_argument& e)
+    {
+        std::cout << "Caught exception: " << e.what() << std::endl;
+        count++;
+    }
+
+    // add with wrong dimensions
+    try
+    {
+        std::cout << A + B.T() << std::endl;
+    }
+    catch(const std::invalid_argument& e)
+    {
+        std::cout << "Caught exception: " << e.what() << std::endl;
+        count++;
+    }
+
+    // subtract with wrong dimensions
+    try
+    {
+        std::cout << A - B.T() << std::endl;
+    }
+    catch(const std::invalid_argument& e)
+    {
+        std::cout << "Caught exception: " << e.what() << std::endl;
+        count++;
+    }
+
+    // multiply with wrong dimensions
+    try
+    {
+        std::cout << A * B.T() << std::endl;
+    }
+    catch(const std::invalid_argument& e)
+    {
+        std::cout << "Caught exception: " << e.what() << std::endl;
+        count++;
+    }
+
+    // divide with wrong dimensions
+    try
+    {
+        std::cout << A / B.T() << std::endl;
+    }
+    catch(const std::invalid_argument& e)
+    {
+        std::cout << "Caught exception: " << e.what() << std::endl;
+        count++;
+    }
+
+    // hadamard with wrong dimensions
+    try
+    {
+        std::cout << hadmd(A, B.T()) << std::endl;
+    }
+    catch(const std::invalid_argument& e)
+    {
+        std::cout << "Caught exception: " << e.what() << std::endl;
+        count++;
+    }
+
+    if (count == 10)
+    {
+        LOG_INFO("unit test passed!");
+        return 0;
+    }
+    else
+    {
+        LOG_ERROR("unit test failed!");
+        return 1;
+    }
+
+}
+
 int compute()
 {
     // spdlog::set_level(spdlog::level::debug);
@@ -131,6 +265,9 @@ int compute()
 #ifndef CPU_ONLY
     ret += test4();
 #endif
+
+    ret += test5();
+    std::cout << std::endl;
 
     if (ret == 0)
     {
