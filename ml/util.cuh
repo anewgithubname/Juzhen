@@ -30,9 +30,6 @@
 #ifndef CPU_ONLY
 #include <thrust/device_vector.h>
 #include <thrust/sort.h>
-#define __GPU_CPU__ __device__ __host__
-#else
-#define __GPU_CPU__
 #endif
 
 #ifndef CPU_ONLY

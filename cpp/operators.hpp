@@ -35,7 +35,7 @@
 // The four rules for implementing a matrix class
 // Addable, Scalable, Multiplicable, ElemInvitable
 
-#if HAS_CONCEPTS == 1
+#ifdef HAS_CONCEPTS
 // Needs C++ 20
 #include <concepts>
 

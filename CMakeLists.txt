@@ -9,6 +9,7 @@ add_definitions(-DBENCHMARKSERVER="DONOTKNOW")
 
 # do you need GPU support? CUDA 11.8 is required
 set(CPU_ONLY ON)
+set(HAS_CONCEPTS ON)
 
 set(CMAKE_CXX_STANDARD 20)
 

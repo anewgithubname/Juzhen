@@ -24,7 +24,9 @@
  */
 
 #include <fstream>
+#include <thread>
 #include "../cpp/juzhen.hpp"
+#include "../ml/plotting.hpp"
 
 #define HLINE std::cout << "--------------------------------" << std::endl
 
@@ -62,10 +64,25 @@ int compute() {
         {
             std::cout << "Caught exception: " << e.what() << std::endl;
             //pause until user presses a key
+            std::cout << "Press Enter to continue...";
             std::cin.get();
         }
 
-        
+        auto G = M::randn(3, 1000);
+        std::cout << mean(G, 1) << std::endl;
+        std::cout << stddev(G, 1) << std::endl;
+        std::cout << cov(G, 1) << std::endl;
+
+        auto H = M::randn(1000, 1);
+        plot_histogram(H.data(), H.num_row() * H.num_col(), 10);
+
+        for (int i = 0; i < 100; i++)
+        {
+            //pause for 1 second
+            std::this_thread::sleep_for(std::chrono::milliseconds(10));
+            display_progress_bar(i/100.0, "Processing...");
+        }
+        std::cout << std::endl; 
 
         //write matrices to files
         std::fstream fout("A.matrix");
