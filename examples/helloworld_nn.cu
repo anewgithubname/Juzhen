@@ -56,7 +56,7 @@ int compute() {
     Layer<FLOAT> L0(16, d, batchsize), L1(4, 16, batchsize);
     LinearLayer<FLOAT> L2(1, 4, batchsize);
     // least sqaure loss
-    LossLayer<FLOAT> L3t(n, YT);
+    LossLayer<FLOAT> L3t(n, std::move(YT));
 
     // nns are linked lists containing layers
     list<Layer<FLOAT>*> trainnn({ &L2, &L1, &L0 }), testnn({ &L3t, &L2, &L1, &L0});
@@ -76,7 +76,7 @@ int compute() {
 #endif
         // forward-backward pass
         forward(trainnn, X_i);
-        LossLayer<FLOAT> L3(batchsize, Y_i);
+        LossLayer<FLOAT> L3(batchsize, std::move(Y_i));
         trainnn.push_front(&L3);
         backprop(trainnn, X_i);
         trainnn.pop_front();

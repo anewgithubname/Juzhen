@@ -119,10 +119,9 @@ int compute()
         auto Xt_i = hadmd(X0_i, ones(d, 1) * (1 - t)) + hadmd(X1_i, ones(d, 1) * t);
         // add time to the input
         auto inp_i = vs({Xt_i, t});
-        auto Yt_i = X1_i - X0_i;
 
         // forward-backward pass
-        LossLayer<FLOAT> L11(batchsize, Yt_i);
+        LossLayer<FLOAT> L11(batchsize, X1_i - X0_i);
         trainnn.push_front(&L11);
 
         if (i % (25 * numbatches) == 0)

@@ -129,7 +129,7 @@ int compute() {
 
         // forward-backward pass
         forward(trainnn, X_i);
-        LogisticLayer<FLOAT> L3(batchsize, Y_i);
+        LogisticLayer<FLOAT> L3(batchsize, std::move(Y_i));
         trainnn.push_front(&L3);
 
         backprop(trainnn, X_i);

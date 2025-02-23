@@ -97,7 +97,7 @@ int compute() {
     ReluLayer<FLOAT> L0(4096, d, batchsize), L1(128, 4096, batchsize);
     LinearLayer<FLOAT> L2(k, 128, batchsize);
     // least sqaure loss
-    ZeroOneLayer<FLOAT> L3t(XT.num_col(), YT);
+    ZeroOneLayer<FLOAT> L3t(XT.num_col(), std::move(YT));
 
     // nns are linked lists containing layers
     list<Layer<FLOAT>*> trainnn({ &L2, &L1, &L0 }), testnn({ &L3t, &L2, &L1, &L0 });
@@ -118,7 +118,7 @@ int compute() {
 
         // forward-backward pass
         forward(trainnn, X_i);
-        LogisticLayer<FLOAT> L3(batchsize, Y_i);
+        LogisticLayer<FLOAT> L3(batchsize, std::move(Y_i));
         trainnn.push_front(&L3);
 
         backprop(trainnn, X_i);
