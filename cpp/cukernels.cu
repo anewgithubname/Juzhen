@@ -300,10 +300,15 @@ const Matrix<CUDAfloat> vstack(vector<MatrixView<CUDAfloat>> matrices) {
     return hstack(matrices).T();
 }
 
+// M3 = M1 .* M2
 Matrix<CUDAfloat> hadmd(const Matrix<CUDAfloat> &M1,
                         const Matrix<CUDAfloat> &M2) {
     static Profiler p("GPU hadmd");
     p.start();
+    // check if dimensions match
+    if (M1.num_row() != M2.num_row() || M1.num_col() != M2.num_col()) {
+        throw std::invalid_argument("Matrix dimensions are not compatible");
+    }
     Matrix<CUDAfloat> result("hadmd", M1.numrow, M1.numcol, M1.transpose);
 
     // if M2 has a different transposition flag, transpose M2 and store it in
@@ -333,8 +338,12 @@ Matrix<CUDAfloat> hadmd(const Matrix<CUDAfloat> &M1,
 //     return hadmd(M1, M2);
 // }
 
-// rvalue hadmd
+// M2 = M1 .* M2
 Matrix<CUDAfloat> hadmd(const Matrix<CUDAfloat> &M1, Matrix<CUDAfloat> &&M2) {
+    // check if dimensions match
+    if (M1.num_row() != M2.num_row() || M1.num_col() != M2.num_col()) {
+        throw std::invalid_argument("Matrix dimensions are not compatible");
+    }
     // cout << "rvalue hadmd" << endl;
     // if M2 has a different transposition flag, use the lval version
     if (M2.transpose == M1.transpose) {
@@ -346,8 +355,12 @@ Matrix<CUDAfloat> hadmd(const Matrix<CUDAfloat> &M1, Matrix<CUDAfloat> &&M2) {
         return hadmd(M1, M2);
     }
 }
-// rvalue hadmd
+// M1 = M1 .* M2
 Matrix<CUDAfloat> hadmd(Matrix<CUDAfloat> &&M1, const Matrix<CUDAfloat> &M2) {
+    // check if dimensions match
+    if (M1.num_row() != M2.num_row() || M1.num_col() != M2.num_col()) {
+        throw std::invalid_argument("Matrix dimensions are not compatible");
+    }
     // cout << "rvalue hadmd" << endl;
     // if M2 has a different transposition flag, use the lval version
     if (M2.transpose == M1.transpose) {

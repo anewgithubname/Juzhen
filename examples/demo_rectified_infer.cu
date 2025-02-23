@@ -41,12 +41,14 @@ inline Matrix<CUDAfloat> randn(int m, int n) { return Matrix<CUDAfloat>::randn(m
 inline Matrix<CUDAfloat> ones(int m, int n) { return Matrix<CUDAfloat>::ones(m, n); }
 inline Matrix<CUDAfloat> vs(std::vector<MatrixView<CUDAfloat>> matrices) {return vstack(matrices);}
 inline Matrix<CUDAfloat> hs(std::vector<MatrixView<CUDAfloat>> matrices) {return hstack(matrices);}
+inline const float* getdata(const Matrix<CUDAfloat>& m) {return m.to_host().data();}
 #else
 #define FLOAT float
 inline Matrix<float> randn(int m, int n) { return Matrix<float>::randn(m, n); }
 inline Matrix<float> ones(int m, int n) { return Matrix<float>::ones(m, n); }
 inline Matrix<float> vs(std::vector<MatrixView<float>> matrices) {return vstack<float>(matrices);}
 inline Matrix<float> hs(std::vector<MatrixView<float>> matrices) {return hstack<float>(matrices);}
+inline const float* getdata(const Matrix<float>& m) {return m.data();}
 #endif
 #define MatrixI Matrix<int> 
 
@@ -72,7 +74,7 @@ int compute() {
     int n = 6500;
 
     auto X0 = sample_X0(n, d); // reference data
-    plot_histogram(X0.to_host().data(), X0.num_row() * X0.num_col(), 23);
+    plot_histogram(getdata(X0), X0.num_row() * X0.num_col(), 23);
 
     const size_t batchsize = 1;
     
@@ -90,9 +92,11 @@ int compute() {
     PrintSeparationLine();
     
     X0 = sample_X0(n, d); // reference data
-    auto Zt = euler_integration(X0, trainnn, 100).back();
+    auto Zt_trajectory = euler_integration(X0, trainnn, 100);
 
-    plot_histogram(Zt.to_host().data(), Zt.num_row() * Zt.num_col(), 23);    
+    for (auto Zt : Zt_trajectory) {
+        plot_histogram(getdata(Zt), Zt.num_row() * Zt.num_col(), 23);
+    }
     
     return 0;
 }

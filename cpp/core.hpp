@@ -167,6 +167,7 @@ class Matrix {
     static Matrix<D> rand(size_t m, size_t n);
     static Matrix<D> ones(size_t m, size_t n);
     static Matrix<D> zeros(size_t m, size_t n);
+
     // Matrix's friends
     template <class Data>
     friend Matrix<Data> sum(const Matrix<Data> &M, int dim);
@@ -235,6 +236,23 @@ class Matrix {
     friend class Memory<D>;
     friend class Matrix<CUDAfloat>;
 };
+
+template <class D>
+Matrix<D> randn_like(const Matrix<D> &M){
+    return Matrix<D>::randn(M.num_row(), M.num_col());
+}
+template <class D>
+Matrix<D> rand_like(const Matrix<D> &M){
+    return Matrix<D>::rand(M.num_row(), M.num_col());
+}
+template <class D>
+Matrix<D> ones_like(const Matrix<D> &M){
+    return Matrix<D>::ones(M.num_row(), M.num_col());
+}
+template <class D>
+Matrix<D> zeros_like(const Matrix<D> &M) {
+    return Matrix<D>::zeros(M.num_row(), M.num_col());
+}
 
 template <class D>
 Matrix<D>::Matrix(const char *name, size_t numrow, size_t numcol, int trans) {
@@ -388,6 +406,10 @@ Matrix<D> Matrix<D>::slice(const idxlist &rowidx, const idxlist &colidx) const {
 template <class D>
 Matrix<D> Matrix<D>::dot(const Matrix<D> &B) const {
     STATIC_TIC;
+    // check if dimensions are compatible
+    if (num_col() != B.num_row()) {
+        throw std::invalid_argument("Matrix dimensions are not compatible");
+    }
     Matrix<D> C("dot", num_row(), B.num_col(), 0);
     C.zeros();
 #ifdef NO_CBLAS
@@ -469,6 +491,11 @@ Matrix<D> Matrix<D>::inv() {
 // C = s1*A + s2*B
 template <class D>
 Matrix<D> Matrix<D>::add(const Matrix<D> &B, D s1, D s2) const {
+    // check if dimensions are compatible
+    if (num_col() != B.num_col() || num_row() != B.num_row()) {
+        throw std::invalid_argument("Matrix dimensions are not compatible");
+    }
+
     Matrix<D> C("add", num_row(), num_col(), 0);
 
 #ifdef INTEL_MKL
@@ -495,6 +522,12 @@ Matrix<D> Matrix<D>::add(const Matrix<D> &B, D s1, D s2) const {
 // A = s1*A + s2*B
 template <class D>
 void Matrix<D>::add(const Matrix<D> &B, D s1, D s2) {
+    
+    // check if dimensions are compatible
+    if (num_col() != B.num_col() || num_row() != B.num_row()) {
+        throw std::invalid_argument("Matrix dimensions are not compatible");
+    }
+
     for (size_t j = 0; j < num_col(); j++) {
 #pragma clang loop vectorize(enable)
         for (size_t i = 0; i < num_row(); i++) {

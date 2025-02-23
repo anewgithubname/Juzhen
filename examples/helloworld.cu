@@ -50,6 +50,23 @@ int compute() {
         auto D = elemwise([=](float e) {return e-1; }, C);
         std::cout << D << std::endl;
 
+        auto E = randn_like(D);
+        std::cout << E << std::endl;
+
+        auto F = randn_like(E);
+        try
+        {
+            std::cout << E / F.T() << std::endl; // should trigger an error
+        }
+        catch(const std::exception& e)
+        {
+            std::cout << "Caught exception: " << e.what() << std::endl;
+            //pause until user presses a key
+            std::cin.get();
+        }
+
+        
+
         //write matrices to files
         std::fstream fout("A.matrix");
         fout << A;

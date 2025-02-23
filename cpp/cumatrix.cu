@@ -177,6 +177,11 @@ float Matrix<CUDAfloat>::norm() const
 Matrix<CUDAfloat> Matrix<CUDAfloat>::dot(const Matrix<CUDAfloat>& B) const
 {
     STATIC_TIC;
+    //check if the dimensions are compatible
+    if (num_col() != B.num_row())
+    {
+        throw std::invalid_argument("Matrix dimensions are not compatible");
+    }
     Matrix<CUDAfloat> C("dot", num_row(), B.num_col());
 
     cublasOperation_t transA = transpose ? CUBLAS_OP_T : CUBLAS_OP_N;
@@ -209,6 +214,7 @@ void Matrix<CUDAfloat>::add(float a, float s1)
     addKernel<<<cudaConfig(numElem)>>>((float*) elements.get(), s1, a, numElem);
 }
 
+//M = s1*M
 void Matrix<CUDAfloat>::scale(float s1){
     //original content lM is replaced to store the scaled result.
     size_t numelems = numrow * numcol;
@@ -220,6 +226,10 @@ void Matrix<CUDAfloat>::scale(float s1){
 //s1*M + s2*B
 Matrix<CUDAfloat> Matrix<CUDAfloat>::add(const Matrix<CUDAfloat>& B, float s1, float s2) const
 {
+    // check if the dimensions are compatible
+    if (num_row() != B.num_row() || num_col() != B.num_col()){
+        throw std::invalid_argument("Matrix dimensions are not compatible");
+    }
     Matrix<CUDAfloat> C("add", num_row(), num_col());
 
     cublasOperation_t transA = transpose ? CUBLAS_OP_T : CUBLAS_OP_N;
@@ -234,6 +244,10 @@ Matrix<CUDAfloat> Matrix<CUDAfloat>::add(const Matrix<CUDAfloat>& B, float s1, f
 }
 //in place s1*M + s2*B
 void Matrix<CUDAfloat>::add(const Matrix<CUDAfloat>& B, float s1, float s2) {
+    // check if the dimensions are compatible
+    if (num_row() != B.num_row() || num_col() != B.num_col()){
+        throw std::invalid_argument("Matrix dimensions are not compatible");
+    }
 
     cublasOperation_t transA = CUBLAS_OP_N;
     cublasOperation_t transB = transpose != B.transpose ? CUBLAS_OP_T : CUBLAS_OP_N;
@@ -270,6 +284,7 @@ __global__ void divKernel(float *d_out, float d_in1, float *d_in2, size_t numEle
     }
 }
 
+// M_new = M / l
 Matrix<CUDAfloat> Matrix<CUDAfloat>::eleminv(double l) const{
     Matrix<CUDAfloat> result("elem_rec", numrow, numcol, transpose);
 
@@ -279,6 +294,7 @@ Matrix<CUDAfloat> Matrix<CUDAfloat>::eleminv(double l) const{
     return result;
 }
 
+// M = M / l
 void Matrix<CUDAfloat>::eleminv(double l){
     LOG_DEBUG("rval l/rM called!");
 
