@@ -29,7 +29,7 @@
 using namespace std;
 using namespace Juzhen;
 
-#ifndef CPU_ONLY
+#ifdef CUDA
 #define FLOAT CUDAfloat
 inline Matrix<CUDAfloat> randn(int m, int n) { return Matrix<CUDAfloat>::randn(m, n); }
 inline Matrix<CUDAfloat> ones(int m, int n) { return Matrix<CUDAfloat>::ones(m, n); }
@@ -40,7 +40,7 @@ inline Matrix<float> ones(int m, int n) { return Matrix<float>::ones(m, n); }
 #endif
 
 int compute() {
-#ifndef CPU_ONLY
+#ifdef CUDA
     GPUSampler sampler(2345);
 #endif
 
@@ -67,7 +67,7 @@ int compute() {
         int batch_id = (iter % numbatches);
 
         // obtaining batches
-#ifndef CPU_ONLY
+#ifdef CUDA
         auto X_i = Matrix<FLOAT>(X.columns(batchsize * batch_id, batchsize * (batch_id + 1)));
         auto Y_i = Matrix<FLOAT>(Y.columns(batchsize * batch_id, batchsize * (batch_id + 1)));
 #else
@@ -81,7 +81,7 @@ int compute() {
         backprop(trainnn, X_i);
         trainnn.pop_front();
         if (iter % 1000 == 0) {
-#ifndef CPU_ONLY
+#ifdef CUDA
             cout << "testing loss: " << forward(testnn, XT).to_host().elem(0, 0) << endl;
 #else
             cout << "testing loss: " << forward(testnn, XT).elem(0, 0) << endl;

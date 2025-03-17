@@ -235,6 +235,7 @@ class Matrix {
 
     friend class Memory<D>;
     friend class Matrix<CUDAfloat>;
+    friend class Matrix<MPSfloat>;
 };
 
 template <class D>

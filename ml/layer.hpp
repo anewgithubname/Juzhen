@@ -31,7 +31,7 @@
 #include "../cpp/matrix.hpp"
 #include "./util.cuh"
 
-#ifndef CPU_ONLY
+#ifdef CUDA
 #include "../cpp/cumatrix.cuh"
 #endif
 
@@ -445,7 +445,7 @@ namespace Juzhen
 			}
 			
 			float t = (float)i/steps;    
-#ifdef CPU_ONLY
+#if !defined(CUDA) || !defined(APPLE_SILIICON)
 			auto inpt = vstack<float>({Zt, Matrix<T>::ones(1, n)*t});
 #else
 			auto inpt = vstack({Zt, Matrix<T>::ones(1, n)*t});

@@ -134,7 +134,7 @@ void cpu_dre(){
     cout << "Time taken: " << time_in_ms(t1, t2) << " ms" << endl;
 }
 
-#ifndef CPU_ONLY
+#ifdef CUDA
 void cuda_basic(){
     {
         cuMatrix A(Matrix<float>("A",{{1,2,3},{4,5,6}}));
@@ -269,7 +269,7 @@ int compute(){
     printf("\ncpu_dre\n");
     cpu_dre();
 
-#ifndef CPU_ONLY
+#ifdef CUDA
     GPUSampler sampler(1);
      printf("\ncuda_basic\n");
      cuda_basic();

@@ -49,6 +49,7 @@ typedef std::chrono::high_resolution_clock Clock;
 #define datatype(D) boost::typeindex::type_id<D>().pretty_name() 
 
 BOOST_STRONG_TYPEDEF(float, CUDAfloat)
+BOOST_STRONG_TYPEDEF(float, MPSfloat)
 
 typedef std::vector<size_t> idxlist;
 

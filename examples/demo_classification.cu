@@ -34,7 +34,7 @@
 using namespace std;
 using namespace Juzhen;
 
-#ifndef CPU_ONLY
+#ifdef CUDA
 #define FLOAT CUDAfloat
 inline Matrix<CUDAfloat> randn(int m, int n) { return Matrix<CUDAfloat>::randn(m, n); }
 inline Matrix<CUDAfloat> ones(int m, int n) { return Matrix<CUDAfloat>::ones(m, n); }
@@ -72,7 +72,7 @@ vector<Matrix<float>> dataset(int n, int d){
 
 int compute() {
     //spdlog::set_level(spdlog::level::debug);
-#ifndef CPU_ONLY
+#ifdef CUDA
     GPUSampler sampler(2345);
 #endif
     const int n = 50000, d = 2, k = 2, batchsize = 500, numbatches = n / batchsize;
@@ -81,13 +81,13 @@ int compute() {
     auto Y = vecXY[1];
 
     auto vecXtYt = dataset(n, d);
-#ifndef CPU_ONLY
+#ifdef CUDA
     auto XT = Matrix<CUDAfloat>(vecXtYt[0]);
 #else
     auto &XT = vecXtYt[0];
 #endif
 
-#ifndef CPU_ONLY
+#ifdef CUDA
     auto YT = Matrix<CUDAfloat>(vecXtYt[1]);
 #else
     auto &YT = vecXtYt[1];
@@ -108,7 +108,7 @@ int compute() {
         int batch_id = (iter % numbatches);
 
         // obtaining batches
-#ifndef CPU_ONLY
+#ifdef CUDA
         auto X_i = Matrix<FLOAT>(X.columns(batchsize * batch_id, batchsize * (batch_id + 1)));
         auto Y_i = Matrix<FLOAT>(Y.columns(batchsize * batch_id, batchsize * (batch_id + 1)));
 #else
@@ -124,7 +124,7 @@ int compute() {
         backprop(trainnn, X_i);
         trainnn.pop_front();
         if (iter % 1000 == 0) {
-#ifndef CPU_ONLY
+#ifdef CUDA
             cout << "Misclassification Rate: " << forward(testnn, XT).to_host().elem(0, 0) << endl;
 #else
             cout << "Misclassification Rate: " << forward(testnn, XT).elem(0, 0) << endl;

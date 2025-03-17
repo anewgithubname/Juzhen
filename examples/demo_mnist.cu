@@ -61,7 +61,7 @@ void send_computing_time(double elapsed){
     }
 }
 
-#ifndef CPU_ONLY
+#ifdef CUDA
 #define FLOAT CUDAfloat
 inline Matrix<CUDAfloat> randn(int m, int n) { return Matrix<CUDAfloat>::randn(m, n); }
 inline Matrix<CUDAfloat> ones(int m, int n) { return Matrix<CUDAfloat>::ones(m, n); }
@@ -75,7 +75,7 @@ inline Matrix<float> ones(int m, int n) { return Matrix<float>::ones(m, n); }
 int compute() {
     auto t1 = std::chrono::high_resolution_clock::now();
     // spdlog::set_level(spdlog::level::debug);
-#ifndef CPU_ONLY
+#ifdef CUDA
     GPUSampler sampler(1);
 #endif
     const int d = 28*28, k = 10, batchsize = 32;
@@ -85,13 +85,13 @@ int compute() {
     
     const size_t numbatches = X.num_col() / batchsize;
 
-#ifndef CPU_ONLY
+#ifdef CUDA
     auto XT = Matrix<CUDAfloat>(vecXY[2]);
 #else
     auto &XT = vecXY[2];
 #endif
 
-#ifndef CPU_ONLY
+#ifdef CUDA
     auto YT = Matrix<CUDAfloat>(vecXY[3]);
 #else
     auto &YT = vecXY[3];
@@ -119,7 +119,7 @@ int compute() {
         size_t batch_id = (iter % numbatches);
 
         // obtaining batches
-#ifndef CPU_ONLY
+#ifdef CUDA
         auto X_i = Matrix<FLOAT>(X.columns(batchsize * batch_id, batchsize * (batch_id + 1)));
         auto Y_i = Matrix<FLOAT>(Y.columns(batchsize * batch_id, batchsize * (batch_id + 1)));
 #else
@@ -135,7 +135,7 @@ int compute() {
         backprop(trainnn, X_i);
         trainnn.pop_front();
         if (iter % 1000 == 0) {
-#ifndef CPU_ONLY
+#ifdef CUDA
             cout << "Misclassification Rate: " << forward(testnn, XT).to_host().elem(0, 0) << endl;
 #else
             cout << "Misclassification Rate: " << forward(testnn, XT).elem(0, 0) << endl;

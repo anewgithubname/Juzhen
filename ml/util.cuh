@@ -27,12 +27,12 @@
 
 #include "../cpp/juzhen.hpp"
 
-#ifndef CPU_ONLY
+#ifdef CUDA
 #include <thrust/device_vector.h>
 #include <thrust/sort.h>
 #endif
 
-#ifndef CPU_ONLY
+#ifdef CUDA
 #define dvector thrust::device_vector
 #else
 #define dvector std::vector
@@ -49,7 +49,7 @@ template <class T>
 float comp_med(const Matrix<T> &a) {
     STATIC_TIC;
     size_t n = a.num_row() * a.num_row();
-#ifndef CPU_ONLY
+#ifdef CUDA
     const float *s = (float *)comp_dist(a, a).data();
     thrust::device_vector<float> vec(s, s + n);
     thrust::sort(vec.begin(), vec.end());
@@ -97,7 +97,7 @@ inline int argmax(std::vector<T> a) {
 template <class T>
 inline float item(const Matrix<T> &M){
     // assert(M.num_row() == 1 && M.num_col() == 1);
-    #ifdef CPU_ONLY
+    #if !defined(CUDA) || !defined(APPLE_SILIICON)
         return M.elem(0, 0);
     #else
         return M.to_host().elem(0, 0);

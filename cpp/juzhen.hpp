@@ -21,17 +21,19 @@ class Code {
 
 typedef Matrix<float> M;
 
-#ifndef CPU_ONLY
+#ifdef CUDA
 #include "cumatrix.cuh"
 typedef Matrix<CUDAfloat> CM;
 #endif
 
 // some basic statistics functions
-#ifndef CPU_ONLY
+#ifdef CUDA
 #define __GPU_CPU__ __device__ __host__
 #else
 #define __GPU_CPU__
 #endif
+
+#include "mpsmatrix.hpp"
 
 template <class D>
 Matrix<D> randn_like(const Matrix<D> &M) {

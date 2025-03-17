@@ -8,17 +8,16 @@ add_definitions(-DPROJECT_DIR="${CMAKE_SOURCE_DIR}")
 add_definitions(-DBENCHMARKSERVER="DONOTKNOW")
 
 # do you need GPU support? CUDA 11.8 is required
-set(CPU_ONLY ON)
+set(CUDA OFF)
+set(APPLE_SILICON ON)
+
 set(HAS_CONCEPTS ON)
 
 set(CMAKE_CXX_STANDARD 20)
 
-if(CPU_ONLY)
-    message("BUILD WITHOUT GPU SUPPORT!")
-    add_definitions(-DCPU_ONLY)
-    project(animated_octo_sniffle LANGUAGES CXX)
-else()
-    message("BUILD WITH GPU SUPPORT! GOOD FOR YOU!")
+if(CUDA)
+    message("BUILD WITH CUDA SUPPORT!")
+    add_definitions(-DCUDA)
     # if we are on Unix, we need to specify the CUDA toolkit location
     # CUDA 11.8 is required
     if(UNIX) 
@@ -30,7 +29,6 @@ else()
     endif()
     set(CMAKE_CUDA_ARCHITECTURES 61)
     project(animated_octo_sniffle LANGUAGES CXX CUDA)
-    # find_package(CUDA REQUIRED)
     find_package(CUDAToolkit REQUIRED)
 
     set(CMAKE_CUDA_STANDARD 20)
@@ -41,15 +39,39 @@ else()
     endif()
 
     set(CMAKE_CUDA_FLAGS "-std=c++20")
+elseif(APPLE_SILICON)
+    message("BUILD WITH APPLE SILICON SUPPORT! ")
+    add_definitions(-DAPPLE_SILICON)
+    project(animated_octo_sniffle LANGUAGES CXX OBJCXX)
+    set(CMAKE_CXX_STANDARD 20)
+    set(CMAKE_OBJCXX_STANDARD 17)
+    set(CMAKE_OBJCXX_STANDARD_REQUIRED ON)
+
+    # Define shader source and output
+    set(SHADER_SOURCE ${PROJECT_SOURCE_DIR}/cpp/metal/shaders.metal)
+    set(SHADER_AIR ${CMAKE_BINARY_DIR}/shaders.air)
+    set(SHADER_METALLIB ${CMAKE_BINARY_DIR}/default.metallib)
+
+    # Compile Metal Shader
+    add_custom_command(
+        OUTPUT ${SHADER_METALLIB}
+        COMMAND xcrun -sdk macosx metal -c ${SHADER_SOURCE} -o ${SHADER_AIR}
+        COMMAND xcrun -sdk macosx metallib ${SHADER_AIR} -o ${SHADER_METALLIB}
+        DEPENDS ${SHADER_SOURCE}
+        COMMENT "Compiling Metal shaders to ${SHADER_METALLIB}"
+    )
+
+    # Define a target to build the shaders
+    add_custom_target(compile_shaders DEPENDS ${SHADER_METALLIB})
+
+else()
+    message("BUILD WITH CPU ONLY SUPPORT!")
+    project(animated_octo_sniffle LANGUAGES CXX)
 endif()
 
 if(UNIX) # if we are on linux, look for any BLAS
-    # set(BLAS_VENDOR "OpenBLAS")
-    # set(OpenBLAS_LIBRARIES "/usr/local/lib/libopenblas.a")
     find_package(BLAS REQUIRED)
     message("OpenBLAS found: ${OpenBLAS_LIBRARIES}")
-    # set the openblas directory to /opt/OpenBLAS
-    # set(OpenBLAS_LIBRARIES "/opt/OpenBLAS/lib/libopenblas.a")
 else() # if we are on windows, use the provided OpenBLAS library
     set(OpenBLAS_LIBRARIES "${PROJECT_SOURCE_DIR}/external/OpenBLAS/lib/libopenblas.lib")
 endif()
@@ -59,47 +81,52 @@ set(spdlog_INCLUDE_DIRS "${PROJECT_SOURCE_DIR}/external/spdlog/include")
 
 find_package(Boost REQUIRED)
 
-if(NOT CPU_ONLY)
-    add_library(juzhen cpp/launcher.cu cpp/cumatrix.cu cpp/cukernels.cu cpp/cumatrix.cuh cpp/juzhen.hpp cpp/core.hpp cpp/matrix.hpp
-            cpp/helper.hpp ml/layer.hpp ml/dataloader.hpp)
+if(CUDA)
+    add_library(juzhen cpp/launcher.cu cpp/cumatrix.cu cpp/cukernels.cu)
+elseif(APPLE_SILICON)
+    add_library(juzhen cpp/launcher.cu cpp/metal/MPSWrapper.mm cpp/mpsmatrix.cpp)
+    add_dependencies(juzhen compile_shaders)
 else()
-    add_library(juzhen cpp/launcher.cu cpp/juzhen.hpp cpp/core.hpp cpp/matrix.hpp cpp/helper.hpp ml/layer.hpp
-            ml/dataloader.hpp)
+    add_library(juzhen cpp/launcher.cu)
 endif()
 
-target_precompile_headers(juzhen PRIVATE cpp/juzhen.hpp)
+# target_precompile_headers(juzhen PRIVATE cpp/juzhen.hpp)
 target_include_directories(juzhen PUBLIC "external/spdlog/include")
 target_include_directories(juzhen PUBLIC ${OpenBLAS_INCLUDE_DIRS})
 target_include_directories(juzhen PUBLIC ${Boost_INCLUDE_DIRS})
 
-if(NOT CPU_ONLY) # if we are on GPU, we need to include the cuda headers
+if(CUDA) # if we are on GPU, we need to include the cuda headers
     target_include_directories(juzhen PUBLIC ${CUDA_INCLUDE_DIRS})
     target_compile_options(juzhen PRIVATE $<$<COMPILE_LANGUAGE:CUDA>:--extended-lambda>)
 else()
     set_source_files_properties(cpp/launcher.cu PROPERTIES LANGUAGE CXX) # specify cuda files lanaugae to be CXX
     set_target_properties(juzhen PROPERTIES LINKER_LANGUAGE CXX)
 
-    if(UNIX)
-        target_compile_options(juzhen PRIVATE $<$<COMPILE_LANGUAGE:CXX>:-x c++>)
-    endif()
+    # if(UNIX)
+    #     target_compile_options(juzhen PRIVATE $<$<COMPILE_LANGUAGE:CXX>:-x c++>)
+    # endif()
 endif()
 
 macro(GENERATE_PROJ TARGETNAME FILE)
     # simple test executable
     add_executable(${TARGETNAME} ${FILE})
-    target_precompile_headers(${TARGETNAME} PRIVATE cpp/juzhen.hpp)
+    # target_precompile_headers(${TARGETNAME} PRIVATE cpp/juzhen.hpp)
     add_dependencies(${TARGETNAME} juzhen)
     target_include_directories(${TARGETNAME} PUBLIC "external/spdlog/include")
     target_include_directories(${TARGETNAME} PUBLIC ${OpenBLAS_INCLUDE_DIRS})
     target_include_directories(${TARGETNAME} PUBLIC ${Boost_INCLUDE_DIRS})
 
     
-    if(NOT CPU_ONLY) # if we are on GPU, we need to link the cuda libraries
+    if(CUDA) # if we are on GPU, we need to link the cuda libraries
         target_include_directories(${TARGETNAME} PUBLIC ${CUDA_INCLUDE_DIRS})
         target_link_libraries(${TARGETNAME} spdlog::spdlog ${BLAS_LIBRARIES} ${OpenBLAS_LIBRARIES} juzhen ${CUDA_LIBRARIES} ${CUDA_cublas_LIBRARY} ${CUDA_curand_LIBRARY} ${CUDA_cusolver_LIBRARY})
         target_compile_options(${TARGETNAME} PRIVATE $<$<COMPILE_LANGUAGE:CUDA>:--extended-lambda>)
+    elseif(APPLE_SILICON)
+        target_link_libraries(${TARGETNAME} spdlog::spdlog ${BLAS_LIBRARIES} "-framework Metal" "-framework Foundation" "-framework MetalPerformanceShaders" juzhen)
+        set_source_files_properties(${FILE} PROPERTIES LANGUAGE CXX)
+        set_target_properties(${TARGETNAME} PROPERTIES LINKER_LANGUAGE CXX)
     else()
-        target_link_libraries(${TARGETNAME} spdlog::spdlog ${BLAS_LIBRARIES} ${OpenBLAS_LIBRARIES} juzhen)
+        target_link_libraries(${TARGETNAME} spdlog::spdlog ${BLAS_LIBRARIES} juzhen)
         set_source_files_properties(${FILE} PROPERTIES LANGUAGE CXX)
         set_target_properties(${TARGETNAME} PROPERTIES LINKER_LANGUAGE CXX)
 
