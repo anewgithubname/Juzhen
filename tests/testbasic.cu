@@ -115,6 +115,9 @@ int test5(){
 #ifdef CUDA
     CM A = CM::ones(3, 4);
     CM B = CM::ones(3, 3);
+#elif defined(APPLE_SILICON)
+    Matrix<MPSfloat> A = Matrix<MPSfloat>::ones(3, 4);
+    Matrix<MPSfloat> B = Matrix<MPSfloat>::ones(3, 3);
 #else
     M A = M::ones(3, 4);
     M B = M::ones(3, 3);

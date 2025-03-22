@@ -175,7 +175,7 @@ class Matrix<CUDAfloat> {
     Matrix<CUDAfloat> eleminv(double l) const;
 
     float norm() const;
-    Matrix<CUDAfloat> T() const;
+    const Matrix<CUDAfloat> T() const;
 
     // upload to host mem
     Matrix<float> to_host() const;

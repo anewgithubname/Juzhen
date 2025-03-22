@@ -97,7 +97,7 @@ inline int argmax(std::vector<T> a) {
 template <class T>
 inline float item(const Matrix<T> &M){
     // assert(M.num_row() == 1 && M.num_col() == 1);
-    #if !defined(CUDA) || !defined(APPLE_SILIICON)
+    #if !defined(CUDA) && !defined(APPLE_SILIICON)
         return M.elem(0, 0);
     #else
         return M.to_host().elem(0, 0);

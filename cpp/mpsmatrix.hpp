@@ -86,10 +86,33 @@ public:
 
     // basic matrix ops
     Matrix<MPSfloat> dot(const Matrix<MPSfloat>& B) const;
-    Matrix<MPSfloat> T() const;
+    Matrix<MPSfloat> add(const Matrix<MPSfloat>& B, float s1, float s2) const;
+    void add(const Matrix<MPSfloat>& B, float s1, float s2);
+    Matrix<MPSfloat> add(float a, float s1) const;
+    void add(float a, float s1);
+    void scale(float s1);
+    Matrix<MPSfloat> scale(float s1) const { return add(0, s1); }
+    void eleminv(double l);
+    Matrix<MPSfloat> eleminv(double l) const;
+    const Matrix<MPSfloat> T() const;
 
-    
+    friend Matrix<MPSfloat> hadmd(const Matrix<MPSfloat>& M1,
+        const Matrix<MPSfloat>& M2);
+    friend Matrix<MPSfloat> hadmd(const Matrix<MPSfloat>& M1,
+        Matrix<MPSfloat>&& M2);
+    friend Matrix<MPSfloat> hadmd(Matrix<MPSfloat>&& M1,
+       const Matrix<MPSfloat>& M2);
+
+    friend void topk(const Matrix<MPSfloat>& M, Matrix<int>& B, Matrix<MPSfloat>& C, int k);
+    friend Matrix<MPSfloat> sum(const Matrix<MPSfloat>& M, int dim);
+    friend Matrix<MPSfloat> exp(const Matrix<MPSfloat>& M);
+    friend Matrix<MPSfloat> exp(Matrix<MPSfloat>&& M);
+    friend Matrix<MPSfloat> log(const Matrix<MPSfloat>& M);
+    friend Matrix<MPSfloat> log(Matrix<MPSfloat>&& M);
 };
 
-Matrix<MPSfloat> sum(const Matrix<MPSfloat>& A);
+std::ostream& operator <<(std::ostream& os, const Matrix<MPSfloat>& M);
+Matrix<MPSfloat> sum(const Matrix<MPSfloat>& M, int dim);
+void topk(const Matrix<MPSfloat>& M, Matrix<int>& B, Matrix<MPSfloat>& C, int k);
+
 #endif

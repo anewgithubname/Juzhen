@@ -445,7 +445,7 @@ namespace Juzhen
 			}
 			
 			float t = (float)i/steps;    
-#if !defined(CUDA) || !defined(APPLE_SILIICON)
+#if !defined(CUDA) && !defined(APPLE_SILIICON)
 			auto inpt = vstack<float>({Zt, Matrix<T>::ones(1, n)*t});
 #else
 			auto inpt = vstack({Zt, Matrix<T>::ones(1, n)*t});
