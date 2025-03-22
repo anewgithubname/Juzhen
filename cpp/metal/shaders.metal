@@ -72,6 +72,14 @@ kernel void ax_b_kernel(
     v2[id] = a * v1[id] + b;
 }
 
+kernel void inplace_square_kernel(
+    device float*       v1  [[buffer(0)]],
+    uint                id    [[thread_position_in_grid]]
+)
+{
+    v1[id] = v1[id] * v1[id];
+}
+
 kernel void inplace_exp_kernel(
     device float*       v1  [[buffer(0)]],
     uint                id    [[thread_position_in_grid]]

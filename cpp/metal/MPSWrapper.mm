@@ -16,6 +16,7 @@ static id<MTLComputePipelineState> matrixproductPipelineState = nil;
 static id<MTLComputePipelineState> expPipelineState = nil;
 static id<MTLComputePipelineState> logPipelineState = nil;
 static id<MTLComputePipelineState> elemInvPipelineState = nil;
+static id<MTLComputePipelineState> squarePipelineState = nil;
 
 MPSMatrixRandomMTGP32* randomKernel = nil;
 MPSMatrixRandomDistributionDescriptor* randDesc = nil;
@@ -52,7 +53,8 @@ void mpsInit() {
     id<MTLFunction> matrixproductKernel = [defaultLibrary newFunctionWithName:@"matrix_product"];
     id<MTLFunction> expKernel = [defaultLibrary newFunctionWithName:@"inplace_exp_kernel"];
     id<MTLFunction> logKernel = [defaultLibrary newFunctionWithName:@"inplace_log_kernel"];
-    id<MTLFunction> elemInvKernel = [defaultLibrary newFunctionWithName:@"outplace_transpose"];
+    id<MTLFunction> elemInvKernel = [defaultLibrary newFunctionWithName:@"inplace_elem_inv_kernel"];
+    id<MTLFunction> squareKernel = [defaultLibrary newFunctionWithName:@"inplace_square_kernel"];
 
     // Create compute pipeline state
     zeroPipelineState = [device newComputePipelineStateWithFunction:zeroKernel error:&error];
@@ -62,6 +64,7 @@ void mpsInit() {
     expPipelineState = [device newComputePipelineStateWithFunction:expKernel error:&error];
     logPipelineState = [device newComputePipelineStateWithFunction:logKernel error:&error];
     elemInvPipelineState = [device newComputePipelineStateWithFunction:elemInvKernel error:&error];
+    squarePipelineState = [device newComputePipelineStateWithFunction:squareKernel error:&error];
 
 }
 
@@ -76,6 +79,7 @@ void mpsDestroy() {
     [expPipelineState release];
     [logPipelineState release];
     [elemInvPipelineState release];
+    [squarePipelineState release];
     [commandQueue release];
     [device release];
     device = nil;
@@ -292,6 +296,29 @@ void mpsLog(float *M, int N){
     [commandBuffer commit];
 }
 
+void mpsSquare(float* A, int N){
+    id<MTLBuffer> buffer = bufferMap[A];
+
+    commandBuffer = [commandQueue commandBuffer];
+    id<MTLComputeCommandEncoder> encoder = [commandBuffer computeCommandEncoder];
+
+    [encoder setComputePipelineState:squarePipelineState];
+    [encoder setBuffer:buffer offset:0 atIndex:0];
+    [encoder setBytes:&N length:sizeof(int) atIndex:2];
+
+    // Set up thread groups
+    MTLSize gridSize = MTLSizeMake(N, 1, 1);
+    NSUInteger threadGroupSize = squarePipelineState.maxTotalThreadsPerThreadgroup;
+    if (threadGroupSize > N) threadGroupSize = N;
+
+    MTLSize threadsPerGroup = MTLSizeMake(threadGroupSize, 1, 1);
+
+    [encoder dispatchThreads:gridSize threadsPerThreadgroup:threadsPerGroup];
+    
+    [encoder endEncoding];
+    [commandBuffer commit];
+}
+
 void mpsGemv(const float* A, const float* x, float* y, int rowA, int colA, bool transposeA) {
     commandBuffer = [commandQueue commandBuffer];
 
@@ -313,7 +340,7 @@ void mpsGemv(const float* A, const float* x, float* y, int rowA, int colA, bool 
     [matA release]; [vecX release]; [vecY release]; [gemvKernel release];
 }
 
-void mpsTopk(const float* A, int* B, float *C, int rowA, int colA, int k){
+void mpsTopk(const float* A, float* B, float *C, int rowA, int colA, int k){
     id<MTLBuffer> bufferA = bufferMap[(float *) A];
     // id<MTLBuffer> bufferB = bufferMap[B];
     id<MTLBuffer> bufferB  = [device newBufferWithLength:rowA*k*sizeof(int) options:MTLResourceStorageModeShared];
@@ -336,7 +363,14 @@ void mpsTopk(const float* A, int* B, float *C, int rowA, int colA, int k){
     [commandBuffer commit];
 
     mpsSynchronize();
-    memcpy(B, bufferB.contents, rowA*k*sizeof(int));
+    std::cout << "Copying topk results" << std::endl;
+    // memcpy(B, bufferB.contents, rowA*k*sizeof(int));
+    // copy the memory from row major order to column major order
+    for (int i = 0; i < rowA; i++){
+        for (int j = 0; j < k; j++){
+            B[j*rowA + i] = ((int *)bufferB.contents)[i*k + j];
+        }
+    }
 
     [matA release]; [matB release]; [matC release]; [topkKernel release]; [bufferB release];
     

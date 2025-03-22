@@ -173,26 +173,22 @@
         std::cout << "sum along row: " << std::endl;
         std::cout << sum(A, 1).to_host() - sum(A.to_host(), 1) << std::endl;
 
-        auto B = Matrix<MPSfloat>::randn(3, 2);
-        std::cout << B << std::endl;
+        // auto B = Matrix<MPSfloat>::randn(3, 2);
+        // std::cout << B << std::endl;
 
-        auto C = Matrix<MPSfloat>::zeros(2, 3);
-        C += B.T();
-        std::cout << C.get_transpose() << std::endl;
+        // auto C = Matrix<MPSfloat>::zeros(2, 3);
+        // C += B.T();
+        // std::cout << C.get_transpose() << std::endl;
 
 
-        // auto B = Matrix<MPSfloat>::randn(5,4);
-        // auto C = Matrix<int>::zeros(5, 2);
-        // auto D = Matrix<MPSfloat>::zeros(5, 2);
+        auto B = Matrix<MPSfloat>::randn(60000, 10000);
+        auto C = topk(B.T(), 15, 1);
 
-        // topk(B, C, D, 2);
+        std::cout << "B: " << std::endl;
+        std::cout << B.T().to_host().slice(0,5,0,5) << std::endl;
 
-        // std::cout << "A: " << std::endl;
-        // std::cout << B.to_host() << std::endl;
-
-        // std::cout << "topk: " << std::endl;
-        // std::cout << C << std::endl;
-        // std::cout << D.to_host() << std::endl;
+        std::cout << "topk: " << std::endl;
+        std::cout << C.slice(0,5,0,5) << std::endl;
         
      }
 

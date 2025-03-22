@@ -103,16 +103,20 @@ public:
     friend Matrix<MPSfloat> hadmd(Matrix<MPSfloat>&& M1,
        const Matrix<MPSfloat>& M2);
 
-    friend void topk(const Matrix<MPSfloat>& M, Matrix<int>& B, Matrix<MPSfloat>& C, int k);
+    friend Matrix<float> topk(const Matrix<MPSfloat>& M, int k, int dim);
     friend Matrix<MPSfloat> sum(const Matrix<MPSfloat>& M, int dim);
     friend Matrix<MPSfloat> exp(const Matrix<MPSfloat>& M);
     friend Matrix<MPSfloat> exp(Matrix<MPSfloat>&& M);
     friend Matrix<MPSfloat> log(const Matrix<MPSfloat>& M);
     friend Matrix<MPSfloat> log(Matrix<MPSfloat>&& M);
+    friend Matrix<MPSfloat> square(const Matrix<MPSfloat>& M);
+    friend Matrix<MPSfloat> square(Matrix<MPSfloat>&& M);
 };
 
 std::ostream& operator <<(std::ostream& os, const Matrix<MPSfloat>& M);
 Matrix<MPSfloat> sum(const Matrix<MPSfloat>& M, int dim);
-void topk(const Matrix<MPSfloat>& M, Matrix<int>& B, Matrix<MPSfloat>& C, int k);
+Matrix<float> topk(const Matrix<MPSfloat>& M, int k, int dim);
+Matrix<MPSfloat> square(const Matrix<MPSfloat>& M);
+Matrix<MPSfloat> square(Matrix<MPSfloat>&& M);
 
 #endif

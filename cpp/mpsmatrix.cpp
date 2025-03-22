@@ -1,4 +1,5 @@
 #include <string>
+#include "operators.hpp"
 #include "mpsmatrix.hpp"
 
 Matrix<MPSfloat>::Matrix(const Matrix<float>& M)
@@ -273,6 +274,18 @@ Matrix<MPSfloat> log(Matrix<MPSfloat>&& M){
     return std::move(M);
 }
 
+Matrix<MPSfloat> square(const Matrix<MPSfloat>& M){
+    Matrix<MPSfloat> squareM("squareM", M.numrow, M.numcol, M.transpose);
+    mpsAx_b((float*) M.elements.get(), 1.0, 0, (float*) squareM.elements.get(), M.numrow * M.numcol);
+    mpsSquare((float*) squareM.elements.get(), M.numrow * M.numcol);
+    return squareM;
+}
+
+Matrix<MPSfloat> square(Matrix<MPSfloat>&& M){
+    mpsSquare((float*) M.elements.get(), M.numrow * M.numcol);
+    return std::move(M);
+}
+
 Matrix<MPSfloat> sum(const Matrix<MPSfloat>& M, int dim){
     int transM = M.transpose;
     if (dim == 0)
@@ -293,17 +306,52 @@ Matrix<MPSfloat> sum(const Matrix<MPSfloat>& M, int dim){
     return sumM;
 }
 
-void topk(const Matrix<MPSfloat>& A, Matrix<int>& B, Matrix<MPSfloat>& C, int k){
-    int indices[A.numrow*k];
-    mpsTopk((float*) A.elements.get(), indices, (float*) C.elements.get(), A.numrow, A.numcol, k);
+Matrix<float> topk(const Matrix<MPSfloat>& M, int k, int dim){
 
-    for (int i =0; i < A.numrow; i++)
-    {
-        for (int j = 0; j < k; j++)
+    // STATIC_TIC;
+    bool trans = false;
+    if (dim == 1 && !M.transpose) {
+        trans = false;
+    } else if (dim == 0 && !M.transpose) {
+        trans = true;
+    } else if (dim == 1 && M.transpose) {
+        trans = true;
+    } else {
+        trans = false;
+    }
+
+    if (!trans){
+        Matrix<float> result("resM", M.numrow, k);
+        Matrix<MPSfloat> kval("kval", M.numrow, k);
+        mpsTopk((float*) M.elements.get(), result.elements.get(), (float *) kval.elements.get(), M.numrow, M.numcol, k);
+
+        if (M.transpose)
         {
-            B.elem(i, j) = indices[i*k + j];
+            return result.T();
+        }
+        else
+        {
+            return result;
+        }
+    }else{
+        // transpose the matrix
+        auto t = Matrix<MPSfloat>::zeros(M.numcol, M.numrow);
+        if (M.get_transpose())
+            t += M;
+        else
+            t += M.T();
+
+        Matrix<float> result("resM", t.numrow, k);
+        Matrix<MPSfloat> kval("kval", t.numrow, k);
+        mpsTopk((float*) t.elements.get(), result.elements.get(), (float *) kval.elements.get(), t.numrow, t.numcol, k);
+
+        if (M.transpose) {
+            return result;
+        } else {
+            return result.T();
         }
     }
+
 }
 
 std::ostream& operator <<(std::ostream& os, const Matrix<MPSfloat>& M) {

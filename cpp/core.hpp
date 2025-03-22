@@ -223,6 +223,7 @@ class Matrix {
     friend Matrix<Data> vstack(std::vector<MatrixView<Data>> matrices);
     template <class Data>
     friend Matrix<Data> hadmd(const Matrix<Data> &M1, const Matrix<Data> &M2);
+    friend Matrix<float> topk(const Matrix<MPSfloat>& M, int k, int dim);
 
     template <class Data>
     friend void read(FILE *f, Matrix<Data> &M);

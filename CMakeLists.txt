@@ -8,8 +8,8 @@ add_definitions(-DPROJECT_DIR="${CMAKE_SOURCE_DIR}")
 add_definitions(-DBENCHMARKSERVER="DONOTKNOW")
 
 # do you need GPU support? CUDA 11.8 is required
-set(CUDA OFF)
-set(APPLE_SILICON ON)
+set(CUDA ON)
+set(APPLE_SILICON OFF)
 
 set(HAS_CONCEPTS ON)
 
@@ -21,9 +21,9 @@ if(CUDA)
     # if we are on Unix, we need to specify the CUDA toolkit location
     # CUDA 11.8 is required
     if(UNIX) 
-        set(CUDA_TOOLKIT_ROOT_DIR "/usr/local/cuda-12.4")
-        set(CMAKE_CUDA_COMPILER /usr/local/cuda-12.4/bin/nvcc)
-        set(CMAKE_CUDA_HOST_COMPILER /usr/bin/g++-10)
+        set(CUDA_TOOLKIT_ROOT_DIR "/usr/local/cuda-12.6")
+        set(CMAKE_CUDA_COMPILER /usr/local/cuda-12.6/bin/nvcc)
+        # set(CMAKE_CUDA_HOST_COMPILER /usr/bin/g++-13)
     else()
         set(CUDA_TOOLKIT_ROOT_DIR "C:/Program Files/NVIDIA GPU Computing Toolkit/CUDA/v12.4")
     endif()
@@ -126,7 +126,7 @@ macro(GENERATE_PROJ TARGETNAME FILE)
         set_source_files_properties(${FILE} PROPERTIES LANGUAGE CXX)
         set_target_properties(${TARGETNAME} PROPERTIES LINKER_LANGUAGE CXX)
     else()
-        target_link_libraries(${TARGETNAME} spdlog::spdlog ${BLAS_LIBRARIES} juzhen)
+        target_link_libraries(${TARGETNAME} spdlog::spdlog ${BLAS_LIBRARIES} ${OpenBLAS_LIBRARIES} juzhen)
         set_source_files_properties(${FILE} PROPERTIES LANGUAGE CXX)
         set_target_properties(${TARGETNAME} PROPERTIES LINKER_LANGUAGE CXX)
 
