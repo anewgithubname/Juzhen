@@ -38,6 +38,10 @@ using namespace Juzhen;
 #define FLOAT CUDAfloat
 inline Matrix<CUDAfloat> randn(int m, int n) { return Matrix<CUDAfloat>::randn(m, n); }
 inline Matrix<CUDAfloat> ones(int m, int n) { return Matrix<CUDAfloat>::ones(m, n); }
+#elif defined(APPLE_SILICON)
+#define FLOAT MPSfloat
+inline Matrix<MPSfloat> randn(int m, int n) { return Matrix<MPSfloat>::randn(m, n); }
+inline Matrix<MPSfloat> ones(int m, int n) { return Matrix<MPSfloat>::ones(m, n); }
 #else
 #define FLOAT float
 inline Matrix<float> randn(int m, int n) { return Matrix<float>::randn(m, n); }
@@ -81,20 +85,20 @@ int compute() {
     auto Y = vecXY[1];
 
     auto vecXtYt = dataset(n, d);
-#ifdef CUDA
-    auto XT = Matrix<CUDAfloat>(vecXtYt[0]);
+#if defined(CUDA) || defined(APPLE_SILICON)
+    auto XT = Matrix<FLOAT>(vecXtYt[0]);
 #else
     auto &XT = vecXtYt[0];
 #endif
 
-#ifdef CUDA
-    auto YT = Matrix<CUDAfloat>(vecXtYt[1]);
+#if defined(CUDA) || defined(APPLE_SILICON)
+    auto YT = Matrix<FLOAT>(vecXtYt[1]);
 #else
     auto &YT = vecXtYt[1];
 #endif
 
     // define layers
-    ReluLayer<FLOAT> L0(4096, d, batchsize), L1(128, 4096, batchsize);
+    Layer<FLOAT> L0(4096, d, batchsize), L1(128, 4096, batchsize);
     LinearLayer<FLOAT> L2(k, 128, batchsize);
     // least sqaure loss
     ZeroOneLayer<FLOAT> L3t(XT.num_col(), std::move(YT));
@@ -102,13 +106,14 @@ int compute() {
     // nns are linked lists containing layers
     list<Layer<FLOAT>*> trainnn({ &L2, &L1, &L0 }), testnn({ &L3t, &L2, &L1, &L0 });
 
+    Profiler prof("train time");
     // sgd
     int iter = 0;
     while (iter < 2000+1) {
         int batch_id = (iter % numbatches);
 
         // obtaining batches
-#ifdef CUDA
+#if defined(CUDA) || defined(APPLE_SILICON)
         auto X_i = Matrix<FLOAT>(X.columns(batchsize * batch_id, batchsize * (batch_id + 1)));
         auto Y_i = Matrix<FLOAT>(Y.columns(batchsize * batch_id, batchsize * (batch_id + 1)));
 #else
@@ -124,7 +129,7 @@ int compute() {
         backprop(trainnn, X_i);
         trainnn.pop_front();
         if (iter % 1000 == 0) {
-#ifdef CUDA
+#if defined(CUDA) || defined(APPLE_SILICON)
             cout << "Misclassification Rate: " << forward(testnn, XT).to_host().elem(0, 0) << endl;
 #else
             cout << "Misclassification Rate: " << forward(testnn, XT).elem(0, 0) << endl;
@@ -134,6 +139,6 @@ int compute() {
         iter++;
     }
 
-    dumpweights(trainnn, std::string(PROJECT_DIR) + "/classify.weights");
+    // dumpweights(trainnn, std::string(PROJECT_DIR) + "/classify.weights");
     return 0;
 }

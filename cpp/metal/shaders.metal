@@ -10,6 +10,22 @@ kernel void zero_kernel(
     data[id] = value;
 }
 
+kernel void inplace_dtanh_kernel(
+    device float*       v1  [[buffer(0)]],
+    uint                id    [[thread_position_in_grid]]
+)
+{
+    v1[id] = 1 - tanh(v1[id]) * tanh(v1[id]);
+}
+
+kernel void inplace_tanh_kernel(
+    device float*       v1  [[buffer(0)]],
+    uint                id    [[thread_position_in_grid]]
+)
+{
+    v1[id] = tanh(v1[id]);
+}
+
 // Kernel to copy a matrix with optional transposition
 kernel void matrix_product(device const float* A [[buffer(0)]], 
                         device float* B [[buffer(1)]], 
@@ -80,6 +96,14 @@ kernel void inplace_square_kernel(
     v1[id] = v1[id] * v1[id];
 }
 
+kernel void inplace_sqrt_kernel(
+    device float*       v1  [[buffer(0)]],
+    uint                id    [[thread_position_in_grid]]
+)
+{
+    v1[id] = sqrt(v1[id]);
+}
+
 kernel void inplace_exp_kernel(
     device float*       v1  [[buffer(0)]],
     uint                id    [[thread_position_in_grid]]
@@ -120,21 +144,4 @@ kernel void sigmoid_kernel(
 )
 {
     v1[id] = 1.0 / (1.0 + exp(-v2[id]));
-}
-
-kernel void inplace_tanh_kernel(
-    device float*       v1  [[buffer(0)]],
-    uint                id    [[thread_position_in_grid]]
-)
-{
-    v1[id] = tanh(v1[id]);
-}
-
-kernel void tanh_kernel(
-    device float*       v1  [[buffer(0)]],
-    device float*       v2  [[buffer(1)]],
-    uint                id    [[thread_position_in_grid]]
-)
-{
-    v1[id] = tanh(v2[id]);
 }

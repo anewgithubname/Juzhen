@@ -33,6 +33,10 @@ using namespace Juzhen;
 #define FLOAT CUDAfloat
 inline Matrix<CUDAfloat> randn(int m, int n) { return Matrix<CUDAfloat>::randn(m, n); }
 inline Matrix<CUDAfloat> ones(int m, int n) { return Matrix<CUDAfloat>::ones(m, n); }
+#elif defined(APPLE_SILICON)
+#define FLOAT MPSfloat
+inline Matrix<float> randn(int m, int n) { return Matrix<float>::randn(m, n); }
+inline Matrix<float> ones(int m, int n) { return Matrix<float>::ones(m, n); }
 #else
 #define FLOAT float
 inline Matrix<float> randn(int m, int n) { return Matrix<float>::randn(m, n); }
@@ -51,23 +55,25 @@ int compute() {
     auto X = randn(d, n), beta = randn(d, 1), Y = beta.T() * X + .5*randn(1, n);
 
     auto XT = randn(d, n), YT = beta.T() * XT + .5*randn(1, n);
+    auto XTd = Matrix<FLOAT>(XT);
+    auto YTd = Matrix<FLOAT>(YT);
 
     // define layers
     Layer<FLOAT> L0(16, d, batchsize), L1(4, 16, batchsize);
     LinearLayer<FLOAT> L2(1, 4, batchsize);
     // least sqaure loss
-    LossLayer<FLOAT> L3t(n, std::move(YT));
+    LossLayer<FLOAT> L3t(n, std::move(YTd));
 
     // nns are linked lists containing layers
     list<Layer<FLOAT>*> trainnn({ &L2, &L1, &L0 }), testnn({ &L3t, &L2, &L1, &L0});
 
     // sgd
     int iter = 0;
-    while (iter < 10000) {
+    while (iter < 10001) {
         int batch_id = (iter % numbatches);
 
         // obtaining batches
-#ifdef CUDA
+#if defined(CUDA) || defined(APPLE_SILICON)
         auto X_i = Matrix<FLOAT>(X.columns(batchsize * batch_id, batchsize * (batch_id + 1)));
         auto Y_i = Matrix<FLOAT>(Y.columns(batchsize * batch_id, batchsize * (batch_id + 1)));
 #else
@@ -80,11 +86,12 @@ int compute() {
         trainnn.push_front(&L3);
         backprop(trainnn, X_i);
         trainnn.pop_front();
+
         if (iter % 1000 == 0) {
-#ifdef CUDA
-            cout << "testing loss: " << forward(testnn, XT).to_host().elem(0, 0) << endl;
+#if defined(CUDA) || defined(APPLE_SILICON)
+            cout << "iter: " << iter << ", testing loss: " << forward(testnn, XTd).to_host().elem(0, 0) << endl;
 #else
-            cout << "testing loss: " << forward(testnn, XT).elem(0, 0) << endl;
+            cout << "iter: " << iter << ",testing loss: " << forward(testnn, XT).elem(0, 0) << endl;
 #endif
         }
 

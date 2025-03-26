@@ -62,6 +62,11 @@ Matrix<T> mean(const Matrix<T> &a, int axis) {
 }
 
 template <class T>
+Matrix<T> sqrt(const Matrix<T> &M) {
+    return elemwise([=] __GPU_CPU__(float x) { return sqrt(x); }, M);
+}
+
+template <class T>
 Matrix<T> sqrt(Matrix<T> &&M) {
     return elemwise([=] __GPU_CPU__(float x) { return sqrt(x); }, M);
 }

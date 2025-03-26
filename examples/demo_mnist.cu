@@ -35,36 +35,14 @@ std::string getCPUInfo();
 std::string getGPUInfo();
 std::string getRAMInfo();
 
-void send_computing_time(double elapsed){
-
-    std::cout << "Elapsed time: " << elapsed << " ms" << std::endl;
-
-    std::string CPU = getCPUInfo(), GPU = getGPUInfo(), MEM = getRAMInfo();
-    std::string jsonData = R"({\"cpu\":\")" + CPU + R"(\", \"gpu\":\")" +
-                GPU + R"(\", \"ram\":\")" + MEM + R"(\", \"time\":\")" +
-                std::to_string(elapsed) + "\\\"}";
-
-    std::string server = BENCHMARKSERVER;
-    // Prepare the curl command. Notice the escape of double quotes for Windows command line.
-    std::string command = R"(curl -X POST -H "Content-Type: application/json" -d ")"
-                            + jsonData + "\" http://" + server +":5000/update";
-
-    std::cout << command << std::endl;
-    std::cout << "See your ranking at: http://" + server + ":8080" << std::endl;
-    // Execute the curl command using system()
-    int result = system(command.c_str());
-
-    // Check the result of the system call
-    if (result != 0) {
-        // Handle the error case
-        ERROR_OUT;
-    }
-}
-
 #ifdef CUDA
 #define FLOAT CUDAfloat
 inline Matrix<CUDAfloat> randn(int m, int n) { return Matrix<CUDAfloat>::randn(m, n); }
 inline Matrix<CUDAfloat> ones(int m, int n) { return Matrix<CUDAfloat>::ones(m, n); }
+#elif defined(APPLE_SILICON)
+#define FLOAT MPSfloat
+inline Matrix<float> randn(int m, int n) { return Matrix<float>::randn(m, n); }
+inline Matrix<float> ones(int m, int n) { return Matrix<float>::ones(m, n); }
 #else
 #define FLOAT float
 inline Matrix<float> randn(int m, int n) { return Matrix<float>::randn(m, n); }
@@ -85,20 +63,20 @@ int compute() {
     
     const size_t numbatches = X.num_col() / batchsize;
 
-#ifdef CUDA
-    auto XT = Matrix<CUDAfloat>(vecXY[2]);
+#if defined(CUDA) || defined(APPLE_SILICON)
+    auto XT = Matrix<FLOAT>(vecXY[2]);
 #else
     auto &XT = vecXY[2];
 #endif
 
-#ifdef CUDA
-    auto YT = Matrix<CUDAfloat>(vecXY[3]);
+#if defined(CUDA) || defined(APPLE_SILICON)
+    auto YT = Matrix<FLOAT>(vecXY[3]);
 #else
     auto &YT = vecXY[3];
 #endif
 
     // define layers
-    ReluLayer<FLOAT> L0(1024, d, batchsize), L1(128, 1024, batchsize);
+    Layer<FLOAT> L0(1024, d, batchsize), L1(128, 1024, batchsize);
     LinearLayer<FLOAT> L2(k, 128, batchsize);
     // logistic loss
     ZeroOneLayer<FLOAT> L3t(XT.num_col(), YT);
@@ -119,7 +97,7 @@ int compute() {
         size_t batch_id = (iter % numbatches);
 
         // obtaining batches
-#ifdef CUDA
+#if defined(CUDA) || defined(APPLE_SILICON)
         auto X_i = Matrix<FLOAT>(X.columns(batchsize * batch_id, batchsize * (batch_id + 1)));
         auto Y_i = Matrix<FLOAT>(Y.columns(batchsize * batch_id, batchsize * (batch_id + 1)));
 #else
@@ -135,7 +113,7 @@ int compute() {
         backprop(trainnn, X_i);
         trainnn.pop_front();
         if (iter % 1000 == 0) {
-#ifdef CUDA
+#if defined(CUDA) || defined(APPLE_SILICON)
             cout << "Misclassification Rate: " << forward(testnn, XT).to_host().elem(0, 0) << endl;
 #else
             cout << "Misclassification Rate: " << forward(testnn, XT).elem(0, 0) << endl;
@@ -149,8 +127,6 @@ int compute() {
 
     auto t2 = std::chrono::high_resolution_clock::now();
     auto elapsed = time_in_ms(t1, t2);
-
-    send_computing_time(elapsed);
 
     return 0;
 }

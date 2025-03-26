@@ -80,6 +80,8 @@ public:
     const MPSfloat* data() const { return elements.get(); }
     
     Matrix<float> to_host() const;
+    void zeros();
+    void ones();
     static Matrix<MPSfloat> randn(size_t m, size_t n);
     static Matrix<MPSfloat> zeros(size_t m, size_t n);
     static Matrix<MPSfloat> ones(size_t m, size_t n);
@@ -104,6 +106,10 @@ public:
        const Matrix<MPSfloat>& M2);
 
     friend Matrix<float> topk(const Matrix<MPSfloat>& M, int k, int dim);
+    friend Matrix<MPSfloat> tanh(const Matrix<MPSfloat>& M);
+    friend Matrix<MPSfloat> tanh(Matrix<MPSfloat>&& M);
+    friend Matrix<MPSfloat> d_tanh(const Matrix<MPSfloat>& M);
+    friend Matrix<MPSfloat> d_tanh(Matrix<MPSfloat>&& M);
     friend Matrix<MPSfloat> sum(const Matrix<MPSfloat>& M, int dim);
     friend Matrix<MPSfloat> exp(const Matrix<MPSfloat>& M);
     friend Matrix<MPSfloat> exp(Matrix<MPSfloat>&& M);
@@ -111,12 +117,20 @@ public:
     friend Matrix<MPSfloat> log(Matrix<MPSfloat>&& M);
     friend Matrix<MPSfloat> square(const Matrix<MPSfloat>& M);
     friend Matrix<MPSfloat> square(Matrix<MPSfloat>&& M);
+    friend Matrix<MPSfloat> sqrt(const Matrix<MPSfloat>& M);
+    friend Matrix<MPSfloat> sqrt(Matrix<MPSfloat>&& M);
 };
 
 std::ostream& operator <<(std::ostream& os, const Matrix<MPSfloat>& M);
 Matrix<MPSfloat> sum(const Matrix<MPSfloat>& M, int dim);
 Matrix<float> topk(const Matrix<MPSfloat>& M, int k, int dim);
+Matrix<MPSfloat> tanh(const Matrix<MPSfloat>& M);
+Matrix<MPSfloat> tanh(Matrix<MPSfloat>&& M);
+Matrix<MPSfloat> d_tanh(const Matrix<MPSfloat>& M);
+Matrix<MPSfloat> d_tanh(Matrix<MPSfloat>&& M);
 Matrix<MPSfloat> square(const Matrix<MPSfloat>& M);
 Matrix<MPSfloat> square(Matrix<MPSfloat>&& M);
+Matrix<MPSfloat> sqrt(const Matrix<MPSfloat>& M);
+Matrix<MPSfloat> sqrt(Matrix<MPSfloat>&& M);
 
 #endif

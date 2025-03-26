@@ -17,6 +17,10 @@ static id<MTLComputePipelineState> expPipelineState = nil;
 static id<MTLComputePipelineState> logPipelineState = nil;
 static id<MTLComputePipelineState> elemInvPipelineState = nil;
 static id<MTLComputePipelineState> squarePipelineState = nil;
+static id<MTLComputePipelineState> tanhPipelineState = nil;
+static id<MTLComputePipelineState> dTanhPipelineState = nil;
+static id<MTLComputePipelineState> sqrtPipelineState = nil;
+
 
 MPSMatrixRandomMTGP32* randomKernel = nil;
 MPSMatrixRandomDistributionDescriptor* randDesc = nil;
@@ -34,7 +38,7 @@ void mpsInit() {
     
     randomKernel = [[MPSMatrixRandomMTGP32 alloc] initWithDevice:device
                                                     destinationDataType:MPSDataTypeFloat32
-                                                    seed:1234
+                                                    seed:3334
                                                     distributionDescriptor:randDesc];
 
     NSError* error = nil;
@@ -55,6 +59,9 @@ void mpsInit() {
     id<MTLFunction> logKernel = [defaultLibrary newFunctionWithName:@"inplace_log_kernel"];
     id<MTLFunction> elemInvKernel = [defaultLibrary newFunctionWithName:@"inplace_elem_inv_kernel"];
     id<MTLFunction> squareKernel = [defaultLibrary newFunctionWithName:@"inplace_square_kernel"];
+    id<MTLFunction> tanhKernel = [defaultLibrary newFunctionWithName:@"inplace_tanh_kernel"];
+    id<MTLFunction> dTanhKernel = [defaultLibrary newFunctionWithName:@"inplace_dtanh_kernel"];
+    id<MTLFunction> sqrtKernel = [defaultLibrary newFunctionWithName:@"inplace_sqrt_kernel"];
 
     // Create compute pipeline state
     zeroPipelineState = [device newComputePipelineStateWithFunction:zeroKernel error:&error];
@@ -65,6 +72,9 @@ void mpsInit() {
     logPipelineState = [device newComputePipelineStateWithFunction:logKernel error:&error];
     elemInvPipelineState = [device newComputePipelineStateWithFunction:elemInvKernel error:&error];
     squarePipelineState = [device newComputePipelineStateWithFunction:squareKernel error:&error];
+    tanhPipelineState = [device newComputePipelineStateWithFunction:tanhKernel error:&error];
+    dTanhPipelineState = [device newComputePipelineStateWithFunction:dTanhKernel error:&error];
+    sqrtPipelineState = [device newComputePipelineStateWithFunction:sqrtKernel error:&error];
 
 }
 
@@ -80,6 +90,9 @@ void mpsDestroy() {
     [logPipelineState release];
     [elemInvPipelineState release];
     [squarePipelineState release];
+    [tanhPipelineState release];
+    [dTanhPipelineState release];
+    [sqrtPipelineState release];
     [commandQueue release];
     [device release];
     device = nil;
@@ -250,6 +263,76 @@ void mpsFill(float* A, int N, float val) {
     [commandBuffer commit];
 }
 
+void mpsTanh(float* A, int N){
+    id<MTLBuffer> buffer = bufferMap[A];
+
+    commandBuffer = [commandQueue commandBuffer];
+    id<MTLComputeCommandEncoder> encoder = [commandBuffer computeCommandEncoder];
+
+    [encoder setComputePipelineState:tanhPipelineState];
+    [encoder setBuffer:buffer offset:0 atIndex:0];
+    [encoder setBytes:&N length:sizeof(int) atIndex:1];
+
+    // Set up thread groups
+    MTLSize gridSize = MTLSizeMake(N, 1, 1);
+    NSUInteger threadGroupSize = tanhPipelineState.maxTotalThreadsPerThreadgroup;
+    if (threadGroupSize > N) threadGroupSize = N;
+
+    MTLSize threadsPerGroup = MTLSizeMake(threadGroupSize, 1, 1);
+
+    [encoder dispatchThreads:gridSize threadsPerThreadgroup:threadsPerGroup];
+
+    [encoder endEncoding];
+    [commandBuffer commit];
+}
+
+void mpsdTanh(float* A, int N){
+    id<MTLBuffer> buffer = bufferMap[A];
+
+    commandBuffer = [commandQueue commandBuffer];
+    id<MTLComputeCommandEncoder> encoder = [commandBuffer computeCommandEncoder];
+
+    [encoder setComputePipelineState:dTanhPipelineState];
+    [encoder setBuffer:buffer offset:0 atIndex:0];
+    [encoder setBytes:&N length:sizeof(int) atIndex:1];
+
+    // Set up thread groups
+    MTLSize gridSize = MTLSizeMake(N, 1, 1);
+    NSUInteger threadGroupSize = dTanhPipelineState.maxTotalThreadsPerThreadgroup;
+    if (threadGroupSize > N) threadGroupSize = N;
+
+    MTLSize threadsPerGroup = MTLSizeMake(threadGroupSize, 1, 1);
+
+    [encoder dispatchThreads:gridSize threadsPerThreadgroup:threadsPerGroup];
+
+    [encoder endEncoding];
+    [commandBuffer commit];
+}
+
+void mpsSqrt(float* A, int N){
+    id<MTLBuffer> buffer = bufferMap[A];
+
+    commandBuffer = [commandQueue commandBuffer];
+    id<MTLComputeCommandEncoder> encoder = [commandBuffer computeCommandEncoder];
+
+    [encoder setComputePipelineState:sqrtPipelineState];
+    [encoder setBuffer:buffer offset:0 atIndex:0];
+    [encoder setBytes:&N length:sizeof(int) atIndex:1];
+
+    // Set up thread groups
+    MTLSize gridSize = MTLSizeMake(N, 1, 1);
+    NSUInteger threadGroupSize = sqrtPipelineState.maxTotalThreadsPerThreadgroup;
+    if (threadGroupSize > N) threadGroupSize = N;
+
+    MTLSize threadsPerGroup = MTLSizeMake(threadGroupSize, 1, 1);
+
+    [encoder dispatchThreads:gridSize threadsPerThreadgroup:threadsPerGroup];
+
+    [encoder endEncoding];
+    [commandBuffer commit];
+
+}
+
 void mpsExp(float *M, int N){
     id<MTLBuffer> buffer = bufferMap[M];
 
@@ -363,7 +446,7 @@ void mpsTopk(const float* A, float* B, float *C, int rowA, int colA, int k){
     [commandBuffer commit];
 
     mpsSynchronize();
-    std::cout << "Copying topk results" << std::endl;
+    // std::cout << "Copying topk results" << std::endl;
     // memcpy(B, bufferB.contents, rowA*k*sizeof(int));
     // copy the memory from row major order to column major order
     for (int i = 0; i < rowA; i++){

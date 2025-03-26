@@ -168,27 +168,35 @@
         // // std::cout << log(exp(hadmd(Ah+Bh, Bh+Ah)) + exp(Ah)).slice(0,5,0,5) << std::endl;
         // std::cout << (2.0/(Ah)) << std::endl;
 
-        auto A = Matrix<MPSfloat>::randn(3, 2);
-        std::cout << A << std::endl;
-        std::cout << "sum along row: " << std::endl;
-        std::cout << sum(A, 1).to_host() - sum(A.to_host(), 1) << std::endl;
+        // auto A = Matrix<MPSfloat>::randn(3, 2);
+        // std::cout << A << std::endl;
+        // std::cout << "sum along row: " << std::endl;
+        // std::cout << sum(A, 1).to_host() - sum(A.to_host(), 1) << std::endl;
 
-        // auto B = Matrix<MPSfloat>::randn(3, 2);
-        // std::cout << B << std::endl;
+        // // auto B = Matrix<MPSfloat>::randn(3, 2);
+        // // std::cout << B << std::endl;
 
-        // auto C = Matrix<MPSfloat>::zeros(2, 3);
-        // C += B.T();
-        // std::cout << C.get_transpose() << std::endl;
+        // // auto C = Matrix<MPSfloat>::zeros(2, 3);
+        // // C += B.T();
+        // // std::cout << C.get_transpose() << std::endl;
 
 
-        auto B = Matrix<MPSfloat>::randn(60000, 10000);
-        auto C = topk(B.T(), 15, 1);
+        // auto B = Matrix<MPSfloat>::randn(60000, 10000);
+        // auto C = topk(B.T(), 15, 1);
 
-        std::cout << "B: " << std::endl;
-        std::cout << B.T().to_host().slice(0,5,0,5) << std::endl;
+        // std::cout << "B: " << std::endl;
+        // std::cout << B.T().to_host().slice(0,5,0,5) << std::endl;
 
-        std::cout << "topk: " << std::endl;
-        std::cout << C.slice(0,5,0,5) << std::endl;
+        // std::cout << "topk: " << std::endl;
+        // std::cout << C.slice(0,5,0,5) << std::endl;
+
+        auto D = Matrix<MPSfloat>::randn(3, 2) + 5;
+        std::cout << square(D.to_host()) << std::endl;
+        std::cout << square((D+0.0)) << std::endl;
+
+        D = Matrix<MPSfloat>::randn(3, 2) + 5;
+        D.zeros();
+        std::cout << D << std::endl;
         
      }
 

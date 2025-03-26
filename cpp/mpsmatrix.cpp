@@ -14,6 +14,7 @@ Matrix<MPSfloat>::Matrix(const Matrix<float>& M)
         Memory<MPSfloat>::free(p);
     });
 
+    mpsSynchronize(); // before the upload, make sure all the previous operations are done
     profiler.start();
     //change column major to row major
     for (size_t i = 0; i < numrow; i++)
@@ -50,6 +51,7 @@ Matrix<MPSfloat>::Matrix(const Matrix<MPSfloat>& M) {
             Memory<MPSfloat>::free(p);
         });
 
+    mpsSynchronize();
     memcpy(elements.get(), M.elements.get(), numcol * numrow * sizeof(float));
 
 }
@@ -75,7 +77,8 @@ Matrix<MPSfloat>& Matrix<MPSfloat>::operator=(const Matrix<MPSfloat>& M) {
         Memory<MPSfloat>::allocate(  numcol * numrow), [](MPSfloat* p) {
             Memory<MPSfloat>::free(p);
         });
-
+    
+    mpsSynchronize();
     memcpy(elements.get(), M.elements.get(), numcol * numrow * sizeof(float));
 
     return *this;
@@ -172,7 +175,7 @@ void Matrix<MPSfloat>::scale(float s1){
 // M_new = M / l
 Matrix<MPSfloat> Matrix<MPSfloat>::eleminv(double l) const 
 {
-    std::cout << "eleminv 1" << std::endl;
+    // std::cout << "eleminv 1" << std::endl;
     Matrix<MPSfloat> M("reci", numrow, numcol, transpose);
     mpsAx_b((float*) elements.get(), 1.0, 0, (float*) M.elements.get(), numrow * numcol);
     mpsElemInv((float*) M.elements.get(), numrow * numcol, l);
@@ -182,7 +185,7 @@ Matrix<MPSfloat> Matrix<MPSfloat>::eleminv(double l) const
 // M = M / l
 void Matrix<MPSfloat>::eleminv(double l)
 {
-    std::cout << "eleminv 2" << std::endl; 
+    // std::cout << "eleminv 2" << std::endl; 
     mpsElemInv((float*) elements.get(), numrow * numcol, l);
 }
 
@@ -229,6 +232,14 @@ Matrix<MPSfloat> hadmd(Matrix<MPSfloat>&& M1, const Matrix<MPSfloat>& M2){
     return std::move(M1);
 }
 
+void Matrix<MPSfloat>::zeros()
+{
+    mpsFill((float*) elements.get(), numrow * numcol, 0.0);
+}
+void Matrix<MPSfloat>::ones()
+{
+    mpsFill((float*) elements.get(), numrow * numcol, 1.0);
+}
 Matrix<MPSfloat> Matrix<MPSfloat>::randn(size_t m, size_t n)
 {
     Matrix<MPSfloat> M("randn", m, n);
@@ -248,6 +259,38 @@ Matrix<MPSfloat> Matrix<MPSfloat>::ones(size_t m, size_t n)
     Matrix<MPSfloat> M("ones", m, n);
     mpsFill((float*) M.elements.get(), m * n, 1.0);
     return M;
+}
+
+Matrix<MPSfloat> tanh(const Matrix<MPSfloat>& M){
+    Matrix<MPSfloat> tanhM("tanhM", M.numrow, M.numcol, M.transpose);
+    mpsAx_b((float*) M.elements.get(), 1.0, 0, (float*) tanhM.elements.get(), M.numrow * M.numcol);
+    mpsTanh((float*) tanhM.elements.get(), M.numrow * M.numcol);
+    return tanhM;
+}
+Matrix<MPSfloat> tanh(Matrix<MPSfloat>&& M){
+    mpsTanh((float*) M.elements.get(), M.numrow * M.numcol);
+    return std::move(M);
+}
+Matrix<MPSfloat> d_tanh(const Matrix<MPSfloat>& M){
+    Matrix<MPSfloat> d_tanhM("d_tanhM", M.numrow, M.numcol, M.transpose);
+    mpsAx_b((float*) M.elements.get(), 1.0, 0, (float*) d_tanhM.elements.get(), M.numrow * M.numcol);
+    mpsdTanh((float*) d_tanhM.elements.get(), M.numrow * M.numcol);
+    return d_tanhM;
+}
+Matrix<MPSfloat> d_tanh(Matrix<MPSfloat>&& M){
+    mpsdTanh((float*) M.elements.get(), M.numrow * M.numcol);
+    return std::move(M);
+}
+
+Matrix<MPSfloat> sqrt(const Matrix<MPSfloat>& M){
+    Matrix<MPSfloat> sqrtM("sqrtM", M.numrow, M.numcol, M.transpose);
+    mpsAx_b((float*) M.elements.get(), 1.0, 0, (float*) sqrtM.elements.get(), M.numrow * M.numcol);
+    mpsSqrt((float*) sqrtM.elements.get(), M.numrow * M.numcol);
+    return sqrtM;
+}
+Matrix<MPSfloat> sqrt(Matrix<MPSfloat>&& M){
+    mpsSqrt((float*) M.elements.get(), M.numrow * M.numcol);
+    return std::move(M);
 }
 
 Matrix<MPSfloat> exp(const Matrix<MPSfloat>& M){

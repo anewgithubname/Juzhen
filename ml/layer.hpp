@@ -163,7 +163,7 @@ namespace Juzhen
 		}
 
 		Matrix<D> grad(const Matrix<D>& input) const override {
-			return 2.0* (input - output) / Layer<D>::nb;
+			return 2.0 * (input - output) / Layer<D>::nb;
 		}
 
 		void eval(const Matrix<D>& input) override {

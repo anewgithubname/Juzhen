@@ -8,8 +8,8 @@ add_definitions(-DPROJECT_DIR="${CMAKE_SOURCE_DIR}")
 add_definitions(-DBENCHMARKSERVER="DONOTKNOW")
 
 # do you need GPU support? CUDA 11.8 is required
-set(CUDA ON)
-set(APPLE_SILICON OFF)
+set(CUDA OFF)
+set(APPLE_SILICON ON)
 
 set(HAS_CONCEPTS ON)
 
