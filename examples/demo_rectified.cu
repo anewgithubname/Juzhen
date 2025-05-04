@@ -42,6 +42,11 @@ inline Matrix<CUDAfloat> ones(int m, int n) { return Matrix<CUDAfloat>::ones(m, 
 inline Matrix<CUDAfloat> vs(std::vector<MatrixView<CUDAfloat>> matrices) { return vstack(matrices); }
 inline Matrix<CUDAfloat> hs(std::vector<MatrixView<CUDAfloat>> matrices) { return hstack(matrices); }
 inline const float* getdata(const Matrix<CUDAfloat>& m) {return m.to_host().data();}
+#elif defined(APPLE_SILICON)
+#define FLOAT MPSfloat
+inline Matrix<MPSfloat> randn(int m, int n) { return Matrix<MPSfloat>::randn(m, n); }
+inline Matrix<MPSfloat> ones(int m, int n) { return Matrix<MPSfloat>::ones(m, n); }
+inline const float* getdata(const Matrix<MPSfloat>& m) {return m.data();}
 #else
 #define FLOAT float
 inline Matrix<float> randn(int m, int n) { return Matrix<float>::randn(m, n); }
@@ -104,7 +109,7 @@ int compute()
               << std::endl;
 
     // start the training loop
-    for (int i = 0; i < numbatches * 1000; i++)
+    for (int i = 0; i < numbatches * 100; i++)
     {
         size_t batch_id = i % numbatches;
 
@@ -130,7 +135,7 @@ int compute()
             float loss = item(forward(trainnn, inp_i));
             // std::cout << "training loss: " << loss << std::endl;
             std::string msg = ", training loss: " + std::to_string(loss);
-            display_progress_bar((float)i / (numbatches * 1000), msg.c_str());
+            display_progress_bar((float)i / (numbatches * 100), msg.c_str());
             dumpweights(trainnn, base + "/res/net.weights");
         }
         else

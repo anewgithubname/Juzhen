@@ -119,6 +119,10 @@ public:
     friend Matrix<MPSfloat> square(Matrix<MPSfloat>&& M);
     friend Matrix<MPSfloat> sqrt(const Matrix<MPSfloat>& M);
     friend Matrix<MPSfloat> sqrt(Matrix<MPSfloat>&& M);
+    friend Matrix<MPSfloat> relu(const Matrix<MPSfloat>& M);
+    friend Matrix<MPSfloat> relu(Matrix<MPSfloat>&& M);
+    friend Matrix<MPSfloat> d_relu(const Matrix<MPSfloat>& M);
+    friend Matrix<MPSfloat> d_relu(Matrix<MPSfloat>&& M);
 };
 
 std::ostream& operator <<(std::ostream& os, const Matrix<MPSfloat>& M);
@@ -132,5 +136,9 @@ Matrix<MPSfloat> square(const Matrix<MPSfloat>& M);
 Matrix<MPSfloat> square(Matrix<MPSfloat>&& M);
 Matrix<MPSfloat> sqrt(const Matrix<MPSfloat>& M);
 Matrix<MPSfloat> sqrt(Matrix<MPSfloat>&& M);
+Matrix<MPSfloat> relu(const Matrix<MPSfloat>& M);
+Matrix<MPSfloat> relu(Matrix<MPSfloat>&& M);
+Matrix<MPSfloat> d_relu(const Matrix<MPSfloat>& M);
+Matrix<MPSfloat> d_relu(Matrix<MPSfloat>&& M);
 
 #endif

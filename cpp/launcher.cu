@@ -74,11 +74,11 @@ int main()
         mpsInit();
         Memory<MPSfloat> mpsmd;
 #endif
-        PrintSeparationLine();
+        std::cout << std::endl;
         {
            ret = compute();
         }
-        PrintSeparationLine();
+        std::cout << std::endl;
 #ifdef APPLE_SILICON
         mpsDestroy();
 #endif

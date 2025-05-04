@@ -8,8 +8,8 @@ add_definitions(-DPROJECT_DIR="${CMAKE_SOURCE_DIR}")
 add_definitions(-DBENCHMARKSERVER="DONOTKNOW")
 
 # do you need GPU support? CUDA 11.8 is required
-set(CUDA OFF)
-set(APPLE_SILICON ON)
+set(CUDA ON)
+set(APPLE_SILICON OFF)
 
 set(HAS_CONCEPTS ON)
 
@@ -21,11 +21,11 @@ if(CUDA)
     # if we are on Unix, we need to specify the CUDA toolkit location
     # CUDA 11.8 is required
     if(UNIX) 
-        set(CUDA_TOOLKIT_ROOT_DIR "/usr/local/cuda-12.6")
-        set(CMAKE_CUDA_COMPILER /usr/local/cuda-12.6/bin/nvcc)
-        # set(CMAKE_CUDA_HOST_COMPILER /usr/bin/g++-13)
+        set(CUDA_TOOLKIT_ROOT_DIR "/usr/local/cuda-12.4")
+        set(CMAKE_CUDA_COMPILER /usr/local/cuda-12.4/bin/nvcc)
+        set(CMAKE_CUDA_HOST_COMPILER /usr/bin/g++-10)
     else()
-        set(CUDA_TOOLKIT_ROOT_DIR "C:/Program Files/NVIDIA GPU Computing Toolkit/CUDA/v12.4")
+        set(CUDA_TOOLKIT_ROOT_DIR "C:/Program Files/NVIDIA GPU Computing Toolkit/CUDA/v12.6")
     endif()
     set(CMAKE_CUDA_ARCHITECTURES 61)
     project(animated_octo_sniffle LANGUAGES CXX CUDA)
@@ -155,6 +155,7 @@ GENERATE_PROJ(demo_mnist examples/demo_mnist.cu)
 GENERATE_PROJ(pagerank examples/pagerank.cu)
 GENERATE_PROJ(demo_rectified examples/demo_rectified.cu)
 GENERATE_PROJ(demo_rectified_infer examples/demo_rectified_infer.cu)
+GENERATE_PROJ(demo_gemm examples/demo_gemm.cu)
 # GENERATE_PROJ(wintest examples/demo_gui.cu)
 
 enable_testing()

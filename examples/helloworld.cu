@@ -31,7 +31,7 @@
  #define HLINE std::cout << "--------------------------------" << std::endl
  
  int compute() {
-     spdlog::set_level(spdlog::level::debug);
+    //  spdlog::set_level(spdlog::level::debug);
      global_rand_gen.seed(0);
  #ifdef CUDA
      GPUSampler sampler(1);
@@ -88,70 +88,66 @@
          // std::fstream fout("A.matrix");
          // fout << A;
          // fout.close();
- 
-//  #ifdef APPLE_SILICON
-//          auto A1 = Matrix<MPSfloat>::randn(10000, 10000);
-//          auto A2 = Matrix<MPSfloat>::randn(10000, 10000);
-//          {
-//              std::chrono::high_resolution_clock::time_point t1 = std::chrono::high_resolution_clock::now();
-//              Matrix<MPSfloat> A3;
-//              for (int i = 0; i < 10; i++)
-//              {
-//                  A3 = A1.T() * A2.T() / 10000.0;
-//                  std::cout << "."; std::cout.flush();
-//              }
-//              std::cout << A3.to_host().slice(0,5,0,5)<< std::endl;
-//              std::chrono::high_resolution_clock::time_point t2 = std::chrono::high_resolution_clock::now();
-//              auto duration = std::chrono::duration_cast<std::chrono::milliseconds>(t2 - t1).count();
-//              std::cout << "Duration: " << duration << " ms" << std::endl;
-//              std::cout << "TFLPOS: " << (2 * 10000L * 10000 * 10000 + 10000 * 10000) * 10 / duration / 1e9 << std::endl;
-//          }
-//  #endif
- 
-//  #ifdef CUDA
-//          auto A1 = Matrix<CUDAfloat>::randn(10000, 10000);
-//          auto A2 = Matrix<CUDAfloat>::randn(10000, 10000);
-//          {
-//             HLINE;
-//              std::chrono::high_resolution_clock::time_point t1 = std::chrono::high_resolution_clock::now();
-//              Matrix<CUDAfloat> A3;
-//              for (int i = 0; i < 10; i++)
-//              {
-//                  A3 = A1 * A2 / 10000;
-//                  std::cout << "."; 
-//              }
-//              std::cout << A3.slice(0,5,0,5)<< std::endl;
-             
-//              std::chrono::high_resolution_clock::time_point t2 = std::chrono::high_resolution_clock::now();
-//              auto duration = std::chrono::duration_cast<std::chrono::milliseconds>(t2 - t1).count();
-//              std::cout << "Duration: " << duration << " ms" << std::endl;
-//              std::cout << "TFLPOS: " << (2 * 10000L * 10000 * 10000 + 10000 * 10000) * 10 / duration / 1e9 << std::endl;
-//          }
-//  #endif
+ #define DIM 5233
 
-// #if defined(APPLE_SILICON) || defined(CUDA)
-//         auto A1C = A1.to_host();
-//         auto A2C = A2.to_host();
-// #else
-//         auto A1C = Matrix<float>::randn(10000, 10000);
-//         auto A2C = Matrix<float>::randn(10000, 10000);
-// #endif
-//          {
-//              HLINE;
-//              std::chrono::high_resolution_clock::time_point t1 = std::chrono::high_resolution_clock::now();
-//              Matrix<float> A3;
-//              for (int i = 0; i < 10; i++)
-//              {
-//                  A3 = A1C.T() * A2C.T() / 10000.0;
-//                  std::cout << "."; std::cout.flush();
-//              }
-//              std::cout << A3.slice(0,5,0,5)<< std::endl;
+ #ifdef APPLE_SILICON
+         {
+            auto A1 = Matrix<MPSfloat>::randn(DIM, DIM);
+            auto A2 = Matrix<MPSfloat>::randn(DIM, DIM);
+            Matrix<MPSfloat> A3 = Matrix<MPSfloat>::zeros(DIM, DIM);
+             std::chrono::high_resolution_clock::time_point t1 = std::chrono::high_resolution_clock::now();
+             for (int i = 0; i < 10; i++)
+             {
+                 A3 += A1 * A2/DIM;
+                 std::cout << "."; std::cout.flush();
+             }
+             std::cout << A3.to_host().slice(0,5,0,5)<< std::endl;
+             std::chrono::high_resolution_clock::time_point t2 = std::chrono::high_resolution_clock::now();
+             auto duration = std::chrono::duration_cast<std::chrono::milliseconds>(t2 - t1).count();
+             std::cout << "Duration: " << duration << " ms" << std::endl;
+             std::cout << "TFLPOS: " << (2.0 * DIM * DIM * DIM) * 10 / duration / 1e9 << std::endl;
+         }
+ #endif
+ 
+ #ifdef CUDA
+         {
+            HLINE;
+            auto A1 = Matrix<CUDAfloat>::randn(DIM, DIM);
+            auto A2 = Matrix<CUDAfloat>::randn(DIM, DIM);
+            Matrix<CUDAfloat> A3 = Matrix<CUDAfloat>::zeros(DIM, DIM);
+             std::chrono::high_resolution_clock::time_point t1 = std::chrono::high_resolution_clock::now();
+             for (int i = 0; i < 10; i++)
+             {
+                 A3 += A1 * A2 / DIM;
+                 std::cout << "."; 
+             }
+             std::cout << A3.slice(0,5,0,5)<< std::endl;
              
-//              std::chrono::high_resolution_clock::time_point t2 = std::chrono::high_resolution_clock::now();
-//              auto duration = std::chrono::duration_cast<std::chrono::milliseconds>(t2 - t1).count();
-//              std::cout << "Duration: " << duration << " ms" << std::endl;
-//              std::cout << "TFLPOS: " << (2 * 10000L * 10000 * 10000 + 10000 * 10000) * 10 / duration / 1e9 << std::endl;
-//          }
+             std::chrono::high_resolution_clock::time_point t2 = std::chrono::high_resolution_clock::now();
+             auto duration = std::chrono::duration_cast<std::chrono::milliseconds>(t2 - t1).count();
+             std::cout << "Duration: " << duration << " ms" << std::endl;
+             std::cout << "TFLPOS: " << (2.0 * DIM * DIM * DIM) * 10 / duration / 1e9 << std::endl;
+         }
+ #endif
+
+         {
+             HLINE;
+             auto A1C = Matrix<float>::randn(DIM, DIM);
+             auto A2C = Matrix<float>::randn(DIM, DIM);
+             Matrix<float> A3 = Matrix<float>::zeros(DIM, DIM);
+             std::chrono::high_resolution_clock::time_point t1 = std::chrono::high_resolution_clock::now();
+             for (int i = 0; i < 10; i++)
+             {
+                 A3 += A1C * A2C/DIM;
+                 std::cout << "."; std::cout.flush();
+             }
+             std::cout << A3.slice(0,5,0,5)<< std::endl;
+             
+             std::chrono::high_resolution_clock::time_point t2 = std::chrono::high_resolution_clock::now();
+             auto duration = std::chrono::duration_cast<std::chrono::milliseconds>(t2 - t1).count();
+             std::cout << "Duration: " << duration << " ms" << std::endl;
+             std::cout << "TFLPOS: " << (2.0 * DIM * DIM * DIM) * 10 / duration / 1e9 << std::endl;
+         }
          
         
         // auto A = Matrix<MPSfloat>::randn(5, 2);
@@ -190,13 +186,13 @@
         // std::cout << "topk: " << std::endl;
         // std::cout << C.slice(0,5,0,5) << std::endl;
 
-        auto D = Matrix<MPSfloat>::randn(3, 2) + 5;
-        std::cout << square(D.to_host()) << std::endl;
-        std::cout << square((D+0.0)) << std::endl;
+        // auto D = Matrix<MPSfloat>::randn(3, 2) + 5;
+        // std::cout << square(D.to_host()) << std::endl;
+        // std::cout << square((D+0.0)) << std::endl;
 
-        D = Matrix<MPSfloat>::randn(3, 2) + 5;
-        D.zeros();
-        std::cout << D << std::endl;
+        // D = Matrix<MPSfloat>::randn(3, 2) + 5;
+        // D.zeros();
+        // std::cout << D << std::endl;
         
      }
 

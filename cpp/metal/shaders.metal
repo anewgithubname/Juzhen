@@ -10,6 +10,22 @@ kernel void zero_kernel(
     data[id] = value;
 }
 
+kernel void inplace_relu_kernel(
+    device float*       v1  [[buffer(0)]],
+    uint                id    [[thread_position_in_grid]]
+)
+{
+    v1[id] = v1[id] > 0.0 ? v1[id] : 0.0;
+}
+
+kernel void inplace_drelu_kernel(
+    device float*       v1  [[buffer(0)]],
+    uint                id    [[thread_position_in_grid]]
+)
+{
+    v1[id] = v1[id] > 0.0f ? 1.0f : 0.0f;
+}
+
 kernel void inplace_dtanh_kernel(
     device float*       v1  [[buffer(0)]],
     uint                id    [[thread_position_in_grid]]

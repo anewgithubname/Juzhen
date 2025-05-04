@@ -329,6 +329,29 @@ Matrix<MPSfloat> square(Matrix<MPSfloat>&& M){
     return std::move(M);
 }
 
+Matrix<MPSfloat> relu(const Matrix<MPSfloat>& M){
+    Matrix<MPSfloat> reluM("reluM", M.numrow, M.numcol, M.transpose);
+    mpsAx_b((float*) M.elements.get(), 1.0, 0, (float*) reluM.elements.get(), M.numrow * M.numcol);
+    mpsRelu((float*) reluM.elements.get(), M.numrow * M.numcol);
+    return reluM;
+}
+
+Matrix<MPSfloat> relu(Matrix<MPSfloat>&& M){
+    mpsRelu((float*) M.elements.get(), M.numrow * M.numcol);
+    return std::move(M);
+}
+
+Matrix<MPSfloat> d_relu(const Matrix<MPSfloat>& M){
+    Matrix<MPSfloat> d_reluM("d_reluM", M.numrow, M.numcol, M.transpose);
+    mpsAx_b((float*) M.elements.get(), 1.0, 0, (float*) d_reluM.elements.get(), M.numrow * M.numcol);
+    mpsdRelu((float*) d_reluM.elements.get(), M.numrow * M.numcol);
+    return d_reluM;
+}
+Matrix<MPSfloat> d_relu(Matrix<MPSfloat>&& M){
+    mpsdRelu((float*) M.elements.get(), M.numrow * M.numcol);
+    return std::move(M);
+}
+
 Matrix<MPSfloat> sum(const Matrix<MPSfloat>& M, int dim){
     int transM = M.transpose;
     if (dim == 0)
