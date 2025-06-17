@@ -96,11 +96,11 @@ int compute()
 
     // create a neural network
     // define layers, out - in - batchsize
-    ReluLayer<FLOAT> L0(1011, d + 1, batchsize), 
-                     L1(1011, 1011, batchsize),
-                     L2(1011, 1011, batchsize), 
-                     L3(1011, 1011, batchsize);
-    LinearLayer<FLOAT> L10(d, 1011, batchsize);
+    ReluLayer<FLOAT> L0(1003, d + 1, batchsize), 
+                     L1(1003, 1003, batchsize),
+                     L2(1003, 1003, batchsize), 
+                     L3(1003, 1003, batchsize);
+    LinearLayer<FLOAT> L10(d, 1003, batchsize);
 
     // nns are linked lists containing layers
     list<Layer<FLOAT> *> trainnn({&L10, &L3, &L2, &L1, &L0});

@@ -7,8 +7,8 @@ add_definitions(-DPROJECT_DIR="${CMAKE_SOURCE_DIR}")
 # if you have a benchmark server running, you can specify it here
 add_definitions(-DBENCHMARKSERVER="DONOTKNOW")
 
-# do you need GPU support? CUDA 11.8 is required
-set(CUDA ON)
+# do you need GPU support? 
+set(CUDA OFF)
 set(APPLE_SILICON OFF)
 
 set(HAS_CONCEPTS ON)
@@ -18,27 +18,21 @@ set(CMAKE_CXX_STANDARD 20)
 if(CUDA)
     message("BUILD WITH CUDA SUPPORT!")
     add_definitions(-DCUDA)
-    # if we are on Unix, we need to specify the CUDA toolkit location
-    # CUDA 11.8 is required
+
     if(UNIX) 
-        set(CUDA_TOOLKIT_ROOT_DIR "/usr/local/cuda-12.4")
-        set(CMAKE_CUDA_COMPILER /usr/local/cuda-12.4/bin/nvcc)
-        set(CMAKE_CUDA_HOST_COMPILER /usr/bin/g++-10)
+        # set(CUDA_TOOLKIT_ROOT_DIR "/usr/local/cuda-12.9")
+        set(CMAKE_CUDA_COMPILER /usr/local/cuda-12.9/bin/nvcc)
+        # set(CMAKE_CUDA_HOST_COMPILER /usr/bin/g++-13)
     else()
-        set(CUDA_TOOLKIT_ROOT_DIR "C:/Program Files/NVIDIA GPU Computing Toolkit/CUDA/v12.6")
+        # set(CUDA_TOOLKIT_ROOT_DIR "C:/Program Files/NVIDIA GPU Computing Toolkit/CUDA/v11.8")
+        set(CMAKE_CUDA_COMPILER "C:/Program Files/NVIDIA GPU Computing Toolkit/CUDA/v12.9/bin/nvcc.exe")
     endif()
-    set(CMAKE_CUDA_ARCHITECTURES 61)
+    set(CMAKE_CUDA_ARCHITECTURES 70)
     project(animated_octo_sniffle LANGUAGES CXX CUDA)
     find_package(CUDAToolkit REQUIRED)
 
     set(CMAKE_CUDA_STANDARD 20)
 
-    if(NOT DEFINED CMAKE_CUDA20_STANDARD_COMPILE_OPTION)
-        set(CMAKE_CUDA20_STANDARD_COMPILE_OPTION "")
-        set(CMAKE_CUDA20_EXTENSION_COMPILE_OPTION "")
-    endif()
-
-    set(CMAKE_CUDA_FLAGS "-std=c++20")
 elseif(APPLE_SILICON)
     message("BUILD WITH APPLE SILICON SUPPORT! ")
     add_definitions(-DAPPLE_SILICON)
@@ -81,9 +75,9 @@ set(spdlog_INCLUDE_DIRS "${PROJECT_SOURCE_DIR}/external/spdlog/include")
 
 find_package(Boost REQUIRED)
 
-if(CUDA)
+if(CUDA) # add relevant backend implementations for CUDA 
     add_library(juzhen cpp/launcher.cu cpp/cumatrix.cu cpp/cukernels.cu)
-elseif(APPLE_SILICON)
+elseif(APPLE_SILICON) # add relevant backend implementations for Apple Silicon
     add_library(juzhen cpp/launcher.cu cpp/metal/MPSWrapper.mm cpp/mpsmatrix.cpp)
     add_dependencies(juzhen compile_shaders)
 else()
@@ -101,10 +95,6 @@ if(CUDA) # if we are on GPU, we need to include the cuda headers
 else()
     set_source_files_properties(cpp/launcher.cu PROPERTIES LANGUAGE CXX) # specify cuda files lanaugae to be CXX
     set_target_properties(juzhen PROPERTIES LINKER_LANGUAGE CXX)
-
-    # if(UNIX)
-    #     target_compile_options(juzhen PRIVATE $<$<COMPILE_LANGUAGE:CXX>:-x c++>)
-    # endif()
 endif()
 
 macro(GENERATE_PROJ TARGETNAME FILE)
