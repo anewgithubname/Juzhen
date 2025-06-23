@@ -8,26 +8,22 @@ add_definitions(-DPROJECT_DIR="${CMAKE_SOURCE_DIR}")
 add_definitions(-DBENCHMARKSERVER="DONOTKNOW")
 
 # do you need GPU support? 
-set(CUDA OFF)
+set(NVIDIA_CUDA OFF)
 set(APPLE_SILICON OFF)
 
 set(HAS_CONCEPTS ON)
 
 set(CMAKE_CXX_STANDARD 20)
 
-if(CUDA)
+if(NVIDIA_CUDA)
     message("BUILD WITH CUDA SUPPORT!")
     add_definitions(-DCUDA)
 
     if(UNIX) 
-        # set(CUDA_TOOLKIT_ROOT_DIR "/usr/local/cuda-12.9")
         set(CMAKE_CUDA_COMPILER /usr/local/cuda-12.9/bin/nvcc)
-        # set(CMAKE_CUDA_HOST_COMPILER /usr/bin/g++-13)
-    else()
-        # set(CUDA_TOOLKIT_ROOT_DIR "C:/Program Files/NVIDIA GPU Computing Toolkit/CUDA/v11.8")
-        set(CMAKE_CUDA_COMPILER "C:/Program Files/NVIDIA GPU Computing Toolkit/CUDA/v12.9/bin/nvcc.exe")
     endif()
-    set(CMAKE_CUDA_ARCHITECTURES 70)
+    
+    set(CMAKE_CUDA_ARCHITECTURES 80)
     project(animated_octo_sniffle LANGUAGES CXX CUDA)
     find_package(CUDAToolkit REQUIRED)
 
@@ -75,7 +71,7 @@ set(spdlog_INCLUDE_DIRS "${PROJECT_SOURCE_DIR}/external/spdlog/include")
 
 find_package(Boost REQUIRED)
 
-if(CUDA) # add relevant backend implementations for CUDA 
+if(NVIDIA_CUDA) # add relevant backend implementations for CUDA 
     add_library(juzhen cpp/launcher.cu cpp/cumatrix.cu cpp/cukernels.cu)
 elseif(APPLE_SILICON) # add relevant backend implementations for Apple Silicon
     add_library(juzhen cpp/launcher.cu cpp/metal/MPSWrapper.mm cpp/mpsmatrix.cpp)
@@ -89,7 +85,7 @@ target_include_directories(juzhen PUBLIC "external/spdlog/include")
 target_include_directories(juzhen PUBLIC ${OpenBLAS_INCLUDE_DIRS})
 target_include_directories(juzhen PUBLIC ${Boost_INCLUDE_DIRS})
 
-if(CUDA) # if we are on GPU, we need to include the cuda headers
+if(NVIDIA_CUDA) # if we are on GPU, we need to include the cuda headers
     target_include_directories(juzhen PUBLIC ${CUDA_INCLUDE_DIRS})
     target_compile_options(juzhen PRIVATE $<$<COMPILE_LANGUAGE:CUDA>:--extended-lambda>)
 else()
@@ -107,7 +103,7 @@ macro(GENERATE_PROJ TARGETNAME FILE)
     target_include_directories(${TARGETNAME} PUBLIC ${Boost_INCLUDE_DIRS})
 
     
-    if(CUDA) # if we are on GPU, we need to link the cuda libraries
+    if(NVIDIA_CUDA) # if we are on GPU, we need to link the cuda libraries
         target_include_directories(${TARGETNAME} PUBLIC ${CUDA_INCLUDE_DIRS})
         target_link_libraries(${TARGETNAME} spdlog::spdlog ${BLAS_LIBRARIES} ${OpenBLAS_LIBRARIES} juzhen ${CUDA_LIBRARIES} ${CUDA_cublas_LIBRARY} ${CUDA_curand_LIBRARY} ${CUDA_cusolver_LIBRARY})
         target_compile_options(${TARGETNAME} PRIVATE $<$<COMPILE_LANGUAGE:CUDA>:--extended-lambda>)

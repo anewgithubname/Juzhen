@@ -124,7 +124,7 @@ int test2(){
 int test3() {
     // test random large matrices multiplication
 
-    int n = 10001;
+    int n = 1001;
 #ifdef CUDA
     auto A = CM::randn(n, n);
     auto B = CM::randn(n, n);

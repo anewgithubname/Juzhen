@@ -582,21 +582,21 @@ template<typename Scalar,
                             || is_same<Scalar, long double>::value >
 struct arg_default_impl;
 
-template<typename Scalar>
-struct arg_default_impl<Scalar, true> {
-  typedef typename NumTraits<Scalar>::Real RealScalar;
-  EIGEN_DEVICE_FUNC
-  static inline RealScalar run(const Scalar& x)
-  {
-    #if defined(EIGEN_HIP_DEVICE_COMPILE)
-    // HIP does not seem to have a native device side implementation for the math routine "arg"
-    using std::arg;
-    #else
-    EIGEN_USING_STD(arg);
-    #endif
-    return static_cast<RealScalar>(arg(x));
-  }
-};
+// template<typename Scalar>
+// struct arg_default_impl<Scalar, true> {
+//   typedef typename NumTraits<Scalar>::Real RealScalar;
+//   EIGEN_DEVICE_FUNC
+//   static inline RealScalar run(const Scalar& x)
+//   {
+//     #if defined(EIGEN_HIP_DEVICE_COMPILE)
+//     // HIP does not seem to have a native device side implementation for the math routine "arg"
+//     using std::arg;
+//     #else
+//     EIGEN_USING_STD(arg);
+//     #endif
+//     return static_cast<RealScalar>(arg(x));
+//   }
+// };
 
 // Must be non-complex floating-point type (e.g. half/bfloat16).
 template<typename Scalar>
