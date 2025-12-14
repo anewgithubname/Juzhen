@@ -20,10 +20,10 @@ if(NVIDIA_CUDA)
     add_definitions(-DCUDA)
 
     if(UNIX) 
-        set(CMAKE_CUDA_COMPILER /usr/local/cuda-12.9/bin/nvcc)
+        set(CMAKE_CUDA_COMPILER /usr/local/cuda-12.3/bin/nvcc)
     endif()
     
-    set(CMAKE_CUDA_ARCHITECTURES 80)
+    set(CMAKE_CUDA_ARCHITECTURES 61)
     project(animated_octo_sniffle LANGUAGES CXX CUDA)
     find_package(CUDAToolkit REQUIRED)
 

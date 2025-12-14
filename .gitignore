@@ -83,3 +83,9 @@ net.weights
 X0.csv
 X1.csv
 Zt.csv
+
+# mac specific
+.DS_Store
+
+# exclude some testing files
+stock_analysis/**
