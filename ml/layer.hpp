@@ -31,7 +31,7 @@
 #include "../cpp/matrix.hpp"
 #include "./util.cuh"
 
-#ifndef CPU_ONLY
+#ifdef CUDA
 #include "../cpp/cumatrix.cuh"
 #endif
 
@@ -154,13 +154,16 @@ namespace Juzhen
 	template <class D>
 	class LossLayer : public Layer<D> {
 		// you cannot change the output once you set it. 
-		const Matrix<D>& output;
+		Matrix<D> output;
 	public:
-		LossLayer(int nb, const Matrix<D>& output) : Layer<D>(1, 1, nb), output(output) {
+		LossLayer(int nb, const Matrix<D>& output) : Layer<D>(1, 1, nb), output(output) { // copy from the output
+		}
+
+		LossLayer(int nb, Matrix<D>&& output) : Layer<D>(1, 1, nb), output(output) { // move the output to the output owned by the layer
 		}
 
 		Matrix<D> grad(const Matrix<D>& input) const override {
-			return 2.0* (input - output) / Layer<D>::nb;
+			return 2.0 * (input - output) / Layer<D>::nb;
 		}
 
 		void eval(const Matrix<D>& input) override {
@@ -175,10 +178,17 @@ namespace Juzhen
 	template <class D>
 	class LogisticLayer : public Layer<D> {
 		// you cannot change the output once you set it. 
-		const Matrix<D>& output;
+		Matrix<D> output;
 		Matrix<D> oneK1;
 	public:
 		LogisticLayer(size_t nb, const Matrix<D>& output) : 
+			Layer<D>(2, 2, nb), 
+			output(output), 
+			oneK1("oneK1", output.num_row(), 1) {
+			oneK1.ones();
+		}
+
+		LogisticLayer(size_t nb, Matrix<D>&& output) : 
 			Layer<D>(2, 2, nb), 
 			output(output), 
 			oneK1("oneK1", output.num_row(), 1) {
@@ -203,7 +213,7 @@ namespace Juzhen
 	template <class D>
 	class ZeroOneLayer : public Layer<D> {
 		// you cannot change the output once you set it. 
-		const Matrix<D>& output;
+		Matrix<D> output;
 		Matrix<D> oneK1;
 
 	public:
@@ -212,6 +222,14 @@ namespace Juzhen
 			output(output),
 			oneK1("oneK1", output.num_row(), 1) {
 			oneK1.ones();
+			std::cout << "copied" << std::endl;
+		}
+		ZeroOneLayer(size_t nb, Matrix<D>&& output) :
+			Layer<D>(1, 1, nb),
+			output(output),
+			oneK1("oneK1", output.num_row(), 1) {
+			oneK1.ones();
+			std::cout << "moved" << std::endl;
 		}
 
 		Matrix<D> grad(const Matrix<D>&) const override {
@@ -427,7 +445,7 @@ namespace Juzhen
 			}
 			
 			float t = (float)i/steps;    
-#ifdef CPU_ONLY
+#if !defined(CUDA) && !defined(APPLE_SILIICON)
 			auto inpt = vstack<float>({Zt, Matrix<T>::ones(1, n)*t});
 #else
 			auto inpt = vstack({Zt, Matrix<T>::ones(1, n)*t});

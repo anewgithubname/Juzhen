@@ -55,7 +55,7 @@ int main()
 
     PrintSeparationLine();
     DisplayCPU();
-#ifndef CPU_ONLY
+#ifdef CUDA
     DisplayGPU();
 #endif
     PrintSeparationLine();
@@ -66,16 +66,23 @@ int main()
         Memory<int> mdi;
         Memory<float> md32;
         Memory<double> md64;
-        Memory<CUDAfloat> gpumd;
-#ifndef CPU_ONLY
+#ifdef CUDA
         CuBLASErrorCheck(cublasCreate(&Matrix<CUDAfloat>::global_handle));
+        Memory<CUDAfloat> gpumd;
 #endif
-        PrintSeparationLine();
+#ifdef APPLE_SILICON
+        mpsInit();
+        Memory<MPSfloat> mpsmd;
+#endif
+        std::cout << std::endl;
         {
            ret = compute();
         }
-        PrintSeparationLine();
-#ifndef CPU_ONLY
+        std::cout << std::endl;
+#ifdef APPLE_SILICON
+        mpsDestroy();
+#endif
+#ifdef CUDA
         CuBLASErrorCheck(cublasDestroy(Matrix<CUDAfloat>::global_handle));
 #endif
     }

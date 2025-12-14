@@ -25,7 +25,7 @@ int test1()
     }
 }
 
-#ifndef CPU_ONLY
+#ifdef CUDA
 int test2()
 {
     std::string base = PROJECT_DIR;
@@ -80,7 +80,7 @@ int test3()
     return ret;
 }
 
-#ifndef CPU_ONLY
+#ifdef CUDA
 int test4()
 {
     // unit test started
@@ -112,9 +112,12 @@ int test4()
 #endif
 
 int test5(){
-#ifndef CPU_ONLY
+#ifdef CUDA
     CM A = CM::ones(3, 4);
     CM B = CM::ones(3, 3);
+#elif defined(APPLE_SILICON)
+    Matrix<MPSfloat> A = Matrix<MPSfloat>::ones(3, 4);
+    Matrix<MPSfloat> B = Matrix<MPSfloat>::ones(3, 3);
 #else
     M A = M::ones(3, 4);
     M B = M::ones(3, 3);
@@ -254,7 +257,7 @@ int compute()
     ret += test1();
     std::cout << std::endl;
 
-#ifndef CPU_ONLY
+#ifdef CUDA
     ret += test2();
     std::cout << std::endl;
 #endif
@@ -262,7 +265,7 @@ int compute()
     ret += test3();
     std::cout << std::endl;
 
-#ifndef CPU_ONLY
+#ifdef CUDA
     ret += test4();
 #endif
 

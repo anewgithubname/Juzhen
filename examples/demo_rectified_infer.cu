@@ -35,7 +35,7 @@
 using namespace std;
 using namespace Juzhen;
 
-#ifndef CPU_ONLY
+#ifdef CUDA
 #define FLOAT CUDAfloat
 inline Matrix<CUDAfloat> randn(int m, int n) { return Matrix<CUDAfloat>::randn(m, n); }
 inline Matrix<CUDAfloat> ones(int m, int n) { return Matrix<CUDAfloat>::ones(m, n); }
@@ -62,7 +62,7 @@ auto sample_X0(int n, int d)
 
 int compute() {
     // spdlog::set_level(spdlog::level::debug);
-#ifndef CPU_ONLY
+#ifdef CUDA
     GPUSampler sampler(1);
 #endif
     
@@ -80,9 +80,11 @@ int compute() {
     
     // create a neural network
     // define layers
-    ReluLayer<FLOAT> L0(1011, d + 1, batchsize), L1(1011, 1011, batchsize),
-        L2(1011, 1011, batchsize), L3(1011, 1011, batchsize);
-    LinearLayer<FLOAT> L10(d, 1011, batchsize);
+    ReluLayer<FLOAT> L0(1003, d + 1, batchsize), 
+                     L1(1003, 1003, batchsize),
+                     L2(1003, 1003, batchsize), 
+                     L3(1003, 1003, batchsize);
+    LinearLayer<FLOAT> L10(d, 1003, batchsize);
 
     // nns are linked lists containing layers
     list<Layer<FLOAT> *> trainnn({&L10, &L3, &L2, &L1, &L0});

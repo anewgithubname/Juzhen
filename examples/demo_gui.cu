@@ -33,7 +33,7 @@ using namespace Juzhen;
 #include "../ml/plotting.hpp"
 #include <mutex>
 
-#ifndef CPU_ONLY
+#ifdef CUDA
 #define FLOAT CUDAfloat
 inline Matrix<CUDAfloat> randn(int m, int n) { return Matrix<CUDAfloat>::randn(m, n); }
 inline Matrix<CUDAfloat> ones(int m, int n) { return Matrix<CUDAfloat>::ones(m, n); }
@@ -59,7 +59,7 @@ auto sample_X0(int n, int d)
 
 auto sample_X1(int n, int d)
 {
-#ifndef CPU_ONLY
+#ifdef CUDA
     return hstack({randn(d, n / 2) * .25 - 1, randn(d, n / 2) * .25 + 1});
 #else
     return hstack<float>({randn(d, n / 2) * .25 - 1, randn(d, n / 2) * .25 + 1});
@@ -88,7 +88,7 @@ public:
     int run()
     {
         //    spdlog::set_level(spdlog::level::debug);
-#ifndef CPU_ONLY
+#ifdef CUDA
         GPUSampler sampler(1);
 #endif
 

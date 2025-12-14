@@ -264,7 +264,7 @@ void DisplayCPU()
 }
 
 
-#ifndef CPU_ONLY
+#ifdef CUDA
 
 std::string getGPUInfo(){
     using namespace std;

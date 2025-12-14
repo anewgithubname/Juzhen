@@ -302,7 +302,7 @@ void Matrix<CUDAfloat>::eleminv(double l){
     divKernel <<<cudaConfig(numElem)>>> ((float*) elements.get(), (float)l, (float*) elements.get(), numElem);
 }
 
-Matrix<CUDAfloat> Matrix<CUDAfloat>::T() const
+const Matrix<CUDAfloat> Matrix<CUDAfloat>::T() const
 {
     string newname = name + "_T";
     Matrix<CUDAfloat> MT(newname.c_str(), numrow, numcol, !transpose, elements);

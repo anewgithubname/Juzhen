@@ -50,10 +50,14 @@ int compute() {
 	std::cout << "3 points to 1" << std::endl;
 	std::cout << std::endl;
 
-#ifndef CPU_ONLY
+#ifdef CUDA
 	CM A(M("adjecency", { {0,1,1}, {1,0,1}, {1,0,0}} ));
 	CM p(M("popularity", { { 1 / 3.0, 1 / 3.0, 1 / 3.0 } }));
 	auto o13 = CM::ones(1, 3);
+#elif defined(APPLE_SILICON)
+	Matrix<MPSfloat> A(M("adjecency", { {0,1,1}, {1,0,1}, {1,0,0}} ));
+	Matrix<MPSfloat> p(M("popularity", { { 1 / 3.0, 1 / 3.0, 1 / 3.0 } }));
+	auto o13 = Matrix<MPSfloat>::ones(1, 3);
 #else
 	M A("adjecency", { {0,1,1}, {1,0,1}, {1,0,0}} );
 	M p("popularity", { { 1 / 3.0, 1 / 3.0, 1 / 3.0 } });
@@ -61,7 +65,7 @@ int compute() {
 #endif
 	
 	std::cout << "adjecency matrix:" << std::endl;
-#ifndef CPU_ONLY
+#if defined(CUDA) || defined(APPLE_SILICON)
 	print(A.to_host());
 #else
 	print(A);
@@ -75,7 +79,7 @@ int compute() {
 	}
 
 	std::cout << "popularity of websites:" << std::endl;
-#ifndef CPU_ONLY
+#if defined (CUDA) || defined(APPLE_SILICON)
 	print(p.to_host());
 #else
 	print(p);

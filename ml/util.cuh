@@ -27,15 +27,12 @@
 
 #include "../cpp/juzhen.hpp"
 
-#ifndef CPU_ONLY
+#ifdef CUDA
 #include <thrust/device_vector.h>
 #include <thrust/sort.h>
-#define __GPU_CPU__ __device__ __host__
-#else
-#define __GPU_CPU__
 #endif
 
-#ifndef CPU_ONLY
+#ifdef CUDA
 #define dvector thrust::device_vector
 #else
 #define dvector std::vector
@@ -52,7 +49,7 @@ template <class T>
 float comp_med(const Matrix<T> &a) {
     STATIC_TIC;
     size_t n = a.num_row() * a.num_row();
-#ifndef CPU_ONLY
+#ifdef CUDA
     const float *s = (float *)comp_dist(a, a).data();
     thrust::device_vector<float> vec(s, s + n);
     thrust::sort(vec.begin(), vec.end());
@@ -100,14 +97,12 @@ inline int argmax(std::vector<T> a) {
 template <class T>
 inline float item(const Matrix<T> &M){
     // assert(M.num_row() == 1 && M.num_col() == 1);
-    #ifdef CPU_ONLY
+    #if !defined(CUDA) && !defined(APPLE_SILIICON)
         return M.elem(0, 0);
     #else
         return M.to_host().elem(0, 0);
     #endif
 }
-
-#define sqrtM(b) elemwise([=] __GPU_CPU__(float x) { return sqrt(x); }, b)
 
 template <class T>
 struct adam_state{
@@ -142,7 +137,7 @@ Matrix<T> adam_update(Matrix<T> &&g, adam_state<T> &state){
     Matrix<T> m_hat = m / (1 - pow(beta1, iteration));
     Matrix<T> v_hat = v / (1 - pow(beta2, iteration));
 
-    g = alpha * m_hat / (sqrtM(v_hat) + eps);
+    g = alpha * m_hat / (sqrt(v_hat) + eps);
     iteration++;
     return std::move(g);
 }
@@ -169,6 +164,19 @@ Matrix<T> predict_one_hot(const Matrix<T>& input){
     //converting it to zero one matrix
     return elemwise([] __GPU_CPU__ (float x){return x > -1e-5 ? 1 : 0;}, std::move(sub));
 }
+
+#if defined(APPLE_SILICON)
+template <>
+Matrix<MPSfloat> predict_one_hot(const Matrix<MPSfloat>& input){
+    // use topk to find the maximum of input for each column
+    auto maximum = topk(input, 1, 0);
+    auto zero_one = Matrix<float>::zeros(input.num_row(), input.num_col());
+    for(int i = 0; i < input.num_col(); i++){
+        zero_one.elem((int) maximum.elem(0, i), i) = 1.0;
+    }
+    return Matrix<MPSfloat>(zero_one);
+}
+#endif
 
 // convert label Y matrix (1 X n) to one-hot encoding. 
 Matrix<float> one_hot(const Matrix<int>& Y, int k) {

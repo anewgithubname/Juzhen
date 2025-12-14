@@ -35,13 +35,18 @@
 using namespace std;
 using namespace Juzhen;
 
-#ifndef CPU_ONLY
+#ifdef CUDA
 #define FLOAT CUDAfloat
 inline Matrix<CUDAfloat> randn(int m, int n) { return Matrix<CUDAfloat>::randn(m, n); }
 inline Matrix<CUDAfloat> ones(int m, int n) { return Matrix<CUDAfloat>::ones(m, n); }
 inline Matrix<CUDAfloat> vs(std::vector<MatrixView<CUDAfloat>> matrices) { return vstack(matrices); }
 inline Matrix<CUDAfloat> hs(std::vector<MatrixView<CUDAfloat>> matrices) { return hstack(matrices); }
 inline const float* getdata(const Matrix<CUDAfloat>& m) {return m.to_host().data();}
+#elif defined(APPLE_SILICON)
+#define FLOAT MPSfloat
+inline Matrix<MPSfloat> randn(int m, int n) { return Matrix<MPSfloat>::randn(m, n); }
+inline Matrix<MPSfloat> ones(int m, int n) { return Matrix<MPSfloat>::ones(m, n); }
+inline const float* getdata(const Matrix<MPSfloat>& m) {return m.data();}
 #else
 #define FLOAT float
 inline Matrix<float> randn(int m, int n) { return Matrix<float>::randn(m, n); }
@@ -61,7 +66,7 @@ auto sample_X0(int n, int d)
 
 auto sample_X1(int n, int d)
 {
-#ifndef CPU_ONLY
+#ifdef CUDA
     return hstack({randn(d, n / 2) * .25 - 1, randn(d, n / 2) * .25 + 1});
 #else
     return hstack<float>({randn(d, n / 2) * .25 - 1, randn(d, n / 2) * .25 + 1});
@@ -71,7 +76,7 @@ auto sample_X1(int n, int d)
 int compute()
 {
     // spdlog::set_level(spdlog::level::debug);
-#ifndef CPU_ONLY
+#ifdef CUDA
     GPUSampler sampler(1);
 #endif
 
@@ -91,11 +96,11 @@ int compute()
 
     // create a neural network
     // define layers, out - in - batchsize
-    ReluLayer<FLOAT> L0(1011, d + 1, batchsize), 
-                     L1(1011, 1011, batchsize),
-                     L2(1011, 1011, batchsize), 
-                     L3(1011, 1011, batchsize);
-    LinearLayer<FLOAT> L10(d, 1011, batchsize);
+    ReluLayer<FLOAT> L0(1003, d + 1, batchsize), 
+                     L1(1003, 1003, batchsize),
+                     L2(1003, 1003, batchsize), 
+                     L3(1003, 1003, batchsize);
+    LinearLayer<FLOAT> L10(d, 1003, batchsize);
 
     // nns are linked lists containing layers
     list<Layer<FLOAT> *> trainnn({&L10, &L3, &L2, &L1, &L0});
@@ -104,7 +109,7 @@ int compute()
               << std::endl;
 
     // start the training loop
-    for (int i = 0; i < numbatches * 1000; i++)
+    for (int i = 0; i < numbatches * 100; i++)
     {
         size_t batch_id = i % numbatches;
 
@@ -119,10 +124,9 @@ int compute()
         auto Xt_i = hadmd(X0_i, ones(d, 1) * (1 - t)) + hadmd(X1_i, ones(d, 1) * t);
         // add time to the input
         auto inp_i = vs({Xt_i, t});
-        auto Yt_i = X1_i - X0_i;
 
         // forward-backward pass
-        LossLayer<FLOAT> L11(batchsize, Yt_i);
+        LossLayer<FLOAT> L11(batchsize, X1_i - X0_i);
         trainnn.push_front(&L11);
 
         if (i % (25 * numbatches) == 0)
@@ -131,7 +135,7 @@ int compute()
             float loss = item(forward(trainnn, inp_i));
             // std::cout << "training loss: " << loss << std::endl;
             std::string msg = ", training loss: " + std::to_string(loss);
-            display_progress_bar((float)i / (numbatches * 1000), msg.c_str());
+            display_progress_bar((float)i / (numbatches * 100), msg.c_str());
             dumpweights(trainnn, base + "/res/net.weights");
         }
         else

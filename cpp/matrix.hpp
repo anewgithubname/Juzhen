@@ -513,4 +513,10 @@ Matrix<D> hadmd(Matrix<D> &&M1, const Matrix<D> &M2) {
     return std::move(M1);
 }
 
+// M1 = M1 .* M2
+template <class D>
+Matrix<D> hadmd(Matrix<D> &&M1, Matrix<D> &&M2) {
+    return hadmd(M1, std::move(M2));
+}
+
 #endif

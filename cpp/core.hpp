@@ -148,7 +148,7 @@ class Matrix {
 
     Matrix<D> inv();  // using LU decomposition
     D norm() const;   // using single for loop
-    Matrix<D> T() const;
+    const Matrix<D> T() const;
 
     // Matrix slicers
     Matrix<D> columns(size_t start, size_t end) const;
@@ -223,6 +223,7 @@ class Matrix {
     friend Matrix<Data> vstack(std::vector<MatrixView<Data>> matrices);
     template <class Data>
     friend Matrix<Data> hadmd(const Matrix<Data> &M1, const Matrix<Data> &M2);
+    friend Matrix<float> topk(const Matrix<MPSfloat>& M, int k, int dim);
 
     template <class Data>
     friend void read(FILE *f, Matrix<Data> &M);
@@ -235,24 +236,8 @@ class Matrix {
 
     friend class Memory<D>;
     friend class Matrix<CUDAfloat>;
+    friend class Matrix<MPSfloat>;
 };
-
-template <class D>
-Matrix<D> randn_like(const Matrix<D> &M){
-    return Matrix<D>::randn(M.num_row(), M.num_col());
-}
-template <class D>
-Matrix<D> rand_like(const Matrix<D> &M){
-    return Matrix<D>::rand(M.num_row(), M.num_col());
-}
-template <class D>
-Matrix<D> ones_like(const Matrix<D> &M){
-    return Matrix<D>::ones(M.num_row(), M.num_col());
-}
-template <class D>
-Matrix<D> zeros_like(const Matrix<D> &M) {
-    return Matrix<D>::zeros(M.num_row(), M.num_col());
-}
 
 template <class D>
 Matrix<D>::Matrix(const char *name, size_t numrow, size_t numcol, int trans) {
@@ -357,7 +342,7 @@ D Matrix<D>::norm() const {
 }
 //"fake" matrix transposition. It does not copy the data.
 template <class D>
-Matrix<D> Matrix<D>::T() const {
+const Matrix<D> Matrix<D>::T() const {
     std::string newname = name + "_T";
     Matrix<D> MT(newname.c_str(), numrow, numcol, !transpose, elements);
     return MT;
@@ -522,7 +507,6 @@ Matrix<D> Matrix<D>::add(const Matrix<D> &B, D s1, D s2) const {
 // A = s1*A + s2*B
 template <class D>
 void Matrix<D>::add(const Matrix<D> &B, D s1, D s2) {
-    
     // check if dimensions are compatible
     if (num_col() != B.num_col() || num_row() != B.num_row()) {
         throw std::invalid_argument("Matrix dimensions are not compatible");

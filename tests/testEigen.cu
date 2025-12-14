@@ -125,10 +125,14 @@ int test3() {
     // test random large matrices multiplication
 
     int n = 1001;
-#ifndef CPU_ONLY
+#ifdef CUDA
     auto A = CM::randn(n, n);
     auto B = CM::randn(n, n);
     auto C = CM::zeros(n, n);
+#elif defined(APPLE_SILICON)
+    auto A = Matrix<MPSfloat>::randn(n, n);
+    auto B = Matrix<MPSfloat>::randn(n, n);
+    auto C = Matrix<MPSfloat>::zeros(n, n);
 #else
     auto A = M::randn(n, n);
     auto B = M::randn(n, n);
@@ -143,7 +147,7 @@ int test3() {
     }
 
     auto *C_array = new float[n*n];
-#ifndef CPU_ONLY
+#if defined(CUDA) || defined(APPLE_SILICON)
     dumpJuzhentoarray(C_array, C.to_host());
 #else
     dumpJuzhentoarray(C_array, C);
@@ -152,14 +156,14 @@ int test3() {
     // do the same thing using eigen
     Eigen::MatrixXf A1(n, n);
     // copy A to A1
-#ifndef CPU_ONLY
+#if defined(CUDA) || defined(APPLE_SILICON)
     copyJuzhentoEigen(A1, A.to_host());
 #else
     copyJuzhentoEigen(A1, A);
 #endif
 
     Eigen::MatrixXf B1(n, n);
-#ifndef CPU_ONLY
+#if defined(CUDA) || defined(APPLE_SILICON)
     copyJuzhentoEigen(B1, B.to_host());
 #else
     copyJuzhentoEigen(B1, B);
@@ -186,7 +190,7 @@ int test3() {
 
 int compute()
 {
-#ifndef CPU_ONLY
+#ifdef CUDA
     GPUSampler sampler(1);
 #endif
 //    spdlog::set_level(spdlog::level::debug);

@@ -25,7 +25,7 @@
 
 #include "../cpp/juzhen.hpp"
 
-#ifndef CPU_ONLY
+#ifdef CUDA
 #define __GPU_CPU__ __device__ __host__
 #else
 #define __GPU_CPU__
@@ -137,10 +137,14 @@ int compute()
 	}
 	auto YT = read<int>(base + "/test_y.matrix");
 
-#ifndef CPU_ONLY
+#ifdef CUDA
 	auto X = (CM) read<float>(base + "/train_x.matrix");
 	auto Y = (CM) Yhost;
 	auto XT = (CM) read<float>(base + "/test_x.matrix");
+#elif defined(APPLE_SILICON)
+	auto X = (Matrix<MPSfloat>) read<float>(base + "/train_x.matrix");
+	auto Y = Yhost;
+	auto XT = (Matrix<MPSfloat>) read<float>(base + "/test_x.matrix");
 #else
 	auto X = read<float>(base + "/train_x.matrix");
 	auto Y = std::move(Yhost);
@@ -155,16 +159,23 @@ int compute()
 	std::cout << "Data loaded." << std::endl
 			  << std::endl;
 
-	Profiler p("k-nearest neighbour");
+	Profiler *p = new Profiler("k-nearest neighbour");
+
 	auto D = comp_dist(X.T(), XT.T());
+#if !defined(APPLE_SILICON) 
 	auto nn5 = topk(D, 7);
+#else
+	auto nn5 = topk(-D, 7, 0);
+#endif
 	auto pred = predict(nn5, Y);
 
-#ifndef CPU_ONLY
+#ifdef CUDA
 	M hpred = pred.to_host();
 #else
 	M &hpred = pred;
 #endif
+
+delete p;
 
 	float miss = 0;
 	for (int i = 0; i < pred.num_col(); i++)

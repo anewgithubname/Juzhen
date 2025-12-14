@@ -24,66 +24,72 @@
  */
 
 #include <fstream>
+#include <thread>
+
 #include "../cpp/juzhen.hpp"
+#include "../ml/plotting.hpp"
+
+// overriding the default printing function for matrices
+std::ostream& operator<<(std::ostream& os, const M& M) {
+    using namespace std;
+    // write obj to stream
+    for (size_t i = 0; i < M.num_row(); i++) {
+        os << endl;
+        for (size_t j = 0; j < M.num_col(); j++) {
+            os << M.elem(i, j) << " ";
+        }
+    }
+    return os;
+}
 
 #define HLINE std::cout << "--------------------------------" << std::endl
 
 int compute() {
-    //spdlog::set_level(spdlog::level::debug);
+    //  spdlog::set_level(spdlog::level::debug);
     global_rand_gen.seed(0);
-#ifndef CPU_ONLY
+#ifdef CUDA
     GPUSampler sampler(1);
 #endif
 
     {
-        auto A = M::rand(3, 4);
-        std::cout << A << std::endl;
-    
-        auto B = M::rand(3, 3);
-        std::cout << B << std::endl;
-        
-        auto AB = vstack<float>({A.columns(0, 2).T(), B.columns(0,2).T()}); 
-        std::cout << AB << std::endl;
+        std::cout << "The following code demonstrate how to use the Juzhen library." << std::endl;
+        std::cout << "all compuitations run on the GPU." << std::endl;
 
-        auto C = M::randn(4, 3);
-        std::cout << C << std::endl;
-        auto D = elemwise([=](float e) {return e-1; }, C);
-        std::cout << D << std::endl;
+        M A("A", {{1, 2, 3}, {4, 5, 6}});
+        std::cout << "A = " << A << std::endl;
 
-        auto E = randn_like(D);
-        std::cout << E << std::endl;
+        M B("B", {{4, 5, 6}, {7, 8, 9}});
+        std::cout << "B = " << B << std::endl;
 
-        auto F = randn_like(E);
-        try
-        {
-            std::cout << E / F.T() << std::endl; // should trigger an error
-        }
-        catch(const std::exception& e)
-        {
-            std::cout << "Caught exception: " << e.what() << std::endl;
-            //pause until user presses a key
-            std::cin.get();
+        auto AB = vstack<float>({A, B});
+        std::cout << "AB = [A; B] = " << AB << std::endl;
+
+        HLINE;
+
+        std::cout << "A + B = " << A + B << std::endl;
+        std::cout << "A - B = " << A - B << std::endl;
+        std::cout << "A + 1 = " << A + 1 << std::endl;
+        std::cout << "A - 1 = " << A - 1 << std::endl;
+        std::cout << "A / 1.5 = " << A / 1.5 << std::endl;
+        std::cout << "A / B = " << A / B << std::endl;
+
+        try {
+            std::cout << "A / B^T = " << A / B.T() << std::endl;
+        } catch (const std::exception& e) {
+            std::cerr << "Caught exception: " << e.what() << std::endl;
         }
 
-        
+        HLINE;
 
-        //write matrices to files
-        std::fstream fout("A.matrix");
-        fout << A;
-        fout.close();
-        
+        try {
+            std::cout << "A * B = " << A * B << std::endl;
+        } catch (const std::exception& e) {
+            std::cerr << "Caught exception: " << e.what() << std::endl;
+        }
 
-        // auto C = exp(A) + B;
-        // std::cout << C << std::endl;
-
-        // auto C2 = A + exp(B);
-        // std::cout << C2 << std::endl;
-
-        // HLINE;
-        // auto C3 = exp(A+B) + exp(B);
-        // std::cout << C3 << std::endl;
-
+        HLINE;
+        std::cout << "A * B^T = " << A * B.T() << std::endl;
     }
-  
+
     return 0;
 }
