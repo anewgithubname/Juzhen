@@ -1,6 +1,7 @@
 #include <string>
 #include "operators.hpp"
 #include "mpsmatrix.hpp"
+#include "matrix.hpp"
 
 Matrix<MPSfloat>::Matrix(const Matrix<float>& M)
 {
@@ -189,6 +190,21 @@ void Matrix<MPSfloat>::eleminv(double l)
     mpsElemInv((float*) elements.get(), numrow * numcol, l);
 }
 
+Matrix<MPSfloat> Matrix<MPSfloat>::rows(size_t start, size_t end) const
+{
+    if (start > end || end > num_row()) {
+        throw std::out_of_range("rows: index out of range");
+    }
+    Matrix<MPSfloat> out("rows", end - start, num_col(), 0);
+    mpsCopyMatrixBlock((const float*)elements.get(), (float*)out.elements.get(),
+                       (int)num_row(), (int)num_col(), (bool)get_transpose(),
+                       (int)start, 0,
+                       (int)(end - start), (int)num_col(),
+                       (int)out.num_row(), (int)out.num_col(), (bool)out.get_transpose(),
+                       0, 0);
+    return out;
+}
+
 const Matrix<MPSfloat> Matrix<MPSfloat>::T() const
 {
     std::string newname = name + "_T";
@@ -239,6 +255,12 @@ void Matrix<MPSfloat>::zeros()
 void Matrix<MPSfloat>::ones()
 {
     mpsFill((float*) elements.get(), numrow * numcol, 1.0);
+}
+Matrix<MPSfloat> Matrix<MPSfloat>::rand(size_t m, size_t n)
+{
+    Matrix<MPSfloat> M("rand", m, n);
+    mpsRand((float*) M.elements.get(), m * n);
+    return M;
 }
 Matrix<MPSfloat> Matrix<MPSfloat>::randn(size_t m, size_t n)
 {
@@ -350,6 +372,58 @@ Matrix<MPSfloat> d_relu(const Matrix<MPSfloat>& M){
 Matrix<MPSfloat> d_relu(Matrix<MPSfloat>&& M){
     mpsdRelu((float*) M.elements.get(), M.numrow * M.numcol);
     return std::move(M);
+}
+
+Matrix<MPSfloat> hstack(std::vector<MatrixView<MPSfloat>> matrices) {
+    if (matrices.empty()) {
+        throw std::invalid_argument("hstack: input list is empty");
+    }
+    const size_t num_row = matrices[0].num_row();
+    size_t num_col = 0;
+    for (size_t i = 0; i < matrices.size(); ++i) {
+        if (matrices[i].num_row() != num_row) {
+            throw std::invalid_argument("hstack: all matrices must have the same row count");
+        }
+        num_col += matrices[i].num_col();
+    }
+    Matrix<MPSfloat> out("hstack", num_row, num_col, 0);
+    size_t col_index = 0;
+    for (size_t i = 0; i < matrices.size(); ++i) {
+        mpsCopyMatrixBlock((const float*)matrices[i].data(), (float*)out.elements.get(),
+                           (int)matrices[i].num_row(), (int)matrices[i].num_col(), (bool)matrices[i].get_transpose(),
+                           0, 0,
+                           (int)matrices[i].num_row(), (int)matrices[i].num_col(),
+                           (int)out.num_row(), (int)out.num_col(), (bool)out.get_transpose(),
+                           0, (int)col_index);
+        col_index += matrices[i].num_col();
+    }
+    return out;
+}
+
+Matrix<MPSfloat> vstack(std::vector<MatrixView<MPSfloat>> matrices) {
+    if (matrices.empty()) {
+        throw std::invalid_argument("vstack: input list is empty");
+    }
+    size_t num_row = 0;
+    const size_t num_col = matrices[0].num_col();
+    for (size_t i = 0; i < matrices.size(); ++i) {
+        if (matrices[i].num_col() != num_col) {
+            throw std::invalid_argument("vstack: all matrices must have the same column count");
+        }
+        num_row += matrices[i].num_row();
+    }
+    Matrix<MPSfloat> out("vstack", num_row, num_col, 0);
+    size_t row_index = 0;
+    for (size_t i = 0; i < matrices.size(); ++i) {
+        mpsCopyMatrixBlock((const float*)matrices[i].data(), (float*)out.elements.get(),
+                           (int)matrices[i].num_row(), (int)matrices[i].num_col(), (bool)matrices[i].get_transpose(),
+                           0, 0,
+                           (int)matrices[i].num_row(), (int)matrices[i].num_col(),
+                           (int)out.num_row(), (int)out.num_col(), (bool)out.get_transpose(),
+                           (int)row_index, 0);
+        row_index += matrices[i].num_row();
+    }
+    return out;
 }
 
 Matrix<MPSfloat> sum(const Matrix<MPSfloat>& M, int dim){

@@ -263,9 +263,16 @@ Matrix<CUDAfloat> hstack(vector<MatrixView<CUDAfloat>> matrices) {
                             });
     matrices.erase(t, matrices.end());
 
+    if (matrices.empty()) {
+        throw std::invalid_argument("hstack: input list is empty or contains only empty matrices");
+    }
+
     size_t num_row = matrices[0].num_row();
     size_t num_col = 0;
     for (size_t i = 0; i < matrices.size(); i++) {
+        if (matrices[i].num_row() != num_row) {
+            throw std::invalid_argument("hstack: all matrices must have the same row count");
+        }
         num_col += matrices[i].num_col();
     }
     Matrix<CUDAfloat> result("hstack", num_row, num_col, 0);
@@ -297,7 +304,22 @@ const Matrix<CUDAfloat> vstack(vector<MatrixView<CUDAfloat>> matrices) {
         matrices[i].transpose = !matrices[i].transpose;
     }
 
-    return hstack(matrices).T();
+    auto H = hstack(matrices);
+    // Materialize the transpose so the result has transpose=false.
+    // Without this, the lazy .T() leaves physical memory in row-major order,
+    // which breaks cuDNN (and any code that reads raw data ignoring the flag).
+    size_t rows = H.numcol;   // logical rows after transpose
+    size_t cols = H.numrow;   // logical cols after transpose
+    Matrix<CUDAfloat> result("vstack", rows, cols, false);
+    float alpha = 1.0f, beta = 0.0f;
+    CuBLASErrorCheck(cublasSgeam(
+        Matrix<CUDAfloat>::global_handle, CUBLAS_OP_T, CUBLAS_OP_N,
+        rows, cols, &alpha,
+        (float *)H.data(), H.numrow,
+        &beta,
+        (float *)result.data(), rows,
+        (float *)result.data(), rows));
+    return result;
 }
 
 // M3 = M1 .* M2

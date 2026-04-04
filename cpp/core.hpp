@@ -48,7 +48,11 @@ class MatrixView {
     bool transpose;
 
     inline size_t idx(size_t i, size_t j) const {
-        return transpose ? i * numrow + j : j * numrow + i;
+        if constexpr (std::is_same_v<D, MPSfloat>) {
+            return transpose ? j * numcol + i : i * numcol + j;
+        } else {
+            return transpose ? i * numrow + j : j * numrow + i;
+        }
     }
 
    public:

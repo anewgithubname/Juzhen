@@ -12,6 +12,7 @@ static id<MTLCommandBuffer> commandBuffer = nil;
 static id<MTLComputePipelineState> zeroPipelineState = nil;
 static id<MTLComputePipelineState> ax_bPipelineState = nil;
 static id<MTLComputePipelineState> matrixaddPipelineState = nil;
+static id<MTLComputePipelineState> matrixcopyblockPipelineState = nil;
 static id<MTLComputePipelineState> matrixproductPipelineState = nil;
 static id<MTLComputePipelineState> expPipelineState = nil;
 static id<MTLComputePipelineState> logPipelineState = nil;
@@ -22,10 +23,16 @@ static id<MTLComputePipelineState> dTanhPipelineState = nil;
 static id<MTLComputePipelineState> sqrtPipelineState = nil;
 static id<MTLComputePipelineState> reluPipelineState = nil;
 static id<MTLComputePipelineState> dreluPipelineState = nil;
+static id<MTLComputePipelineState> im2colPipelineState = nil;
+static id<MTLComputePipelineState> col2imPipelineState = nil;
+static id<MTLComputePipelineState> packFeatureMap2DPipelineState = nil;
+static id<MTLComputePipelineState> conv2dOutputAddBiasPipelineState = nil;
 
 
 MPSMatrixRandomMTGP32* randomKernel = nil;
 MPSMatrixRandomDistributionDescriptor* randDesc = nil;
+MPSMatrixRandomMTGP32* randomUniformKernel = nil;
+MPSMatrixRandomDistributionDescriptor* randUniformDesc = nil;
 
 static std::map<float*, id<MTLBuffer>> bufferMap;
 
@@ -37,11 +44,18 @@ void mpsInit() {
     // Random number distribution descriptor (Normal distribution)
     randDesc =
         [MPSMatrixRandomDistributionDescriptor normalDistributionDescriptorWithMean:0.0f standardDeviation:1.0f];
+    randUniformDesc =
+        [MPSMatrixRandomDistributionDescriptor uniformDistributionDescriptorWithMinimum:0.0f maximum:1.0f];
     
     randomKernel = [[MPSMatrixRandomMTGP32 alloc] initWithDevice:device
                                                     destinationDataType:MPSDataTypeFloat32
                                                     seed:3334
                                                     distributionDescriptor:randDesc];
+
+    randomUniformKernel = [[MPSMatrixRandomMTGP32 alloc] initWithDevice:device
+                                                    destinationDataType:MPSDataTypeFloat32
+                                                    seed:3334
+                                                    distributionDescriptor:randUniformDesc];
 
     NSError* error = nil;
 
@@ -56,6 +70,7 @@ void mpsInit() {
     id<MTLFunction> zeroKernel = [defaultLibrary newFunctionWithName:@"zero_kernel"];
     id<MTLFunction> ax_bkernel = [defaultLibrary newFunctionWithName:@"ax_b_kernel"];
     id<MTLFunction> matrixaddKernel = [defaultLibrary newFunctionWithName:@"matrix_add"];
+    id<MTLFunction> matrixcopyblockKernel = [defaultLibrary newFunctionWithName:@"matrix_copy_block"];
     id<MTLFunction> matrixproductKernel = [defaultLibrary newFunctionWithName:@"matrix_product"];
     id<MTLFunction> expKernel = [defaultLibrary newFunctionWithName:@"inplace_exp_kernel"];
     id<MTLFunction> logKernel = [defaultLibrary newFunctionWithName:@"inplace_log_kernel"];
@@ -66,11 +81,16 @@ void mpsInit() {
     id<MTLFunction> sqrtKernel = [defaultLibrary newFunctionWithName:@"inplace_sqrt_kernel"];
     id<MTLFunction> reluKernel = [defaultLibrary newFunctionWithName:@"inplace_relu_kernel"];
     id<MTLFunction> dreluKernel = [defaultLibrary newFunctionWithName:@"inplace_drelu_kernel"];
+    id<MTLFunction> im2colKernel = [defaultLibrary newFunctionWithName:@"im2col_kernel"];
+    id<MTLFunction> col2imKernel = [defaultLibrary newFunctionWithName:@"col2im_kernel"];
+    id<MTLFunction> packFeatureMap2DKernel = [defaultLibrary newFunctionWithName:@"pack_feature_map_2d_kernel"];
+    id<MTLFunction> conv2dOutputAddBiasKernel = [defaultLibrary newFunctionWithName:@"conv2d_output_add_bias_kernel"];
 
     // Create compute pipeline state
     zeroPipelineState = [device newComputePipelineStateWithFunction:zeroKernel error:&error];
     ax_bPipelineState = [device newComputePipelineStateWithFunction:ax_bkernel error:&error];
     matrixaddPipelineState = [device newComputePipelineStateWithFunction:matrixaddKernel error:&error];
+    matrixcopyblockPipelineState = [device newComputePipelineStateWithFunction:matrixcopyblockKernel error:&error];
     matrixproductPipelineState = [device newComputePipelineStateWithFunction:matrixproductKernel error:&error];
     expPipelineState = [device newComputePipelineStateWithFunction:expKernel error:&error];
     logPipelineState = [device newComputePipelineStateWithFunction:logKernel error:&error];
@@ -81,16 +101,23 @@ void mpsInit() {
     sqrtPipelineState = [device newComputePipelineStateWithFunction:sqrtKernel error:&error];
     reluPipelineState = [device newComputePipelineStateWithFunction:reluKernel error:&error];
     dreluPipelineState = [device newComputePipelineStateWithFunction:dreluKernel error:&error];
+    im2colPipelineState = [device newComputePipelineStateWithFunction:im2colKernel error:&error];
+    col2imPipelineState = [device newComputePipelineStateWithFunction:col2imKernel error:&error];
+    packFeatureMap2DPipelineState = [device newComputePipelineStateWithFunction:packFeatureMap2DKernel error:&error];
+    conv2dOutputAddBiasPipelineState = [device newComputePipelineStateWithFunction:conv2dOutputAddBiasKernel error:&error];
 
 }
 
 void mpsDestroy() {
     bufferMap.clear();
+    [randUniformDesc release];
+    [randomUniformKernel release];
     [randDesc release];
     [randomKernel release];
     [zeroPipelineState release];
     [ax_bPipelineState release];
     [matrixaddPipelineState release];
+    [matrixcopyblockPipelineState release];
     [matrixproductPipelineState release];
     [expPipelineState release];
     [logPipelineState release];
@@ -101,6 +128,10 @@ void mpsDestroy() {
     [sqrtPipelineState release];
     [reluPipelineState release];
     [dreluPipelineState release];
+    [im2colPipelineState release];
+    [col2imPipelineState release];
+    [packFeatureMap2DPipelineState release];
+    [conv2dOutputAddBiasPipelineState release];
     [commandQueue release];
     [device release];
     device = nil;
@@ -179,6 +210,40 @@ void mpsAdd(const float* A, float* B, int rowA, int colA, bool transpose, float 
     [commandBuffer commit];
 }
 
+void mpsCopyMatrixBlock(const float* src, float* dst,
+                        int srcRows, int srcCols, bool srcTranspose,
+                        int srcRowOffset, int srcColOffset,
+                        int copyRows, int copyCols,
+                        int dstRows, int dstCols, bool dstTranspose,
+                        int dstRowOffset, int dstColOffset) {
+    id<MTLBuffer> srcBuffer = bufferMap[(float*)src];
+    id<MTLBuffer> dstBuffer = bufferMap[dst];
+
+    commandBuffer = [commandQueue commandBuffer];
+    id<MTLComputeCommandEncoder> encoder = [commandBuffer computeCommandEncoder];
+
+    [encoder setComputePipelineState:matrixcopyblockPipelineState];
+    [encoder setBuffer:srcBuffer offset:0 atIndex:0];
+    [encoder setBuffer:dstBuffer offset:0 atIndex:1];
+    [encoder setBytes:&srcRows length:sizeof(int) atIndex:2];
+    [encoder setBytes:&srcCols length:sizeof(int) atIndex:3];
+    [encoder setBytes:&srcTranspose length:sizeof(bool) atIndex:4];
+    [encoder setBytes:&srcRowOffset length:sizeof(int) atIndex:5];
+    [encoder setBytes:&srcColOffset length:sizeof(int) atIndex:6];
+    [encoder setBytes:&dstRows length:sizeof(int) atIndex:7];
+    [encoder setBytes:&dstCols length:sizeof(int) atIndex:8];
+    [encoder setBytes:&dstTranspose length:sizeof(bool) atIndex:9];
+    [encoder setBytes:&dstRowOffset length:sizeof(int) atIndex:10];
+    [encoder setBytes:&dstColOffset length:sizeof(int) atIndex:11];
+
+    MTLSize gridSize = MTLSizeMake(copyCols, copyRows, 1);
+    MTLSize threadGroupSize = MTLSizeMake(16, 16, 1);
+    [encoder dispatchThreads:gridSize threadsPerThreadgroup:threadGroupSize];
+
+    [encoder endEncoding];
+    [commandBuffer commit];
+}
+
 void mpsProduct(const float* A, float* B, int rowA, int colA, bool transpose){
     id<MTLBuffer> bufferA = bufferMap[(float *) A];
     id<MTLBuffer> bufferB = bufferMap[B];
@@ -248,6 +313,26 @@ void mpsRandn(float *A, int N){
     [matA release];
 }
 
+void mpsRand(float *A, int N){
+    // Get GPU buffer associated with A
+    id<MTLBuffer> bufferA = bufferMap[A];
+
+    // Create a command buffer to schedule GPU commands
+    commandBuffer = [commandQueue commandBuffer];
+
+    // Matrix descriptor to wrap buffer A
+    MPSMatrixDescriptor* matrixDesc = [MPSMatrixDescriptor matrixDescriptorWithRows:1 columns:N
+                                                                           rowBytes:N * sizeof(float)
+                                                                           dataType:MPSDataTypeFloat32];
+    auto matA = [[MPSMatrix alloc] initWithBuffer:bufferA descriptor:matrixDesc];
+
+    // Encode random number generation into command buffer
+    [randomUniformKernel encodeToCommandBuffer:commandBuffer destinationMatrix:matA];
+    [commandBuffer commit];
+    // Cleanup
+    [matA release];
+}
+
 void mpsFill(float* A, int N, float val) {
     id<MTLBuffer> buffer = bufferMap[A];
 
@@ -311,6 +396,142 @@ void mpsDRelu(float *A, int N){
 
     MTLSize threadsPerGroup = MTLSizeMake(threadGroupSize, 1, 1);
 
+    [encoder dispatchThreads:gridSize threadsPerThreadgroup:threadsPerGroup];
+
+    [encoder endEncoding];
+    [commandBuffer commit];
+}
+
+void mpsdRelu(float *A, int N){
+    mpsDRelu(A, N);
+}
+
+void mpsIm2col(const float* input, float* col,
+               int N, int C, int H, int W,
+               int kH, int kW,
+               int padH, int padW,
+               int strideH, int strideW,
+               int Hout, int Wout) {
+    id<MTLBuffer> inBuffer = bufferMap[(float*)input];
+    id<MTLBuffer> colBuffer = bufferMap[col];
+
+    const int K = C * kH * kW;
+    const int total = N * Hout * Wout * K;
+
+    commandBuffer = [commandQueue commandBuffer];
+    id<MTLComputeCommandEncoder> encoder = [commandBuffer computeCommandEncoder];
+    [encoder setComputePipelineState:im2colPipelineState];
+    [encoder setBuffer:inBuffer offset:0 atIndex:0];
+    [encoder setBuffer:colBuffer offset:0 atIndex:1];
+    [encoder setBytes:&N length:sizeof(int) atIndex:2];
+    [encoder setBytes:&C length:sizeof(int) atIndex:3];
+    [encoder setBytes:&H length:sizeof(int) atIndex:4];
+    [encoder setBytes:&W length:sizeof(int) atIndex:5];
+    [encoder setBytes:&kH length:sizeof(int) atIndex:6];
+    [encoder setBytes:&kW length:sizeof(int) atIndex:7];
+    [encoder setBytes:&padH length:sizeof(int) atIndex:8];
+    [encoder setBytes:&padW length:sizeof(int) atIndex:9];
+    [encoder setBytes:&strideH length:sizeof(int) atIndex:10];
+    [encoder setBytes:&strideW length:sizeof(int) atIndex:11];
+    [encoder setBytes:&Hout length:sizeof(int) atIndex:12];
+    [encoder setBytes:&Wout length:sizeof(int) atIndex:13];
+
+    MTLSize gridSize = MTLSizeMake(total, 1, 1);
+    NSUInteger tgs = im2colPipelineState.maxTotalThreadsPerThreadgroup;
+    if (tgs > (NSUInteger)total) tgs = total;
+    MTLSize threadsPerGroup = MTLSizeMake(tgs, 1, 1);
+    [encoder dispatchThreads:gridSize threadsPerThreadgroup:threadsPerGroup];
+
+    [encoder endEncoding];
+    [commandBuffer commit];
+}
+
+void mpsCol2im(const float* col, float* output,
+               int N, int C, int H, int W,
+               int kH, int kW,
+               int padH, int padW,
+               int strideH, int strideW,
+               int Hout, int Wout) {
+    id<MTLBuffer> colBuffer = bufferMap[(float*)col];
+    id<MTLBuffer> outBuffer = bufferMap[output];
+
+    const int total = N * C * H * W;
+
+    commandBuffer = [commandQueue commandBuffer];
+    id<MTLComputeCommandEncoder> encoder = [commandBuffer computeCommandEncoder];
+    [encoder setComputePipelineState:col2imPipelineState];
+    [encoder setBuffer:colBuffer offset:0 atIndex:0];
+    [encoder setBuffer:outBuffer offset:0 atIndex:1];
+    [encoder setBytes:&N length:sizeof(int) atIndex:2];
+    [encoder setBytes:&C length:sizeof(int) atIndex:3];
+    [encoder setBytes:&H length:sizeof(int) atIndex:4];
+    [encoder setBytes:&W length:sizeof(int) atIndex:5];
+    [encoder setBytes:&kH length:sizeof(int) atIndex:6];
+    [encoder setBytes:&kW length:sizeof(int) atIndex:7];
+    [encoder setBytes:&padH length:sizeof(int) atIndex:8];
+    [encoder setBytes:&padW length:sizeof(int) atIndex:9];
+    [encoder setBytes:&strideH length:sizeof(int) atIndex:10];
+    [encoder setBytes:&strideW length:sizeof(int) atIndex:11];
+    [encoder setBytes:&Hout length:sizeof(int) atIndex:12];
+    [encoder setBytes:&Wout length:sizeof(int) atIndex:13];
+
+    MTLSize gridSize = MTLSizeMake(total, 1, 1);
+    NSUInteger tgs = col2imPipelineState.maxTotalThreadsPerThreadgroup;
+    if (tgs > (NSUInteger)total) tgs = total;
+    MTLSize threadsPerGroup = MTLSizeMake(tgs, 1, 1);
+    [encoder dispatchThreads:gridSize threadsPerThreadgroup:threadsPerGroup];
+
+    [encoder endEncoding];
+    [commandBuffer commit];
+}
+
+void mpsPackFeatureMap2D(const float* featureMap, float* packed,
+                        int N, int C, int P) {
+    id<MTLBuffer> src = bufferMap[(float*)featureMap];
+    id<MTLBuffer> dst = bufferMap[packed];
+    const int total = N * C * P;
+
+    commandBuffer = [commandQueue commandBuffer];
+    id<MTLComputeCommandEncoder> encoder = [commandBuffer computeCommandEncoder];
+    [encoder setComputePipelineState:packFeatureMap2DPipelineState];
+    [encoder setBuffer:src offset:0 atIndex:0];
+    [encoder setBuffer:dst offset:0 atIndex:1];
+    [encoder setBytes:&N length:sizeof(int) atIndex:2];
+    [encoder setBytes:&C length:sizeof(int) atIndex:3];
+    [encoder setBytes:&P length:sizeof(int) atIndex:4];
+
+    MTLSize gridSize = MTLSizeMake(total, 1, 1);
+    NSUInteger tgs = packFeatureMap2DPipelineState.maxTotalThreadsPerThreadgroup;
+    if (tgs > (NSUInteger)total) tgs = total;
+    MTLSize threadsPerGroup = MTLSizeMake(tgs, 1, 1);
+    [encoder dispatchThreads:gridSize threadsPerThreadgroup:threadsPerGroup];
+
+    [encoder endEncoding];
+    [commandBuffer commit];
+}
+
+void mpsConv2dOutputAddBias(const float* y2d, const float* bias, float* output,
+                            int N, int Cout, int Hout, int Wout) {
+    id<MTLBuffer> y = bufferMap[(float*)y2d];
+    id<MTLBuffer> b = bufferMap[(float*)bias];
+    id<MTLBuffer> o = bufferMap[output];
+    const int total = N * Cout * Hout * Wout;
+
+    commandBuffer = [commandQueue commandBuffer];
+    id<MTLComputeCommandEncoder> encoder = [commandBuffer computeCommandEncoder];
+    [encoder setComputePipelineState:conv2dOutputAddBiasPipelineState];
+    [encoder setBuffer:y offset:0 atIndex:0];
+    [encoder setBuffer:b offset:0 atIndex:1];
+    [encoder setBuffer:o offset:0 atIndex:2];
+    [encoder setBytes:&N length:sizeof(int) atIndex:3];
+    [encoder setBytes:&Cout length:sizeof(int) atIndex:4];
+    [encoder setBytes:&Hout length:sizeof(int) atIndex:5];
+    [encoder setBytes:&Wout length:sizeof(int) atIndex:6];
+
+    MTLSize gridSize = MTLSizeMake(total, 1, 1);
+    NSUInteger tgs = conv2dOutputAddBiasPipelineState.maxTotalThreadsPerThreadgroup;
+    if (tgs > (NSUInteger)total) tgs = total;
+    MTLSize threadsPerGroup = MTLSizeMake(tgs, 1, 1);
     [encoder dispatchThreads:gridSize threadsPerThreadgroup:threadsPerGroup];
 
     [encoder endEncoding];

@@ -79,6 +79,18 @@ Matrix<T> d_relu(Matrix<T> &&M) {
 }
 
 template <class T>
+Matrix<T> clamp(Matrix<T> &&M, float lo, float hi) {
+    return elemwise([=] __GPU_CPU__(float x) {
+        return x < lo ? lo : (x > hi ? hi : x);
+    }, M);
+}
+
+template <class T>
+Matrix<T> clamp(const Matrix<T> &M, float lo, float hi) {
+    return clamp(Matrix<T>(M), lo, hi);
+}
+
+template <class T>
 inline int argmin(std::vector<T> a) {
     // replace all nan with inf
     std::replace_if(a.begin(), a.end(), [](T x) { return std::isnan(x); },
@@ -97,10 +109,14 @@ inline int argmax(std::vector<T> a) {
 template <class T>
 inline float item(const Matrix<T> &M){
     // assert(M.num_row() == 1 && M.num_col() == 1);
-    #if !defined(CUDA) && !defined(APPLE_SILIICON)
+    #if !defined(CUDA) && !defined(APPLE_SILICON)
         return M.elem(0, 0);
     #else
-        return M.to_host().elem(0, 0);
+        if constexpr (std::is_same_v<T, float>) {
+            return M.elem(0, 0);
+        } else {
+            return M.to_host().elem(0, 0);
+        }
     #endif
 }
 
