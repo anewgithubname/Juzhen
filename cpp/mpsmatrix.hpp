@@ -39,6 +39,7 @@ inline void Memory<MPSfloat>::_free(MPSfloat* ptr) {
 
 template<>
 class Matrix<MPSfloat> {
+public:
     size_t numcol;
     size_t numrow;
     bool transpose;
@@ -78,10 +79,17 @@ public:
     inline size_t get_transpose() const { return transpose; }
     std::string get_name() const { return name; }
     const MPSfloat* data() const { return elements.get(); }
+    inline MPSfloat elem(size_t i, size_t j) const {
+        return transpose ? elements[j * numcol + i] : elements[i * numcol + j];
+    }
+    inline MPSfloat& elem(size_t i, size_t j) {
+        return transpose ? elements[j * numcol + i] : elements[i * numcol + j];
+    }
     
     Matrix<float> to_host() const;
     void zeros();
     void ones();
+    static Matrix<MPSfloat> rand(size_t m, size_t n);
     static Matrix<MPSfloat> randn(size_t m, size_t n);
     static Matrix<MPSfloat> zeros(size_t m, size_t n);
     static Matrix<MPSfloat> ones(size_t m, size_t n);
@@ -96,6 +104,7 @@ public:
     Matrix<MPSfloat> scale(float s1) const { return add(0, s1); }
     void eleminv(double l);
     Matrix<MPSfloat> eleminv(double l) const;
+    Matrix<MPSfloat> rows(size_t start, size_t end) const;
     const Matrix<MPSfloat> T() const;
 
     friend Matrix<MPSfloat> hadmd(const Matrix<MPSfloat>& M1,
@@ -140,5 +149,9 @@ Matrix<MPSfloat> relu(const Matrix<MPSfloat>& M);
 Matrix<MPSfloat> relu(Matrix<MPSfloat>&& M);
 Matrix<MPSfloat> d_relu(const Matrix<MPSfloat>& M);
 Matrix<MPSfloat> d_relu(Matrix<MPSfloat>&& M);
+
+Matrix<MPSfloat> hstack(std::vector<MatrixView<MPSfloat>> matrices);
+
+Matrix<MPSfloat> vstack(std::vector<MatrixView<MPSfloat>> matrices);
 
 #endif

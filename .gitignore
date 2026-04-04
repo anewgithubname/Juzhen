@@ -89,3 +89,5 @@ Zt.csv
 
 # exclude some testing files
 stock_analysis/**
+build_cuda126/**
+build*/**

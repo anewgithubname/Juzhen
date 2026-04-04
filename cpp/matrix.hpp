@@ -125,9 +125,16 @@ Matrix<D> sum(const Matrix<D> &M, int dim) {
 // hstack function as the "hstack" in NumPy
 template <class D>
 Matrix<D> hstack(std::vector<MatrixView<D>> matrices) {
+    if (matrices.empty()) {
+        throw std::invalid_argument("hstack: input list is empty");
+    }
+
     size_t num_row = matrices[0].num_row();
     size_t num_col = 0;
     for (size_t i = 0; i < matrices.size(); i++) {
+        if (matrices[i].num_row() != num_row) {
+            throw std::invalid_argument("hstack: all matrices must have the same row count");
+        }
         num_col += matrices[i].num_col();
     }
     Matrix<D> result("hstack", num_row, num_col, 0);
@@ -148,9 +155,16 @@ Matrix<D> hstack(std::vector<MatrixView<D>> matrices) {
 // vstack function as the "vstack" in NumPy
 template <class D>
 Matrix<D> vstack(std::vector<MatrixView<D>> matrices) {
+    if (matrices.empty()) {
+        throw std::invalid_argument("vstack: input list is empty");
+    }
+
     size_t num_row = 0;
     size_t num_col = matrices[0].num_col();
     for (size_t i = 0; i < matrices.size(); i++) {
+        if (matrices[i].num_col() != num_col) {
+            throw std::invalid_argument("vstack: all matrices must have the same column count");
+        }
         num_row += matrices[i].num_row();
     }
     Matrix<D> result("vstack", num_row, num_col, 0);

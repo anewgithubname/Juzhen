@@ -35,6 +35,10 @@
 #include "../cpp/cumatrix.cuh"
 #endif
 
+#if defined(CUDA) && defined(CUDNN_AVAILABLE)
+#include <cudnn.h>
+#endif
+
 namespace Juzhen
 {
 	/** 
@@ -68,6 +72,20 @@ namespace Juzhen
 		virtual Matrix<D> grad(const Matrix<D>& input) const {
 			// TODO: each time make a new matrix, not efficient
 			return d_tanh(weights * input + bias * Matrix<D>::ones(1, input.num_col()));
+		}
+
+		// Full backward pass for this layer: computes weight updates and returns
+		// the gradient to propagate to the previous layer.
+		// Default implementation covers all fully-connected layers.
+		virtual Matrix<D> backward(const Matrix<D>& input, Matrix<D>&& upstream_grad) {
+			auto curr_grad = grad(input);
+			auto t = hadmd(curr_grad, std::move(upstream_grad));
+			auto gW = t * input.T();
+			auto gb = sum(t, 1);
+			if (need_update) {
+				update(std::move(gW), std::move(gb));
+			}
+			return W().T() * t;
 		}
 
 		// this function will destroy gW and gb
@@ -229,7 +247,7 @@ namespace Juzhen
 			output(output),
 			oneK1("oneK1", output.num_row(), 1) {
 			oneK1.ones();
-			std::cout << "moved" << std::endl;
+			// std::cout << "moved" << std::endl;
 		}
 
 		Matrix<D> grad(const Matrix<D>&) const override {
@@ -268,22 +286,8 @@ namespace Juzhen
 			return tt->grad(input);
 		}
 		else {
-			// compute <curr_grad .* (W^T * pre_grad), input> 
 			auto WT_prev_grad = backprop(neuralnet, tt->value());
-			auto curr_grad = tt->grad(input);
-			auto t = hadmd(curr_grad, std::move(WT_prev_grad));
-			auto gW = t * input.T();
-
-			// compute <curr_grad .* (W^T * pre_grad), 1> 
-			auto gb = sum(t, 1);
-
-			if(tt->need_update) {
-				// gradient update
-				tt->update(std::move(gW), std::move(gb));
-			}
-
-			// compute W ^ T * curr_grad
-			return tt->W().T() * t;
+			return tt->backward(input, std::move(WT_prev_grad));
 		}
 	}
 
@@ -457,6 +461,1522 @@ namespace Juzhen
 		ret.push_back(Zt);
 		return ret;
 	}
+
+#if defined(CUDA) && defined(CUDNN_AVAILABLE)
+	/**
+	 * Convolutional layer (conv + ReLU) backed by cuDNN.
+	 *
+	 * Memory layout convention (matches Matrix<CUDAfloat> column-major storage):
+	 *   input  — shape (C_in  * H_in  * W_in,  N)  →  NCHW row-major for cuDNN
+	 *   output — shape (C_out * H_out * W_out, N)  →  NCHW row-major for cuDNN
+	 *
+	 * where H_out = (H_in + 2*pad - kH) / stride + 1  (same for W_out).
+	 */
+	class ConvLayer : public Layer<CUDAfloat> {
+		using D = CUDAfloat;
+
+		int C_in, H_in, W_in;
+		int C_out, kH, kW;
+		int pad_h, pad_w, stride_h, stride_w;
+		int H_out, W_out;
+		int batchN;
+
+		cudnnHandle_t               cudnn;
+		cudnnTensorDescriptor_t     x_desc, y_desc, b_desc;
+		cudnnFilterDescriptor_t     w_desc;
+		cudnnConvolutionDescriptor_t conv_desc;
+
+		cudnnConvolutionFwdAlgo_t       fwd_algo;
+		cudnnConvolutionBwdDataAlgo_t   bwd_data_algo;
+		cudnnConvolutionBwdFilterAlgo_t bwd_filt_algo;
+
+		size_t workspace_bytes = 0;
+		void*  d_workspace     = nullptr;
+		bool   use_relu        = true;
+
+		// Cast a Matrix<CUDAfloat> data pointer to float* for cuDNN.
+		// Safe because CUDAfloat is a Boost strong_typedef of float with
+		// identical memory layout, and the underlying storage is always mutable.
+		static float* ptr(const Matrix<D>& m) {
+			return const_cast<float*>(reinterpret_cast<const float*>(m.data()));
+		}
+
+		void cudnn_check(cudnnStatus_t s, const char* file, int line) {
+			if (s != CUDNN_STATUS_SUCCESS) {
+				LOG_ERROR("cuDNN error: {} {}:{}", cudnnGetErrorString(s), file, line);
+				ERROR_OUT;
+			}
+		}
+#define CUDNN_CHECK(expr) cudnn_check((expr), __FILE__, __LINE__)
+
+	public:
+		/**
+		 * @param N       Batch size
+		 * @param C_in    Input channels
+		 * @param H_in    Input height
+		 * @param W_in    Input width
+		 * @param C_out   Number of output (filter) channels
+		 * @param kH      Kernel height
+		 * @param kW      Kernel width
+		 * @param pad     Zero-padding applied to each spatial side (default 0)
+		 * @param stride  Convolution stride (default 1)
+		 */
+		ConvLayer(int N, int C_in, int H_in, int W_in,
+		          int C_out, int kH, int kW,
+		          int pad = 0, int stride = 1, bool relu = true)
+			: Layer<D>(
+				  C_out * ((H_in + 2*pad - kH)/stride + 1) *
+				          ((W_in + 2*pad - kW)/stride + 1),
+				  1, N),
+			  C_in(C_in), H_in(H_in), W_in(W_in),
+			  C_out(C_out), kH(kH), kW(kW),
+			  pad_h(pad), pad_w(pad), stride_h(stride), stride_w(stride),
+			  H_out((H_in + 2*pad - kH)/stride + 1),
+			  W_out((W_in + 2*pad - kW)/stride + 1),
+			  batchN(N), use_relu(relu)
+		{
+			// Override base-class weight/bias/adam with convolution-appropriate sizes.
+			this->weights = Matrix<D>::randn(C_out * C_in * kH * kW, 1) * 0.001f;
+			this->bias    = Matrix<D>::zeros(C_out, 1);
+			this->val     = Matrix<D>("conv_out", C_out * H_out * W_out, N);
+			this->adamW   = adam_state<D>(0.0001, C_out * C_in * kH * kW, 1);
+			this->adamb   = adam_state<D>(0.0001, C_out, 1);
+
+			// ── cuDNN initialisation ──────────────────────────────────────────
+			CUDNN_CHECK(cudnnCreate(&cudnn));
+			CUDNN_CHECK(cudnnCreateTensorDescriptor(&x_desc));
+			CUDNN_CHECK(cudnnCreateTensorDescriptor(&y_desc));
+			CUDNN_CHECK(cudnnCreateTensorDescriptor(&b_desc));
+			CUDNN_CHECK(cudnnCreateFilterDescriptor(&w_desc));
+			CUDNN_CHECK(cudnnCreateConvolutionDescriptor(&conv_desc));
+
+			CUDNN_CHECK(cudnnSetTensor4dDescriptor(
+				x_desc, CUDNN_TENSOR_NCHW, CUDNN_DATA_FLOAT, N, C_in,  H_in,  W_in));
+			CUDNN_CHECK(cudnnSetTensor4dDescriptor(
+				y_desc, CUDNN_TENSOR_NCHW, CUDNN_DATA_FLOAT, N, C_out, H_out, W_out));
+			CUDNN_CHECK(cudnnSetTensor4dDescriptor(
+				b_desc, CUDNN_TENSOR_NCHW, CUDNN_DATA_FLOAT, 1, C_out, 1, 1));
+			CUDNN_CHECK(cudnnSetFilter4dDescriptor(
+				w_desc, CUDNN_DATA_FLOAT, CUDNN_TENSOR_NCHW, C_out, C_in, kH, kW));
+			CUDNN_CHECK(cudnnSetConvolution2dDescriptor(
+				conv_desc, pad, pad, stride, stride, 1, 1,
+				CUDNN_CROSS_CORRELATION, CUDNN_DATA_FLOAT));
+
+			// Algorithm selection (v7 API works with cuDNN 7 and 8)
+			int ret;
+			cudnnConvolutionFwdAlgoPerf_t       fwd_p;
+			cudnnConvolutionBwdDataAlgoPerf_t   bwd_d_p;
+			cudnnConvolutionBwdFilterAlgoPerf_t bwd_f_p;
+
+			CUDNN_CHECK(cudnnGetConvolutionForwardAlgorithm_v7(
+				cudnn, x_desc, w_desc, conv_desc, y_desc, 1, &ret, &fwd_p));
+			CUDNN_CHECK(cudnnGetConvolutionBackwardDataAlgorithm_v7(
+				cudnn, w_desc, y_desc, conv_desc, x_desc, 1, &ret, &bwd_d_p));
+			CUDNN_CHECK(cudnnGetConvolutionBackwardFilterAlgorithm_v7(
+				cudnn, x_desc, y_desc, conv_desc, w_desc, 1, &ret, &bwd_f_p));
+
+			fwd_algo      = fwd_p.algo;
+			bwd_data_algo = bwd_d_p.algo;
+			bwd_filt_algo = bwd_f_p.algo;
+
+			// Workspace — use the maximum needed by any of the three passes.
+			size_t ws_fwd, ws_bwd_d, ws_bwd_f;
+			CUDNN_CHECK(cudnnGetConvolutionForwardWorkspaceSize(
+				cudnn, x_desc, w_desc, conv_desc, y_desc, fwd_algo, &ws_fwd));
+			CUDNN_CHECK(cudnnGetConvolutionBackwardDataWorkspaceSize(
+				cudnn, w_desc, y_desc, conv_desc, x_desc, bwd_data_algo, &ws_bwd_d));
+			CUDNN_CHECK(cudnnGetConvolutionBackwardFilterWorkspaceSize(
+				cudnn, x_desc, y_desc, conv_desc, w_desc, bwd_filt_algo, &ws_bwd_f));
+
+			workspace_bytes = std::max({ws_fwd, ws_bwd_d, ws_bwd_f});
+			if (workspace_bytes > 0)
+				CudaErrorCheck(cudaMalloc(&d_workspace, workspace_bytes));
+		}
+
+		~ConvLayer() {
+			cudnnDestroyTensorDescriptor(x_desc);
+			cudnnDestroyTensorDescriptor(y_desc);
+			cudnnDestroyTensorDescriptor(b_desc);
+			cudnnDestroyFilterDescriptor(w_desc);
+			cudnnDestroyConvolutionDescriptor(conv_desc);
+			cudnnDestroy(cudnn);
+			if (d_workspace) cudaFree(d_workspace);
+		}
+
+		// Disable copy (cuDNN handles are not copyable).
+		ConvLayer(const ConvLayer&)            = delete;
+		ConvLayer& operator=(const ConvLayer&) = delete;
+
+		/**
+		 * Forward pass: val = ReLU(conv(input, W) + b)
+		 *
+		 * The post-ReLU output stored in val is sufficient for the backward pass
+		 * because d_relu(relu(x)) == d_relu(x) for all x.
+		 */
+		void eval(const Matrix<D>& input) override {
+			const float alpha = 1.0f, beta = 0.0f, one = 1.0f;
+
+			// Convolution: val = conv(input, W)
+			CUDNN_CHECK(cudnnConvolutionForward(
+				cudnn, &alpha,
+				x_desc, ptr(input),
+				w_desc, ptr(this->weights),
+				conv_desc, fwd_algo, d_workspace, workspace_bytes,
+				&beta, y_desc, ptr(this->val)));
+
+			// Bias: val += b  (broadcast over N, H_out, W_out)
+			CUDNN_CHECK(cudnnAddTensor(
+				cudnn, &alpha, b_desc, ptr(this->bias),
+				&one,  y_desc, ptr(this->val)));
+
+			// Optional ReLU activation
+			if (use_relu)
+				this->val = relu(Matrix<D>(this->val));
+		}
+
+		// grad() is superseded by backward(); return a dummy to satisfy the interface.
+		Matrix<D> grad(const Matrix<D>&) const override {
+			return Matrix<D>::ones(1, 1);
+		}
+
+		/**
+		 * Backward pass.
+		 *
+		 * @param input         Input that was fed to eval() for this layer.
+		 * @param upstream_grad Gradient from the layer above (dL/d_output).
+		 * @return              Gradient to propagate further back (dL/d_input).
+		 */
+		Matrix<D> backward(const Matrix<D>& input, Matrix<D>&& upstream_grad) override {
+			// Chain rule through activation:
+			// With ReLU:    t = upstream_grad ⊙ d_relu(val)
+			// Without ReLU: t = upstream_grad  (linear — derivative is 1)
+			auto t = use_relu
+				? hadmd(d_relu(Matrix<D>(this->val)), std::move(upstream_grad))
+				: std::move(upstream_grad);
+
+			const float alpha = 1.0f, beta = 0.0f;
+
+			// dX — gradient w.r.t. layer input
+			Matrix<D> dx("conv_dx", C_in * H_in * W_in, batchN);
+			CUDNN_CHECK(cudnnConvolutionBackwardData(
+				cudnn, &alpha,
+				w_desc, ptr(this->weights),
+				y_desc, ptr(t),
+				conv_desc, bwd_data_algo, d_workspace, workspace_bytes,
+				&beta, x_desc, ptr(dx)));
+
+			// dW — gradient w.r.t. filter weights
+			Matrix<D> dW("conv_dW", C_out * C_in * kH * kW, 1);
+			CUDNN_CHECK(cudnnConvolutionBackwardFilter(
+				cudnn, &alpha,
+				x_desc, ptr(input),
+				y_desc, ptr(t),
+				conv_desc, bwd_filt_algo, d_workspace, workspace_bytes,
+				&beta, w_desc, ptr(dW)));
+
+			// db — gradient w.r.t. bias
+			Matrix<D> db("conv_db", C_out, 1);
+			CUDNN_CHECK(cudnnConvolutionBackwardBias(
+				cudnn, &alpha,
+				y_desc, ptr(t),
+				&beta, b_desc, ptr(db)));
+
+			if (this->need_update)
+				this->update(std::move(dW), std::move(db));
+
+			return dx;
+		}
+#undef CUDNN_CHECK
+	};
+
+	/**
+	 * Transposed convolutional layer (deconv + ReLU) backed by cuDNN.
+	 *
+	 * Memory layout convention (matches Matrix<CUDAfloat> column-major storage):
+	 *   input  - shape (C_in  * H_in  * W_in,  N)  -> NCHW row-major for cuDNN
+	 *   output - shape (C_out * H_out * W_out, N)  -> NCHW row-major for cuDNN
+	 *
+	 * where H_out = (H_in - 1) * stride - 2 * pad + kH (same for W_out).
+	 */
+	class convtransLayer : public Layer<CUDAfloat> {
+		using D = CUDAfloat;
+
+		int C_in, H_in, W_in;
+		int C_out, kH, kW;
+		int pad_h, pad_w, stride_h, stride_w;
+		int H_out, W_out;
+		int batchN;
+
+		cudnnHandle_t               cudnn;
+		cudnnTensorDescriptor_t     x_desc, y_desc, b_desc;
+		cudnnFilterDescriptor_t     w_desc;
+		cudnnConvolutionDescriptor_t conv_desc;
+
+		cudnnConvolutionBwdDataAlgo_t   fwd_deconv_algo;
+		cudnnConvolutionFwdAlgo_t       bwd_input_algo;
+		cudnnConvolutionBwdFilterAlgo_t bwd_filt_algo;
+
+		size_t workspace_bytes = 0;
+		void*  d_workspace     = nullptr;
+		bool   use_relu        = true;
+
+		static float* ptr(const Matrix<D>& m) {
+			return const_cast<float*>(reinterpret_cast<const float*>(m.data()));
+		}
+
+		void cudnn_check(cudnnStatus_t s, const char* file, int line) {
+			if (s != CUDNN_STATUS_SUCCESS) {
+				LOG_ERROR("cuDNN error: {} {}:{}", cudnnGetErrorString(s), file, line);
+				ERROR_OUT;
+			}
+		}
+#define CUDNN_CHECK(expr) cudnn_check((expr), __FILE__, __LINE__)
+
+	public:
+		/**
+		 * @param N       Batch size
+		 * @param C_in    Input channels
+		 * @param H_in    Input height
+		 * @param W_in    Input width
+		 * @param C_out   Number of output channels
+		 * @param kH      Kernel height
+		 * @param kW      Kernel width
+		 * @param pad     Zero-padding applied to each spatial side (default 0)
+		 * @param stride  Stride used by the transposed convolution (default 1)
+		 */
+		convtransLayer(int N, int C_in, int H_in, int W_in,
+		               int C_out, int kH, int kW,
+		               int pad = 0, int stride = 1, bool relu = true)
+			: Layer<D>(
+				  C_out * (((H_in - 1) * stride - 2 * pad + kH)) *
+				          (((W_in - 1) * stride - 2 * pad + kW)),
+				  1, N),
+			  C_in(C_in), H_in(H_in), W_in(W_in),
+			  C_out(C_out), kH(kH), kW(kW),
+			  pad_h(pad), pad_w(pad), stride_h(stride), stride_w(stride),
+			  H_out((H_in - 1) * stride - 2 * pad + kH),
+			  W_out((W_in - 1) * stride - 2 * pad + kW),
+			  batchN(N), use_relu(relu)
+		{
+			if (H_out <= 0 || W_out <= 0) {
+				LOG_ERROR("Invalid transposed-conv output shape: H_out={}, W_out={}", H_out, W_out);
+				ERROR_OUT;
+			}
+
+			// cuDNN expects filter dims (K, C, R, S). For transposed-conv
+			// forward via cudnnConvolutionBackwardData, K must match C_in.
+			this->weights = Matrix<D>::randn(C_in * C_out * kH * kW, 1) * 0.001f;
+			this->bias    = Matrix<D>::zeros(C_out, 1);
+			this->val     = Matrix<D>("convtrans_out", C_out * H_out * W_out, N);
+			this->adamW   = adam_state<D>(0.0001, C_in * C_out * kH * kW, 1);
+			this->adamb   = adam_state<D>(0.0001, C_out, 1);
+
+			CUDNN_CHECK(cudnnCreate(&cudnn));
+			CUDNN_CHECK(cudnnCreateTensorDescriptor(&x_desc));
+			CUDNN_CHECK(cudnnCreateTensorDescriptor(&y_desc));
+			CUDNN_CHECK(cudnnCreateTensorDescriptor(&b_desc));
+			CUDNN_CHECK(cudnnCreateFilterDescriptor(&w_desc));
+			CUDNN_CHECK(cudnnCreateConvolutionDescriptor(&conv_desc));
+
+			CUDNN_CHECK(cudnnSetTensor4dDescriptor(
+				x_desc, CUDNN_TENSOR_NCHW, CUDNN_DATA_FLOAT, N, C_in, H_in, W_in));
+			CUDNN_CHECK(cudnnSetTensor4dDescriptor(
+				y_desc, CUDNN_TENSOR_NCHW, CUDNN_DATA_FLOAT, N, C_out, H_out, W_out));
+			CUDNN_CHECK(cudnnSetTensor4dDescriptor(
+				b_desc, CUDNN_TENSOR_NCHW, CUDNN_DATA_FLOAT, 1, C_out, 1, 1));
+			CUDNN_CHECK(cudnnSetFilter4dDescriptor(
+				w_desc, CUDNN_DATA_FLOAT, CUDNN_TENSOR_NCHW, C_in, C_out, kH, kW));
+			CUDNN_CHECK(cudnnSetConvolution2dDescriptor(
+				conv_desc, pad, pad, stride, stride, 1, 1,
+				CUDNN_CROSS_CORRELATION, CUDNN_DATA_FLOAT));
+
+			int ret;
+			cudnnConvolutionBwdDataAlgoPerf_t   fwd_p;
+			cudnnConvolutionFwdAlgoPerf_t       bwd_in_p;
+			cudnnConvolutionBwdFilterAlgoPerf_t bwd_f_p;
+
+			CUDNN_CHECK(cudnnGetConvolutionBackwardDataAlgorithm_v7(
+				cudnn, w_desc, x_desc, conv_desc, y_desc, 1, &ret, &fwd_p));
+			CUDNN_CHECK(cudnnGetConvolutionForwardAlgorithm_v7(
+				cudnn, y_desc, w_desc, conv_desc, x_desc, 1, &ret, &bwd_in_p));
+			CUDNN_CHECK(cudnnGetConvolutionBackwardFilterAlgorithm_v7(
+				cudnn, y_desc, x_desc, conv_desc, w_desc, 1, &ret, &bwd_f_p));
+
+			fwd_deconv_algo = fwd_p.algo;
+			bwd_input_algo  = bwd_in_p.algo;
+			bwd_filt_algo   = bwd_f_p.algo;
+
+			size_t ws_fwd, ws_bwd_in, ws_bwd_f;
+			CUDNN_CHECK(cudnnGetConvolutionBackwardDataWorkspaceSize(
+				cudnn, w_desc, x_desc, conv_desc, y_desc, fwd_deconv_algo, &ws_fwd));
+			CUDNN_CHECK(cudnnGetConvolutionForwardWorkspaceSize(
+				cudnn, y_desc, w_desc, conv_desc, x_desc, bwd_input_algo, &ws_bwd_in));
+			CUDNN_CHECK(cudnnGetConvolutionBackwardFilterWorkspaceSize(
+				cudnn, y_desc, x_desc, conv_desc, w_desc, bwd_filt_algo, &ws_bwd_f));
+
+			workspace_bytes = std::max({ws_fwd, ws_bwd_in, ws_bwd_f});
+			if (workspace_bytes > 0)
+				CudaErrorCheck(cudaMalloc(&d_workspace, workspace_bytes));
+		}
+
+		~convtransLayer() {
+			cudnnDestroyTensorDescriptor(x_desc);
+			cudnnDestroyTensorDescriptor(y_desc);
+			cudnnDestroyTensorDescriptor(b_desc);
+			cudnnDestroyFilterDescriptor(w_desc);
+			cudnnDestroyConvolutionDescriptor(conv_desc);
+			cudnnDestroy(cudnn);
+			if (d_workspace) cudaFree(d_workspace);
+		}
+
+		convtransLayer(const convtransLayer&)            = delete;
+		convtransLayer& operator=(const convtransLayer&) = delete;
+
+		void eval(const Matrix<D>& input) override {
+			const float alpha = 1.0f, beta = 0.0f, one = 1.0f;
+
+			// y = ConvTranspose(x, W)
+			CUDNN_CHECK(cudnnConvolutionBackwardData(
+				cudnn, &alpha,
+				w_desc, ptr(this->weights),
+				x_desc, ptr(input),
+				conv_desc, fwd_deconv_algo, d_workspace, workspace_bytes,
+				&beta, y_desc, ptr(this->val)));
+
+			// y += b (broadcast over N, H_out, W_out)
+			CUDNN_CHECK(cudnnAddTensor(
+				cudnn, &alpha, b_desc, ptr(this->bias),
+				&one,  y_desc, ptr(this->val)));
+
+			if (use_relu)
+				this->val = relu(Matrix<D>(this->val));
+		}
+
+		Matrix<D> grad(const Matrix<D>&) const override {
+			return Matrix<D>::ones(1, 1);
+		}
+
+		Matrix<D> backward(const Matrix<D>& input, Matrix<D>&& upstream_grad) override {
+			auto t = use_relu
+				? hadmd(d_relu(Matrix<D>(this->val)), std::move(upstream_grad))
+				: std::move(upstream_grad);
+
+			const float alpha = 1.0f, beta = 0.0f;
+
+			// dL/dx of transposed-conv input.
+			Matrix<D> dx("convtrans_dx", C_in * H_in * W_in, batchN);
+			CUDNN_CHECK(cudnnConvolutionForward(
+				cudnn, &alpha,
+				y_desc, ptr(t),
+				w_desc, ptr(this->weights),
+				conv_desc, bwd_input_algo, d_workspace, workspace_bytes,
+				&beta, x_desc, ptr(dx)));
+
+			// dL/dW for transposed-conv weights.
+			Matrix<D> dW("convtrans_dW", C_in * C_out * kH * kW, 1);
+			CUDNN_CHECK(cudnnConvolutionBackwardFilter(
+				cudnn, &alpha,
+				y_desc, ptr(t),
+				x_desc, ptr(input),
+				conv_desc, bwd_filt_algo, d_workspace, workspace_bytes,
+				&beta, w_desc, ptr(dW)));
+
+			// dL/db
+			Matrix<D> db("convtrans_db", C_out, 1);
+			CUDNN_CHECK(cudnnConvolutionBackwardBias(
+				cudnn, &alpha,
+				y_desc, ptr(t),
+				&beta, b_desc, ptr(db)));
+
+			if (this->need_update)
+				this->update(std::move(dW), std::move(db));
+
+			return dx;
+		}
+#undef CUDNN_CHECK
+	};
+
+	using ConvTransLayer = convtransLayer;
+#endif // CUDA && CUDNN_AVAILABLE
+
+#if defined(APPLE_SILICON)
+	class ConvLayer : public Layer<MPSfloat> {
+		using D = MPSfloat;
+
+		int C_in, H_in, W_in;
+		int C_out, kH, kW;
+		int pad_h, pad_w, stride_h, stride_w;
+		int H_out, W_out;
+		int batchN;
+		bool use_relu = true;
+
+		static inline size_t idx_chw(int c, int h, int w, int H, int W) {
+			return (size_t)c * (size_t)H * (size_t)W + (size_t)h * (size_t)W + (size_t)w;
+		}
+
+		static inline size_t idx_w_conv(int co, int ci, int kh, int kw, int Cin, int kH, int kW) {
+			return ((size_t)co * (size_t)Cin * (size_t)kH * (size_t)kW)
+				 + ((size_t)ci * (size_t)kH * (size_t)kW)
+				 + ((size_t)kh * (size_t)kW)
+				 + (size_t)kw;
+		}
+
+		Matrix<D> make_im2col(const Matrix<D>& input) const {
+			const int K = C_in * kH * kW;
+			const int P = H_out * W_out;
+			Matrix<D> col("conv_im2col", K, P * batchN);
+			col.zeros();
+
+			for (int n = 0; n < batchN; ++n) {
+				for (int oh = 0; oh < H_out; ++oh) {
+					for (int ow = 0; ow < W_out; ++ow) {
+						const int patch_col = n * P + oh * W_out + ow;
+						for (int ci = 0; ci < C_in; ++ci) {
+							for (int kh_i = 0; kh_i < kH; ++kh_i) {
+								for (int kw_i = 0; kw_i < kW; ++kw_i) {
+									const int ih = oh * stride_h - pad_h + kh_i;
+									const int iw = ow * stride_w - pad_w + kw_i;
+									if (ih < 0 || ih >= H_in || iw < 0 || iw >= W_in) continue;
+									const int row = (ci * kH + kh_i) * kW + kw_i;
+									col.elem(row, patch_col) = input.elem(idx_chw(ci, ih, iw, H_in, W_in), n);
+								}
+							}
+						}
+					}
+				}
+			}
+
+			return col;
+		}
+
+		Matrix<D> flatten_weights_2d(const Matrix<D>& w) const {
+			const int K = C_in * kH * kW;
+			Matrix<D> w2d("conv_w2d", C_out, K);
+			for (int co = 0; co < C_out; ++co) {
+				for (int ci = 0; ci < C_in; ++ci) {
+					for (int kh_i = 0; kh_i < kH; ++kh_i) {
+						for (int kw_i = 0; kw_i < kW; ++kw_i) {
+							const int col = (ci * kH + kh_i) * kW + kw_i;
+							w2d.elem(co, col) = w.elem(idx_w_conv(co, ci, kh_i, kw_i, C_in, kH, kW), 0);
+						}
+					}
+				}
+			}
+			return w2d;
+		}
+
+		Matrix<D> flatten_upstream(const Matrix<D>& t) const {
+			const int P = H_out * W_out;
+			Matrix<D> t2d("conv_t2d", C_out, P * batchN);
+			for (int n = 0; n < batchN; ++n) {
+				for (int co = 0; co < C_out; ++co) {
+					for (int oh = 0; oh < H_out; ++oh) {
+						for (int ow = 0; ow < W_out; ++ow) {
+							const int patch_col = n * P + oh * W_out + ow;
+							t2d.elem(co, patch_col) = t.elem(idx_chw(co, oh, ow, H_out, W_out), n);
+						}
+					}
+				}
+			}
+			return t2d;
+		}
+
+		Matrix<D> unpack_output_add_bias(const Matrix<D>& y2d) const {
+			const int P = H_out * W_out;
+			Matrix<D> out("conv_out", C_out * P, batchN);
+			for (int n = 0; n < batchN; ++n) {
+				for (int co = 0; co < C_out; ++co) {
+					const float b = this->bias.elem(co, 0);
+					for (int oh = 0; oh < H_out; ++oh) {
+						for (int ow = 0; ow < W_out; ++ow) {
+							const int patch_col = n * P + oh * W_out + ow;
+							out.elem(idx_chw(co, oh, ow, H_out, W_out), n) = y2d.elem(co, patch_col) + b;
+						}
+					}
+				}
+			}
+			return out;
+		}
+
+		Matrix<D> col2im(const Matrix<D>& dx_col) const {
+			const int P = H_out * W_out;
+			Matrix<D> dx("conv_dx", C_in * H_in * W_in, batchN);
+			dx.zeros();
+
+			for (int n = 0; n < batchN; ++n) {
+				for (int oh = 0; oh < H_out; ++oh) {
+					for (int ow = 0; ow < W_out; ++ow) {
+						const int patch_col = n * P + oh * W_out + ow;
+						for (int ci = 0; ci < C_in; ++ci) {
+							for (int kh_i = 0; kh_i < kH; ++kh_i) {
+								for (int kw_i = 0; kw_i < kW; ++kw_i) {
+									const int ih = oh * stride_h - pad_h + kh_i;
+									const int iw = ow * stride_w - pad_w + kw_i;
+									if (ih < 0 || ih >= H_in || iw < 0 || iw >= W_in) continue;
+									const int row = (ci * kH + kh_i) * kW + kw_i;
+									dx.elem(idx_chw(ci, ih, iw, H_in, W_in), n) += dx_col.elem(row, patch_col);
+								}
+							}
+						}
+					}
+				}
+			}
+
+			return dx;
+		}
+
+		Matrix<D> pack_weight_grad(const Matrix<D>& dW2d) const {
+			Matrix<D> dW("conv_dW", C_out * C_in * kH * kW, 1);
+			for (int co = 0; co < C_out; ++co) {
+				for (int ci = 0; ci < C_in; ++ci) {
+					for (int kh_i = 0; kh_i < kH; ++kh_i) {
+						for (int kw_i = 0; kw_i < kW; ++kw_i) {
+							const int col = (ci * kH + kh_i) * kW + kw_i;
+							dW.elem(idx_w_conv(co, ci, kh_i, kw_i, C_in, kH, kW), 0) = dW2d.elem(co, col);
+						}
+					}
+				}
+			}
+			return dW;
+		}
+
+		static float* ptr(const Matrix<D>& m) {
+			return const_cast<float*>(reinterpret_cast<const float*>(m.data()));
+		}
+
+		Matrix<float> make_im2col(const Matrix<float>& input) const {
+			const int K = C_in * kH * kW;
+			const int P = H_out * W_out;
+			Matrix<float> col("conv_im2col", K, P * batchN);
+			col.zeros();
+
+			for (int n = 0; n < batchN; ++n) {
+				for (int oh = 0; oh < H_out; ++oh) {
+					for (int ow = 0; ow < W_out; ++ow) {
+						const int patch_col = n * P + oh * W_out + ow;
+						for (int ci = 0; ci < C_in; ++ci) {
+							for (int kh = 0; kh < kH; ++kh) {
+								for (int kw = 0; kw < kW; ++kw) {
+									const int ih = oh * stride_h - pad_h + kh;
+									const int iw = ow * stride_w - pad_w + kw;
+									const int row = (ci * kH + kh) * kW + kw;
+									if (ih >= 0 && ih < H_in && iw >= 0 && iw < W_in) {
+										col.elem(row, patch_col) = input.elem(idx_chw(ci, ih, iw, H_in, W_in), n);
+									}
+								}
+							}
+						}
+					}
+				}
+			}
+			return col;
+		}
+
+		Matrix<float> flatten_weights_2d(const Matrix<float>& w) const {
+			const int K = C_in * kH * kW;
+			Matrix<float> w2d("conv_w2d", C_out, K);
+			for (int co = 0; co < C_out; ++co) {
+				for (int ci = 0; ci < C_in; ++ci) {
+					for (int kh = 0; kh < kH; ++kh) {
+						for (int kw = 0; kw < kW; ++kw) {
+							const int row = co;
+							const int col = (ci * kH + kh) * kW + kw;
+							w2d.elem(row, col) = w.elem(idx_w_conv(co, ci, kh, kw, C_in, kH, kW), 0);
+						}
+					}
+				}
+			}
+			return w2d;
+		}
+
+		Matrix<float> unflatten_output(const Matrix<float>& y2d, const Matrix<float>& b) const {
+			const int P = H_out * W_out;
+			Matrix<float> out("conv_out_host", C_out * P, batchN);
+			for (int n = 0; n < batchN; ++n) {
+				for (int co = 0; co < C_out; ++co) {
+					for (int oh = 0; oh < H_out; ++oh) {
+						for (int ow = 0; ow < W_out; ++ow) {
+							const int patch_col = n * P + oh * W_out + ow;
+							const size_t out_row = idx_chw(co, oh, ow, H_out, W_out);
+							out.elem(out_row, n) = y2d.elem(co, patch_col) + b.elem(co, 0);
+						}
+					}
+				}
+			}
+			return out;
+		}
+
+		Matrix<float> conv_input_grad_from_cols(const Matrix<float>& dx_col) const {
+			const int P = H_out * W_out;
+			Matrix<float> dx("conv_dx_host", C_in * H_in * W_in, batchN);
+			dx.zeros();
+
+			for (int n = 0; n < batchN; ++n) {
+				for (int oh = 0; oh < H_out; ++oh) {
+					for (int ow = 0; ow < W_out; ++ow) {
+						const int patch_col = n * P + oh * W_out + ow;
+						for (int ci = 0; ci < C_in; ++ci) {
+							for (int kh = 0; kh < kH; ++kh) {
+								for (int kw = 0; kw < kW; ++kw) {
+									const int ih = oh * stride_h - pad_h + kh;
+									const int iw = ow * stride_w - pad_w + kw;
+									if (ih < 0 || ih >= H_in || iw < 0 || iw >= W_in) continue;
+									const int row = (ci * kH + kh) * kW + kw;
+									dx.elem(idx_chw(ci, ih, iw, H_in, W_in), n) += dx_col.elem(row, patch_col);
+								}
+							}
+						}
+					}
+				}
+			}
+			return dx;
+		}
+
+		Matrix<float> flatten_upstream(const Matrix<float>& t) const {
+			const int P = H_out * W_out;
+			Matrix<float> t2d("conv_t2d", C_out, P * batchN);
+			for (int n = 0; n < batchN; ++n) {
+				for (int co = 0; co < C_out; ++co) {
+					for (int oh = 0; oh < H_out; ++oh) {
+						for (int ow = 0; ow < W_out; ++ow) {
+							const int patch_col = n * P + oh * W_out + ow;
+							t2d.elem(co, patch_col) = t.elem(idx_chw(co, oh, ow, H_out, W_out), n);
+						}
+					}
+				}
+			}
+			return t2d;
+		}
+
+		Matrix<float> pack_weight_grad(const Matrix<float>& dW2d) const {
+			Matrix<float> dW("conv_dW_host", C_out * C_in * kH * kW, 1);
+			for (int co = 0; co < C_out; ++co) {
+				for (int ci = 0; ci < C_in; ++ci) {
+					for (int kh = 0; kh < kH; ++kh) {
+						for (int kw = 0; kw < kW; ++kw) {
+							const int col = (ci * kH + kh) * kW + kw;
+							dW.elem(idx_w_conv(co, ci, kh, kw, C_in, kH, kW), 0) = dW2d.elem(co, col);
+						}
+					}
+				}
+			}
+			return dW;
+		}
+
+	public:
+		ConvLayer(int N, int C_in, int H_in, int W_in,
+		          int C_out, int kH, int kW,
+		          int pad = 0, int stride = 1, bool relu = true)
+			: Layer<D>(
+				  C_out * ((H_in + 2*pad - kH)/stride + 1) *
+				          ((W_in + 2*pad - kW)/stride + 1),
+				  1, N),
+			  C_in(C_in), H_in(H_in), W_in(W_in),
+			  C_out(C_out), kH(kH), kW(kW),
+			  pad_h(pad), pad_w(pad), stride_h(stride), stride_w(stride),
+			  H_out((H_in + 2*pad - kH)/stride + 1),
+			  W_out((W_in + 2*pad - kW)/stride + 1),
+			  batchN(N), use_relu(relu)
+		{
+			this->weights = Matrix<D>::randn(C_out * C_in * kH * kW, 1) * 0.001f;
+			this->bias    = Matrix<D>::zeros(C_out, 1);
+			this->val     = Matrix<D>("conv_out", C_out * H_out * W_out, N);
+			this->adamW   = adam_state<D>(0.0001, C_out * C_in * kH * kW, 1);
+			this->adamb   = adam_state<D>(0.0001, C_out, 1);
+		}
+
+		void eval(const Matrix<D>& input) override {
+			auto wh = this->weights.to_host();
+			auto w2d_h = flatten_weights_2d(wh);
+
+			const int K = C_in * kH * kW;
+			const int P = H_out * W_out;
+			Matrix<D> col("conv_im2col", K, P * batchN);
+			mpsIm2col(ptr(input), ptr(col), batchN, C_in, H_in, W_in,
+			          kH, kW, pad_h, pad_w, stride_h, stride_w, H_out, W_out);
+
+			Matrix<D> w2d(w2d_h);
+			Matrix<D> y2d = w2d * col;
+			Matrix<D> out("conv_out", C_out * P, batchN);
+			mpsConv2dOutputAddBias(ptr(y2d), ptr(this->bias), ptr(out), batchN, C_out, H_out, W_out);
+			this->val = std::move(out);
+
+			if (use_relu) {
+				this->val = relu(Matrix<D>(this->val));
+			}
+		}
+
+		Matrix<D> grad(const Matrix<D>&) const override {
+			return Matrix<D>::ones(1, 1);
+		}
+
+		Matrix<D> backward(const Matrix<D>& input, Matrix<D>&& upstream_grad) override {
+			auto t = use_relu
+				? hadmd(d_relu(Matrix<D>(this->val)), std::move(upstream_grad))
+				: std::move(upstream_grad);
+
+			auto wh = this->weights.to_host();
+			auto w2d_h = flatten_weights_2d(wh);
+
+			const int K = C_in * kH * kW;
+			const int P = H_out * W_out;
+
+			Matrix<D> col("conv_im2col", K, P * batchN);
+			mpsIm2col(ptr(input), ptr(col), batchN, C_in, H_in, W_in,
+			          kH, kW, pad_h, pad_w, stride_h, stride_w, H_out, W_out);
+
+			Matrix<D> t2d("conv_t2d", C_out, P * batchN);
+			mpsPackFeatureMap2D(ptr(t), ptr(t2d), batchN, C_out, P);
+
+			Matrix<D> w2d(w2d_h);
+			Matrix<D> dW2d = t2d * col.T();
+			Matrix<D> dx_col = w2d.T() * t2d;
+			Matrix<D> dx("conv_dx", C_in * H_in * W_in, batchN);
+			mpsCol2im(ptr(dx_col), ptr(dx), batchN, C_in, H_in, W_in,
+			          kH, kW, pad_h, pad_w, stride_h, stride_w, H_out, W_out);
+
+			Matrix<D> db = sum(t2d, 1);
+			auto dW2d_h = dW2d.to_host();
+
+			if (this->need_update) {
+				this->update(Matrix<D>(pack_weight_grad(dW2d_h)), std::move(db));
+			}
+
+			return dx;
+		}
+	};
+
+	class convtransLayer : public Layer<MPSfloat> {
+		using D = MPSfloat;
+
+		int C_in, H_in, W_in;
+		int C_out, kH, kW;
+		int pad_h, pad_w, stride_h, stride_w;
+		int H_out, W_out;
+		int batchN;
+		bool use_relu = true;
+
+		static inline size_t idx_chw(int c, int h, int w, int H, int W) {
+			return (size_t)c * (size_t)H * (size_t)W + (size_t)h * (size_t)W + (size_t)w;
+		}
+
+		static inline size_t idx_w_deconv(int ci, int co, int kh, int kw, int Cout, int kH, int kW) {
+			return ((size_t)ci * (size_t)Cout * (size_t)kH * (size_t)kW)
+				 + ((size_t)co * (size_t)kH * (size_t)kW)
+				 + ((size_t)kh * (size_t)kW)
+				 + (size_t)kw;
+		}
+
+		Matrix<D> pack_input_2d(const Matrix<D>& input) const {
+			const int P_in = H_in * W_in;
+			Matrix<D> x2d("deconv_x2d", C_in, batchN * P_in);
+			for (int n = 0; n < batchN; ++n) {
+				for (int ci = 0; ci < C_in; ++ci) {
+					for (int ih = 0; ih < H_in; ++ih) {
+						for (int iw = 0; iw < W_in; ++iw) {
+							const int col = n * P_in + ih * W_in + iw;
+							x2d.elem(ci, col) = input.elem(idx_chw(ci, ih, iw, H_in, W_in), n);
+						}
+					}
+				}
+			}
+			return x2d;
+		}
+
+		Matrix<D> flatten_weights_2d(const Matrix<D>& w) const {
+			Matrix<D> w2d("deconv_w2d", C_out * kH * kW, C_in);
+			for (int ci = 0; ci < C_in; ++ci) {
+				for (int co = 0; co < C_out; ++co) {
+					for (int kh_i = 0; kh_i < kH; ++kh_i) {
+						for (int kw_i = 0; kw_i < kW; ++kw_i) {
+							const int row = (co * kH + kh_i) * kW + kw_i;
+							w2d.elem(row, ci) = w.elem(idx_w_deconv(ci, co, kh_i, kw_i, C_out, kH, kW), 0);
+						}
+					}
+				}
+			}
+			return w2d;
+		}
+
+		Matrix<D> unpack_forward_from_patches(const Matrix<D>& patches) const {
+			Matrix<D> out("convtrans_out", C_out * H_out * W_out, batchN);
+			out.zeros();
+
+			for (int n = 0; n < batchN; ++n) {
+				for (int co = 0; co < C_out; ++co) {
+					const float b = this->bias.elem(co, 0);
+					for (int oh = 0; oh < H_out; ++oh) {
+						for (int ow = 0; ow < W_out; ++ow) {
+							out.elem(idx_chw(co, oh, ow, H_out, W_out), n) = b;
+						}
+					}
+				}
+			}
+
+			for (int n = 0; n < batchN; ++n) {
+				for (int ih = 0; ih < H_in; ++ih) {
+					for (int iw = 0; iw < W_in; ++iw) {
+						const int col = n * H_in * W_in + ih * W_in + iw;
+						for (int co = 0; co < C_out; ++co) {
+							for (int kh_i = 0; kh_i < kH; ++kh_i) {
+								for (int kw_i = 0; kw_i < kW; ++kw_i) {
+									const int oh = ih * stride_h - pad_h + kh_i;
+									const int ow = iw * stride_w - pad_w + kw_i;
+									if (oh < 0 || oh >= H_out || ow < 0 || ow >= W_out) continue;
+									const int row = (co * kH + kh_i) * kW + kw_i;
+									out.elem(idx_chw(co, oh, ow, H_out, W_out), n) += patches.elem(row, col);
+								}
+							}
+						}
+					}
+				}
+			}
+
+			return out;
+		}
+
+		Matrix<D> build_upstream_patches(const Matrix<D>& t) const {
+			const int P_in = H_in * W_in;
+			Matrix<D> tp("deconv_tp", C_out * kH * kW, batchN * P_in);
+			tp.zeros();
+
+			for (int n = 0; n < batchN; ++n) {
+				for (int ih = 0; ih < H_in; ++ih) {
+					for (int iw = 0; iw < W_in; ++iw) {
+						const int col = n * P_in + ih * W_in + iw;
+						for (int co = 0; co < C_out; ++co) {
+							for (int kh_i = 0; kh_i < kH; ++kh_i) {
+								for (int kw_i = 0; kw_i < kW; ++kw_i) {
+									const int oh = ih * stride_h - pad_h + kh_i;
+									const int ow = iw * stride_w - pad_w + kw_i;
+									if (oh < 0 || oh >= H_out || ow < 0 || ow >= W_out) continue;
+									const int row = (co * kH + kh_i) * kW + kw_i;
+									tp.elem(row, col) = t.elem(idx_chw(co, oh, ow, H_out, W_out), n);
+								}
+							}
+						}
+					}
+				}
+			}
+
+			return tp;
+		}
+
+		Matrix<D> unpack_dx_from_2d(const Matrix<D>& dx2d) const {
+			const int P_in = H_in * W_in;
+			Matrix<D> dx("convtrans_dx", C_in * H_in * W_in, batchN);
+			for (int n = 0; n < batchN; ++n) {
+				for (int ci = 0; ci < C_in; ++ci) {
+					for (int ih = 0; ih < H_in; ++ih) {
+						for (int iw = 0; iw < W_in; ++iw) {
+							const int col = n * P_in + ih * W_in + iw;
+							dx.elem(idx_chw(ci, ih, iw, H_in, W_in), n) = dx2d.elem(ci, col);
+						}
+					}
+				}
+			}
+			return dx;
+		}
+
+		Matrix<D> pack_weight_grad(const Matrix<D>& dW2d) const {
+			Matrix<D> dW("convtrans_dW", C_in * C_out * kH * kW, 1);
+			for (int ci = 0; ci < C_in; ++ci) {
+				for (int co = 0; co < C_out; ++co) {
+					for (int kh_i = 0; kh_i < kH; ++kh_i) {
+						for (int kw_i = 0; kw_i < kW; ++kw_i) {
+							const int row = (co * kH + kh_i) * kW + kw_i;
+							dW.elem(idx_w_deconv(ci, co, kh_i, kw_i, C_out, kH, kW), 0) = dW2d.elem(row, ci);
+						}
+					}
+				}
+			}
+			return dW;
+		}
+
+		static float* ptr(const Matrix<D>& m) {
+			return const_cast<float*>(reinterpret_cast<const float*>(m.data()));
+		}
+
+	public:
+		convtransLayer(int N, int C_in, int H_in, int W_in,
+		               int C_out, int kH, int kW,
+		               int pad = 0, int stride = 1, bool relu = true)
+			: Layer<D>(
+				  C_out * (((H_in - 1) * stride - 2 * pad + kH)) *
+				          (((W_in - 1) * stride - 2 * pad + kW)),
+				  1, N),
+			  C_in(C_in), H_in(H_in), W_in(W_in),
+			  C_out(C_out), kH(kH), kW(kW),
+			  pad_h(pad), pad_w(pad), stride_h(stride), stride_w(stride),
+			  H_out((H_in - 1) * stride - 2 * pad + kH),
+			  W_out((W_in - 1) * stride - 2 * pad + kW),
+			  batchN(N), use_relu(relu)
+		{
+			if (H_out <= 0 || W_out <= 0) {
+				LOG_ERROR("Invalid transposed-conv output shape: H_out={}, W_out={}", H_out, W_out);
+				ERROR_OUT;
+			}
+
+			this->weights = Matrix<D>::randn(C_in * C_out * kH * kW, 1) * 0.001f;
+			this->bias    = Matrix<D>::zeros(C_out, 1);
+			this->val     = Matrix<D>("convtrans_out", C_out * H_out * W_out, N);
+			this->adamW   = adam_state<D>(0.0001, C_in * C_out * kH * kW, 1);
+			this->adamb   = adam_state<D>(0.0001, C_out, 1);
+		}
+
+		void eval(const Matrix<D>& input) override {
+			auto wh = this->weights.to_host();
+			auto bh = this->bias.to_host();
+
+			const int P_in = H_in * W_in;
+			Matrix<D> x2d("deconv_x2d", C_in, batchN * P_in);
+			mpsPackFeatureMap2D(ptr(input), ptr(x2d), batchN, C_in, P_in);
+
+			Matrix<float> w2d("deconv_w2d", C_out * kH * kW, C_in);
+			for (int ci = 0; ci < C_in; ++ci) {
+				for (int co = 0; co < C_out; ++co) {
+					for (int kh = 0; kh < kH; ++kh) {
+						for (int kw = 0; kw < kW; ++kw) {
+							const int row = (co * kH + kh) * kW + kw;
+							w2d.elem(row, ci) = wh.elem(idx_w_deconv(ci, co, kh, kw, C_out, kH, kW), 0);
+						}
+					}
+				}
+			}
+
+			auto patches = (Matrix<D>(w2d) * x2d).to_host();
+
+			Matrix<float> y("deconv_out_host", C_out * H_out * W_out, batchN);
+			y.zeros();
+			for (int n = 0; n < batchN; ++n) {
+				for (int co = 0; co < C_out; ++co) {
+					for (int oh = 0; oh < H_out; ++oh) {
+						for (int ow = 0; ow < W_out; ++ow) {
+							y.elem(idx_chw(co, oh, ow, H_out, W_out), n) = bh.elem(co, 0);
+						}
+					}
+				}
+			}
+
+			for (int n = 0; n < batchN; ++n) {
+				for (int ih = 0; ih < H_in; ++ih) {
+					for (int iw = 0; iw < W_in; ++iw) {
+						const int col = n * H_in * W_in + ih * W_in + iw;
+						for (int co = 0; co < C_out; ++co) {
+							for (int kh = 0; kh < kH; ++kh) {
+								for (int kw = 0; kw < kW; ++kw) {
+									const int oh = ih * stride_h - pad_h + kh;
+									const int ow = iw * stride_w - pad_w + kw;
+									if (oh < 0 || oh >= H_out || ow < 0 || ow >= W_out) continue;
+									const int row = (co * kH + kh) * kW + kw;
+									y.elem(idx_chw(co, oh, ow, H_out, W_out), n) += patches.elem(row, col);
+								}
+							}
+						}
+					}
+				}
+			}
+
+			this->val = Matrix<D>(y);
+			if (use_relu) {
+				this->val = relu(Matrix<D>(this->val));
+			}
+		}
+
+		Matrix<D> grad(const Matrix<D>&) const override {
+			return Matrix<D>::ones(1, 1);
+		}
+
+		Matrix<D> backward(const Matrix<D>& input, Matrix<D>&& upstream_grad) override {
+			auto t = use_relu
+				? hadmd(d_relu(Matrix<D>(this->val)), std::move(upstream_grad))
+				: std::move(upstream_grad);
+
+			auto xh = input.to_host();
+			auto wh = this->weights.to_host();
+			auto th = t.to_host();
+
+			Matrix<float> dx("deconv_dx_host", C_in * H_in * W_in, batchN);
+			dx.zeros();
+			Matrix<float> dW("deconv_dW_host", C_in * C_out * kH * kW, 1);
+			dW.zeros();
+			Matrix<float> db("deconv_db_host", C_out, 1);
+			db.zeros();
+
+			for (int n = 0; n < batchN; ++n) {
+				for (int co = 0; co < C_out; ++co) {
+					float sb = 0.0f;
+					for (int oh = 0; oh < H_out; ++oh) {
+						for (int ow = 0; ow < W_out; ++ow) {
+							sb += th.elem(idx_chw(co, oh, ow, H_out, W_out), n);
+						}
+					}
+					db.elem(co, 0) += sb;
+				}
+			}
+
+			for (int n = 0; n < batchN; ++n) {
+				for (int ci = 0; ci < C_in; ++ci) {
+					for (int ih = 0; ih < H_in; ++ih) {
+						for (int iw = 0; iw < W_in; ++iw) {
+							float acc_dx = 0.0f;
+							for (int co = 0; co < C_out; ++co) {
+								for (int kh = 0; kh < kH; ++kh) {
+									for (int kw = 0; kw < kW; ++kw) {
+										const int oh = ih * stride_h - pad_h + kh;
+										const int ow = iw * stride_w - pad_w + kw;
+										if (oh < 0 || oh >= H_out || ow < 0 || ow >= W_out) continue;
+										const float gv = th.elem(idx_chw(co, oh, ow, H_out, W_out), n);
+										acc_dx += gv * wh.elem(idx_w_deconv(ci, co, kh, kw, C_out, kH, kW), 0);
+										dW.elem(idx_w_deconv(ci, co, kh, kw, C_out, kH, kW), 0) +=
+											xh.elem(idx_chw(ci, ih, iw, H_in, W_in), n) * gv;
+									}
+								}
+							}
+							dx.elem(idx_chw(ci, ih, iw, H_in, W_in), n) = acc_dx;
+						}
+					}
+				}
+			}
+
+			if (this->need_update) {
+				this->update(Matrix<D>(dW), Matrix<D>(db));
+			}
+
+			return Matrix<D>(dx);
+		}
+	};
+
+	using ConvTransLayer = convtransLayer;
+#endif // APPLE_SILICON
+
+#if !defined(CUDA) && !defined(APPLE_SILICON)
+	class ConvLayer : public Layer<float> {
+		using D = float;
+
+		int C_in, H_in, W_in;
+		int C_out, kH, kW;
+		int pad_h, pad_w, stride_h, stride_w;
+		int H_out, W_out;
+		int batchN;
+		bool use_relu = true;
+
+		static inline size_t idx_chw(int c, int h, int w, int H, int W) {
+			return (size_t)c * (size_t)H * (size_t)W + (size_t)h * (size_t)W + (size_t)w;
+		}
+
+		static inline size_t idx_w_conv(int co, int ci, int kh, int kw, int Cin, int kH, int kW) {
+			return ((size_t)co * (size_t)Cin * (size_t)kH * (size_t)kW)
+				 + ((size_t)ci * (size_t)kH * (size_t)kW)
+				 + ((size_t)kh * (size_t)kW)
+				 + (size_t)kw;
+		}
+
+		Matrix<D> make_im2col(const Matrix<D>& input) const {
+			const int K = C_in * kH * kW;
+			const int P = H_out * W_out;
+			Matrix<D> col("conv_im2col", K, P * batchN);
+			col.zeros();
+
+			for (int n = 0; n < batchN; ++n) {
+				for (int oh = 0; oh < H_out; ++oh) {
+					for (int ow = 0; ow < W_out; ++ow) {
+						const int patch_col = n * P + oh * W_out + ow;
+						for (int ci = 0; ci < C_in; ++ci) {
+							for (int kh_i = 0; kh_i < kH; ++kh_i) {
+								for (int kw_i = 0; kw_i < kW; ++kw_i) {
+									const int ih = oh * stride_h - pad_h + kh_i;
+									const int iw = ow * stride_w - pad_w + kw_i;
+									if (ih < 0 || ih >= H_in || iw < 0 || iw >= W_in) continue;
+									const int row = (ci * kH + kh_i) * kW + kw_i;
+									col.elem(row, patch_col) = input.elem(idx_chw(ci, ih, iw, H_in, W_in), n);
+								}
+							}
+						}
+					}
+				}
+			}
+
+			return col;
+		}
+
+		Matrix<D> flatten_weights_2d(const Matrix<D>& w) const {
+			const int K = C_in * kH * kW;
+			Matrix<D> w2d("conv_w2d", C_out, K);
+			for (int co = 0; co < C_out; ++co) {
+				for (int ci = 0; ci < C_in; ++ci) {
+					for (int kh_i = 0; kh_i < kH; ++kh_i) {
+						for (int kw_i = 0; kw_i < kW; ++kw_i) {
+							const int col = (ci * kH + kh_i) * kW + kw_i;
+							w2d.elem(co, col) = w.elem(idx_w_conv(co, ci, kh_i, kw_i, C_in, kH, kW), 0);
+						}
+					}
+				}
+			}
+			return w2d;
+		}
+
+		Matrix<D> flatten_upstream(const Matrix<D>& t) const {
+			const int P = H_out * W_out;
+			Matrix<D> t2d("conv_t2d", C_out, P * batchN);
+			for (int n = 0; n < batchN; ++n) {
+				for (int co = 0; co < C_out; ++co) {
+					for (int oh = 0; oh < H_out; ++oh) {
+						for (int ow = 0; ow < W_out; ++ow) {
+							const int patch_col = n * P + oh * W_out + ow;
+							t2d.elem(co, patch_col) = t.elem(idx_chw(co, oh, ow, H_out, W_out), n);
+						}
+					}
+				}
+			}
+			return t2d;
+		}
+
+		Matrix<D> unpack_output_add_bias(const Matrix<D>& y2d) const {
+			const int P = H_out * W_out;
+			Matrix<D> out("conv_out", C_out * P, batchN);
+			for (int n = 0; n < batchN; ++n) {
+				for (int co = 0; co < C_out; ++co) {
+					const float b = this->bias.elem(co, 0);
+					for (int oh = 0; oh < H_out; ++oh) {
+						for (int ow = 0; ow < W_out; ++ow) {
+							const int patch_col = n * P + oh * W_out + ow;
+							out.elem(idx_chw(co, oh, ow, H_out, W_out), n) = y2d.elem(co, patch_col) + b;
+						}
+					}
+				}
+			}
+			return out;
+		}
+
+		Matrix<D> col2im(const Matrix<D>& dx_col) const {
+			const int P = H_out * W_out;
+			Matrix<D> dx("conv_dx", C_in * H_in * W_in, batchN);
+			dx.zeros();
+
+			for (int n = 0; n < batchN; ++n) {
+				for (int oh = 0; oh < H_out; ++oh) {
+					for (int ow = 0; ow < W_out; ++ow) {
+						const int patch_col = n * P + oh * W_out + ow;
+						for (int ci = 0; ci < C_in; ++ci) {
+							for (int kh_i = 0; kh_i < kH; ++kh_i) {
+								for (int kw_i = 0; kw_i < kW; ++kw_i) {
+									const int ih = oh * stride_h - pad_h + kh_i;
+									const int iw = ow * stride_w - pad_w + kw_i;
+									if (ih < 0 || ih >= H_in || iw < 0 || iw >= W_in) continue;
+									const int row = (ci * kH + kh_i) * kW + kw_i;
+									dx.elem(idx_chw(ci, ih, iw, H_in, W_in), n) += dx_col.elem(row, patch_col);
+								}
+							}
+						}
+					}
+				}
+			}
+
+			return dx;
+		}
+
+		Matrix<D> pack_weight_grad(const Matrix<D>& dW2d) const {
+			Matrix<D> dW("conv_dW", C_out * C_in * kH * kW, 1);
+			for (int co = 0; co < C_out; ++co) {
+				for (int ci = 0; ci < C_in; ++ci) {
+					for (int kh_i = 0; kh_i < kH; ++kh_i) {
+						for (int kw_i = 0; kw_i < kW; ++kw_i) {
+							const int col = (ci * kH + kh_i) * kW + kw_i;
+							dW.elem(idx_w_conv(co, ci, kh_i, kw_i, C_in, kH, kW), 0) = dW2d.elem(co, col);
+						}
+					}
+				}
+			}
+			return dW;
+		}
+
+	public:
+		ConvLayer(int N, int C_in, int H_in, int W_in,
+		          int C_out, int kH, int kW,
+		          int pad = 0, int stride = 1, bool relu = true)
+			: Layer<D>(
+				  C_out * ((H_in + 2*pad - kH)/stride + 1) *
+				          ((W_in + 2*pad - kW)/stride + 1),
+				  1, N),
+			  C_in(C_in), H_in(H_in), W_in(W_in),
+			  C_out(C_out), kH(kH), kW(kW),
+			  pad_h(pad), pad_w(pad), stride_h(stride), stride_w(stride),
+			  H_out((H_in + 2*pad - kH)/stride + 1),
+			  W_out((W_in + 2*pad - kW)/stride + 1),
+			  batchN(N), use_relu(relu)
+		{
+			if (H_out <= 0 || W_out <= 0) {
+				LOG_ERROR("Invalid conv output shape: H_out={}, W_out={}", H_out, W_out);
+				ERROR_OUT;
+			}
+
+			this->weights = Matrix<D>::randn(C_out * C_in * kH * kW, 1) * 0.001f;
+			this->bias    = Matrix<D>::zeros(C_out, 1);
+			this->val     = Matrix<D>("conv_out", C_out * H_out * W_out, N);
+			this->adamW   = adam_state<D>(0.0001, C_out * C_in * kH * kW, 1);
+			this->adamb   = adam_state<D>(0.0001, C_out, 1);
+		}
+
+		void eval(const Matrix<D>& input) override {
+			const Matrix<D> col = make_im2col(input);
+			const Matrix<D> w2d = flatten_weights_2d(this->weights);
+			const Matrix<D> y2d = w2d * col;
+			this->val = unpack_output_add_bias(y2d);
+			if (use_relu) {
+				this->val = relu(Matrix<D>(this->val));
+			}
+		}
+
+		Matrix<D> grad(const Matrix<D>&) const override {
+			return Matrix<D>::ones(1, 1);
+		}
+
+		Matrix<D> backward(const Matrix<D>& input, Matrix<D>&& upstream_grad) override {
+			auto t = use_relu
+				? hadmd(d_relu(Matrix<D>(this->val)), std::move(upstream_grad))
+				: std::move(upstream_grad);
+
+			const Matrix<D> col = make_im2col(input);
+			const Matrix<D> w2d = flatten_weights_2d(this->weights);
+			const Matrix<D> t2d = flatten_upstream(t);
+
+			const Matrix<D> dW2d = t2d * col.T();
+			const Matrix<D> dx_col = w2d.T() * t2d;
+			Matrix<D> db = sum(t2d, 1);
+			Matrix<D> dx = col2im(dx_col);
+
+			if (this->need_update) {
+				this->update(pack_weight_grad(dW2d), std::move(db));
+			}
+
+			return dx;
+		}
+	};
+
+	class convtransLayer : public Layer<float> {
+		using D = float;
+
+		int C_in, H_in, W_in;
+		int C_out, kH, kW;
+		int pad_h, pad_w, stride_h, stride_w;
+		int H_out, W_out;
+		int batchN;
+		bool use_relu = true;
+
+		static inline size_t idx_chw(int c, int h, int w, int H, int W) {
+			return (size_t)c * (size_t)H * (size_t)W + (size_t)h * (size_t)W + (size_t)w;
+		}
+
+		static inline size_t idx_w_deconv(int ci, int co, int kh, int kw, int Cout, int kH, int kW) {
+			return ((size_t)ci * (size_t)Cout * (size_t)kH * (size_t)kW)
+				 + ((size_t)co * (size_t)kH * (size_t)kW)
+				 + ((size_t)kh * (size_t)kW)
+				 + (size_t)kw;
+		}
+
+		Matrix<D> pack_input_2d(const Matrix<D>& input) const {
+			const int P_in = H_in * W_in;
+			Matrix<D> x2d("deconv_x2d", C_in, batchN * P_in);
+			for (int n = 0; n < batchN; ++n) {
+				for (int ci = 0; ci < C_in; ++ci) {
+					for (int ih = 0; ih < H_in; ++ih) {
+						for (int iw = 0; iw < W_in; ++iw) {
+							const int col = n * P_in + ih * W_in + iw;
+							x2d.elem(ci, col) = input.elem(idx_chw(ci, ih, iw, H_in, W_in), n);
+						}
+					}
+				}
+			}
+			return x2d;
+		}
+
+		Matrix<D> flatten_weights_2d(const Matrix<D>& w) const {
+			Matrix<D> w2d("deconv_w2d", C_out * kH * kW, C_in);
+			for (int ci = 0; ci < C_in; ++ci) {
+				for (int co = 0; co < C_out; ++co) {
+					for (int kh_i = 0; kh_i < kH; ++kh_i) {
+						for (int kw_i = 0; kw_i < kW; ++kw_i) {
+							const int row = (co * kH + kh_i) * kW + kw_i;
+							w2d.elem(row, ci) = w.elem(idx_w_deconv(ci, co, kh_i, kw_i, C_out, kH, kW), 0);
+						}
+					}
+				}
+			}
+			return w2d;
+		}
+
+		Matrix<D> unpack_forward_from_patches(const Matrix<D>& patches) const {
+			Matrix<D> out("convtrans_out", C_out * H_out * W_out, batchN);
+			out.zeros();
+
+			for (int n = 0; n < batchN; ++n) {
+				for (int co = 0; co < C_out; ++co) {
+					const float b = this->bias.elem(co, 0);
+					for (int oh = 0; oh < H_out; ++oh) {
+						for (int ow = 0; ow < W_out; ++ow) {
+							out.elem(idx_chw(co, oh, ow, H_out, W_out), n) = b;
+						}
+					}
+				}
+			}
+
+			for (int n = 0; n < batchN; ++n) {
+				for (int ih = 0; ih < H_in; ++ih) {
+					for (int iw = 0; iw < W_in; ++iw) {
+						const int col = n * H_in * W_in + ih * W_in + iw;
+						for (int co = 0; co < C_out; ++co) {
+							for (int kh_i = 0; kh_i < kH; ++kh_i) {
+								for (int kw_i = 0; kw_i < kW; ++kw_i) {
+									const int oh = ih * stride_h - pad_h + kh_i;
+									const int ow = iw * stride_w - pad_w + kw_i;
+									if (oh < 0 || oh >= H_out || ow < 0 || ow >= W_out) continue;
+									const int row = (co * kH + kh_i) * kW + kw_i;
+									out.elem(idx_chw(co, oh, ow, H_out, W_out), n) += patches.elem(row, col);
+								}
+							}
+						}
+					}
+				}
+			}
+
+			return out;
+		}
+
+		Matrix<D> build_upstream_patches(const Matrix<D>& t) const {
+			const int P_in = H_in * W_in;
+			Matrix<D> tp("deconv_tp", C_out * kH * kW, batchN * P_in);
+			tp.zeros();
+
+			for (int n = 0; n < batchN; ++n) {
+				for (int ih = 0; ih < H_in; ++ih) {
+					for (int iw = 0; iw < W_in; ++iw) {
+						const int col = n * P_in + ih * W_in + iw;
+						for (int co = 0; co < C_out; ++co) {
+							for (int kh_i = 0; kh_i < kH; ++kh_i) {
+								for (int kw_i = 0; kw_i < kW; ++kw_i) {
+									const int oh = ih * stride_h - pad_h + kh_i;
+									const int ow = iw * stride_w - pad_w + kw_i;
+									if (oh < 0 || oh >= H_out || ow < 0 || ow >= W_out) continue;
+									const int row = (co * kH + kh_i) * kW + kw_i;
+									tp.elem(row, col) = t.elem(idx_chw(co, oh, ow, H_out, W_out), n);
+								}
+							}
+						}
+					}
+				}
+			}
+
+			return tp;
+		}
+
+		Matrix<D> unpack_dx_from_2d(const Matrix<D>& dx2d) const {
+			const int P_in = H_in * W_in;
+			Matrix<D> dx("convtrans_dx", C_in * H_in * W_in, batchN);
+			for (int n = 0; n < batchN; ++n) {
+				for (int ci = 0; ci < C_in; ++ci) {
+					for (int ih = 0; ih < H_in; ++ih) {
+						for (int iw = 0; iw < W_in; ++iw) {
+							const int col = n * P_in + ih * W_in + iw;
+							dx.elem(idx_chw(ci, ih, iw, H_in, W_in), n) = dx2d.elem(ci, col);
+						}
+					}
+				}
+			}
+			return dx;
+		}
+
+		Matrix<D> pack_weight_grad(const Matrix<D>& dW2d) const {
+			Matrix<D> dW("convtrans_dW", C_in * C_out * kH * kW, 1);
+			for (int ci = 0; ci < C_in; ++ci) {
+				for (int co = 0; co < C_out; ++co) {
+					for (int kh_i = 0; kh_i < kH; ++kh_i) {
+						for (int kw_i = 0; kw_i < kW; ++kw_i) {
+							const int row = (co * kH + kh_i) * kW + kw_i;
+							dW.elem(idx_w_deconv(ci, co, kh_i, kw_i, C_out, kH, kW), 0) = dW2d.elem(row, ci);
+						}
+					}
+				}
+			}
+			return dW;
+		}
+
+	public:
+		convtransLayer(int N, int C_in, int H_in, int W_in,
+		               int C_out, int kH, int kW,
+		               int pad = 0, int stride = 1, bool relu = true)
+			: Layer<D>(
+				  C_out * (((H_in - 1) * stride - 2 * pad + kH)) *
+				          (((W_in - 1) * stride - 2 * pad + kW)),
+				  1, N),
+			  C_in(C_in), H_in(H_in), W_in(W_in),
+			  C_out(C_out), kH(kH), kW(kW),
+			  pad_h(pad), pad_w(pad), stride_h(stride), stride_w(stride),
+			  H_out((H_in - 1) * stride - 2 * pad + kH),
+			  W_out((W_in - 1) * stride - 2 * pad + kW),
+			  batchN(N), use_relu(relu)
+		{
+			if (H_out <= 0 || W_out <= 0) {
+				LOG_ERROR("Invalid transposed-conv output shape: H_out={}, W_out={}", H_out, W_out);
+				ERROR_OUT;
+			}
+
+			this->weights = Matrix<D>::randn(C_in * C_out * kH * kW, 1) * 0.001f;
+			this->bias    = Matrix<D>::zeros(C_out, 1);
+			this->val     = Matrix<D>("convtrans_out", C_out * H_out * W_out, N);
+			this->adamW   = adam_state<D>(0.0001, C_in * C_out * kH * kW, 1);
+			this->adamb   = adam_state<D>(0.0001, C_out, 1);
+		}
+
+		void eval(const Matrix<D>& input) override {
+			const Matrix<D> x2d = pack_input_2d(input);
+			const Matrix<D> w2d = flatten_weights_2d(this->weights);
+			const Matrix<D> patches = w2d * x2d;
+			this->val = unpack_forward_from_patches(patches);
+			if (use_relu) {
+				this->val = relu(Matrix<D>(this->val));
+			}
+		}
+
+		Matrix<D> grad(const Matrix<D>&) const override {
+			return Matrix<D>::ones(1, 1);
+		}
+
+		Matrix<D> backward(const Matrix<D>& input, Matrix<D>&& upstream_grad) override {
+			auto t = use_relu
+				? hadmd(d_relu(Matrix<D>(this->val)), std::move(upstream_grad))
+				: std::move(upstream_grad);
+
+			const Matrix<D> x2d = pack_input_2d(input);
+			const Matrix<D> w2d = flatten_weights_2d(this->weights);
+			const Matrix<D> tp = build_upstream_patches(t);
+
+			Matrix<D> db("convtrans_db", C_out, 1);
+			db.zeros();
+			for (int n = 0; n < batchN; ++n) {
+				for (int co = 0; co < C_out; ++co) {
+					for (int oh = 0; oh < H_out; ++oh) {
+						for (int ow = 0; ow < W_out; ++ow) {
+							db.elem(co, 0) += t.elem(idx_chw(co, oh, ow, H_out, W_out), n);
+						}
+					}
+				}
+			}
+
+			const Matrix<D> dW2d = tp * x2d.T();
+			const Matrix<D> dx2d = w2d.T() * tp;
+			Matrix<D> dx = unpack_dx_from_2d(dx2d);
+
+			if (this->need_update) {
+				this->update(pack_weight_grad(dW2d), std::move(db));
+			}
+
+			return dx;
+		}
+	};
+
+	using ConvTransLayer = convtransLayer;
+#endif // !CUDA && !APPLE_SILICON
 
 }
 

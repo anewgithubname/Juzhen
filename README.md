@@ -3,276 +3,160 @@
 ![GitHub](https://img.shields.io/github/license/anewgithubname/Juzhen?style=for-the-badge)
 ![GitHub last commit](https://img.shields.io/github/last-commit/anewgithubname/Juzhen?style=for-the-badge)
 
-Juzhen is a set of C++ APIs for matrix operations. It provides a higher level interface for lower-level numerical calculation software like [CBLAS](http://www.netlib.org/blas/) and [CUDA](https://en.wikipedia.org/wiki/CUDA). It supports Neural Net API similar to the ones used in PyTorch or Tensorflow. 
+Juzhen is a set of C++ APIs for matrix operations. It provides a higher-level interface for lower-level numerical calculation software like [CBLAS](http://www.netlib.org/blas/) and [CUDA](https://en.wikipedia.org/wiki/CUDA). It supports a Neural Net API similar to the ones used in PyTorch or TensorFlow, including convolutional layers backed by cuDNN and Metal on Apple Silicon.
 
-This API is developed under C++17 and CUDA 11.8. 
+Developed under C++20. Supports NVIDIA CUDA 12.x (with cuDNN) and Apple Silicon (Metal).
 
 ## Example
-You can perform matrix operations like this:
+
+Matrix operations on CPU:
 ```c++
-#include <iostream> 
-#include "cpp/juzhen.hpp"
-using namespace std;
-
-int compute(){ 
-    // declare matrices like you would in MATLAB or Numpy.
-    Matrix<float> A = {"A", {{1,2,3},{4,5,6}}};
-    cout << A << endl;
-    Matrix<float> B = {"B", {{.1,.2},{.3,.4},{.5,.6}}};
-    cout << B << endl << endl;
-
-    //compute with matrices as if you are using MATLAB.
-    cout << log(exp(A*B)+1.0f)/5.0f << endl;
-
-    return 0;
-}
-```
-Then compile: 
-```bash
-mkdir bin
-clang++ -x c++ -std=c++20 -DCPU_ONLY -DLOGGING_OFF -O3 ./cpp/launcher.cu ./helloworld.cu -o bin/helloworld.out -lopenblas
-bin/helloworld.out
-```
-
-or on GPU:
-```c++
-#include <iostream> 
+#include <iostream>
 #include "cpp/juzhen.hpp"
 using namespace std;
 
 int compute(){
-    //matrices on GPU
-    Matrix<CUDAfloat> A(Matrix<float>("A",{{1,2,3},{4,5,6}}));
-    cout << A << endl;
-    Matrix<CUDAfloat> B(Matrix<float>("B",{{.1,.2},{.3,.4},{.5,.6}}));
-    cout << B << endl << endl;
+    Matrix<float> A = {"A", {{1,2,3},{4,5,6}}};
+    Matrix<float> B = {"B", {{.1,.2},{.3,.4},{.5,.6}}};
+    cout << log(exp(A*B)+1.0f)/5.0f << endl;
+    return 0;
+}
+```
 
-    //only when you try to print, matrices are downloaded from the GPU.
+The same code on GPU — just swap `float` for `CUDAfloat`:
+```c++
+int compute(){
+    Matrix<CUDAfloat> A(Matrix<float>("A",{{1,2,3},{4,5,6}}));
+    Matrix<CUDAfloat> B(Matrix<float>("B",{{.1,.2},{.3,.4},{.5,.6}}));
     cout << (log(exp(A*B)+1.0f)/5.0f) << endl;
     return 0;
 }
 ```
-Then compile: 
-```bash
-mkdir bin
-nvcc -std=c++20 -DLOGGING_OFF -O3 ./cpp/launcher.cu ./cpp/cumatrix.cu ./cpp/cukernels.cu ./helloworld.cu -o bin/helloworld.out -lcublas -lcurand
-bin/helloworld.out
-```
-They both prints out:
-```
-A 2 by 3
-1 2 3 
-4 5 6 
-B 3 by 2
-0.1 0.2 
-0.3 0.4 
-0.5 0.6 
 
+Both print:
+```
 logM 2 by 2
-0.461017 0.571807 
-0.981484 1.28033 
-```
-You can verify the result using MATLAB:
-```matlab
->> A = [1,2,3;4,5,6];
->> B = [.1,.2;.3,.4;.5,.6];
->> (log(exp(A*B)+1.0)./5.0)
-
-ans =
-
-    0.4610    0.5718
-    0.9815    1.2803
-
->> 
+0.461017 0.571807
+0.981484 1.28033
 ```
 
-Juzhen also supports matrix slicing: 
-```c++
-#include <iostream> 
-using namespace std;
-#include "cpp/juzhen.hpp"
+## Prerequisites
 
-int compute() {
-    Matrix<float> A = { "A", {{1,2,3},{4,5,6}} };
-    cout << A.columns(0, 2).inv() << endl;
-    
-    return 0;
-}
-```
-The code above is the same as the following MATLAB code: 
-```matlab
->> A = [1,2,3;4,5,6];
->> inv(A(:,1:2))
+Install CBLAS and LAPACK:
+- **Ubuntu/Debian**: `sudo apt install libopenblas-dev liblapack-dev libboost-dev`
+- **macOS**: BLAS/LAPACK ship with Xcode (Accelerate framework).
+- **Windows**: download precompiled binaries from [OpenBLAS](https://github.com/xianyi/OpenBLAS/releases).
 
-ans =
+For CUDA builds you also need:
+- [CUDA Toolkit](https://developer.nvidia.com/cuda-toolkit) (12.x recommended)
+- [cuDNN](https://developer.nvidia.com/cudnn) (required for convolutional layers)
 
-   -1.6667    0.6667
-    1.3333   -0.3333
-```
-You can also use a higher level Neural Net API to write Neural Net applications: 
-```c++
-//helloworldnn.cu
-#include "ml/layer.hpp"
+## Building with CMake
 
-using namespace std;
-using namespace Juzhen;
+Use separate build directories per backend.
 
-#define FLOAT float
-inline Matrix<float> randn(int m, int n)
-{
-    return Matrix<float>::randn(m, n);
-}
-inline Matrix<float> ones(int m, int n) { return Matrix<float>::ones(m, n); }
-#define MatrixI Matrix<int>
+### Apple Silicon (Metal) build
 
-int compute()
-{
-
-    // problem set up
-    const int n = 5000, batchsize = 50, numbatches = n / batchsize;
-
-    // regression dataset generation
-    auto X = randn(10, n), beta = randn(10, 1);
-    auto Y = beta.T() * X + randn(1, n);
-
-    auto XT = randn(10, n);
-    auto YT = beta.T() * XT + randn(1, n);
-
-    // define layers
-    Layer<float> L0(16, 10, batchsize), L1(4, 16, batchsize);
-    LinearLayer<float> L2(1, 4, batchsize);
-    // least sqaure loss
-    LossLayer<float> L3t(n, YT);
-
-    // nns are linked lists containing layers
-    list<Layer<float> *> trainnn({&L2, &L1, &L0}), testnn({&L3t, &L2, &L1, &L0});
-
-    // sgd
-    int iter = 0;
-    while (iter < 10000)
-    {
-        int batch_id = (iter % numbatches);
-
-        // obtaining batches
-        auto X_i = X.columns(batchsize * batch_id, batchsize * (batch_id + 1));
-        auto Y_i = Y.columns(batchsize * batch_id, batchsize * (batch_id + 1));
-
-        // forward-backward pass
-        forward(trainnn, X_i);
-        LossLayer<float> L3(batchsize, Y_i);
-        trainnn.push_front(&L3);
-        backprop(trainnn, X_i);
-        trainnn.pop_front();
-
-        // print progress
-        if (iter % 1000 == 0)
-        {
-            cout << "testing loss: " << Juzhen::forward(testnn, XT).elem(0, 0) << endl;
-        }
-
-        iter++;
-    }
-    return 0;
-}
-```
-Then compile: 
 ```bash
-mkdir bin
-clang++ -x c++ -std=c++20 -DCPU_ONLY -DLOGGING_OFF -O3 ./cpp/launcher.cu ./helloworldnn.cu -o bin/helloworldnn.out -lopenblas
-bin/helloworldnn.out
+cmake -S . -B build -DAPPLE_SILICON=ON -DNVIDIA_CUDA=OFF
+cmake --build build -j
 ```
 
-## Should I use Juzhen?
-NO(*). MATLAB or NumPy are popular among data scientists for a reason. 
-If you are interested in numerical C++ coding, I recommend [Eigen](https://en.wikipedia.org/wiki/Eigen_(C%2B%2B_library)) or [Armadillo](https://en.wikipedia.org/wiki/Armadillo_(C%2B%2B_library)). 
+### CPU-only build
 
-This software is written with educational purposes in mind. If you still want to use it, please read on. 
-
-## Get Started
-1. First, install CBLAS and LAPACK and set environment varibles. 
-    - In Ubuntu,  
-        ```
-        sudo apt install libopenblas-dev liblapack-dev
-        ```
-
-    - In Windows, you can download precompiled binaries from [OpenBLAS](https://github.com/xianyi/OpenBLAS/releases/tag/v0.3.19).
-
-    - In MacOS, BLAS and LAPACK are parts of [Acclerate Framework](https://developer.apple.com/documentation/accelerate), comes with XCode. 
-
-2. To use Juzhen without GPU support, copy the "cpp" folder to your C++ project directory and include the header file ```juzhen.hpp```. 
-
-3. Suppose you wrote your code in ```main.cu```. Compile it using
-    ```
-    clang++ -x c++ -I cpp/ -DLOGGING_OFF -D CPU_ONLY -O3 cpp/launcher.cu main.cu -o bin/main.out -llapack -lopenblas 
-    ```
-    Do not forget to link lapack and BLAS! 
-
-4. If you want to use GPU APIs, you need to install [CUDA](https://developer.nvidia.com/cuda-toolkit) and compile your code using [```nvcc```](https://en.wikipedia.org/wiki/Nvidia_CUDA_Compiler):
-    ```
-    nvcc -I cpp/ -O3 -DLOGGING_OFF main.cu cpp/cumatrix.cu cpp/cukernels.cu cpp/launcher.cu -o bin/main.out -lcublas -lcurand -llapack -lopenblas --extended-labmda 
-    ```
-    Note that we dropped ```-D CPU_ONLY``` flag. 
-
-## Examples Code:
-1. [helloworld-cpu](examples/helloworld.cu)
-2. [Regression using neural net APIs](examples/helloworld_nn.cu) (on CPU or GPU).
-3. [Binary Logistic Regression using a neural network](examples/demo_classification.cu).
-4. [KNN classification on MNIST Dataset](examples/knn.cu).
-5. [10 Class Logistic Regression using a neural network](examples/demo_mnist.cu).
-6. [Rectified Flow to transform two Gaussians](examples/demo_rectified.cu).
-
-``` bash
-# to build all examples, using CMAKE
-mkdir build 
-cd build && cmake ..
-cmake --build . --config=Release
-
-# to run
-./helloworld
+```bash
+cmake -S . -B build_cpu -DAPPLE_SILICON=OFF -DNVIDIA_CUDA=OFF
+cmake --build build_cpu -j
 ```
 
-<!-- ## Compile and Run Examples:
-1. Helloworld CPU
-    ```
-    make helloworld
-    bin/helloworld.out
-    ```
-2. Helloworld GPU
-    ```
-    make helloworld-gpu
-    bin/helloworld-gpu.out
-    ```
-3. Simple Logistic Regression
-    ```
-    make logi-bin
-    bin/logi-bin.out
-    ```
-4. MNIST CPU
-    ```
-    make logi-cpu
-    bin/logi-cpu.out
-    ```
-5. MNIST GPU
-    ```
-    make logi-gpu
-    bin/logi-gpu.out
-    ```
-6. Neural Net API CPU
-    ```
-    make helloworld-nn
-    bin/helloworld-nn.out
-    ```
-7. Neural Net API GPU
-    ```
-    make helloworld-nn-gpu
-    bin/helloworld-nn-gpu.out
-    ``` -->
-    
+### NVIDIA CUDA build
+
+```bash
+cmake -S . -B build_cuda -DNVIDIA_CUDA=ON
+cmake --build build_cuda -j
+```
+
+This enables CUDA and automatically searches for cuDNN (in standard paths and the active conda environment). Convolutional layers (`ConvLayer`, `ConvTransLayer`) require cuDNN.
+
+### Running examples
+
+```bash
+# basic
+./build/helloworld
+
+# MNIST CNN demos
+./build_cpu/demo_cnn_mnist_cpu
+./build/demo_cnn_mnist_mps
+./build_cuda/demo_cnn_mnist_cudnn
+
+# rectified flow on CIFAR-10
+./build/demo_cnn_rectified
+```
+
+### Running tests
+
+```bash
+# after building a backend, run tests in that build directory
+ctest --test-dir build --output-on-failure
+```
+
+Environment variables for `demo_cnn_rectified`:
+
+| Variable | Default | Description |
+|---|---|---|
+| `RF_EPOCHS` | 10 | Number of training epochs |
+| `RF_BATCH_SIZE` | 128 | Mini-batch size |
+| `RF_LR` | 2e-4 | Adam learning rate |
+| `RF_EULER_STEPS` | 100 | ODE sampling steps |
+| `RF_FID_SAMPLES` | 1000 | Images dumped per epoch for FID |
+| `RF_SEED` | 42 | Random seed |
+
+Examples:
+```bash
+RF_EPOCHS=200 RF_BATCH_SIZE=128 ./build_cuda/demo_cnn_rectified
+RF_EPOCHS=10 RF_BATCH_SIZE=128 ./build/demo_cnn_rectified
+```
+
+Environment variables for MNIST CNN demos (`demo_cnn_mnist_cpu`, `demo_cnn_mnist_mps`, `demo_cnn_mnist_cudnn`):
+
+| Variable | Default | Description |
+|---|---|---|
+| `CNN_MNIST_EPOCHS` | 10 | Number of training epochs |
+| `CNN_MNIST_SEED` | 43 | Random seed |
+| `CNN_MNIST_LOSS_PATH` | backend-specific CSV in `res/` | Output loss CSV path |
+
+Example:
+```bash
+CNN_MNIST_EPOCHS=10 CNN_MNIST_SEED=43 ./build/demo_cnn_mnist_mps
+```
+
+## Examples
+
+| # | Example | Description |
+|---|---------|-------------|
+| 1 | [helloworld.cu](examples/helloworld.cu) | Basic matrix operations |
+| 2 | [helloworld_nn.cu](examples/helloworld_nn.cu) | Regression with Neural Net API |
+| 3 | [demo.cu](examples/demo.cu) | Mixed matrix operation demo |
+| 4 | [demo_gemm.cu](examples/demo_gemm.cu) | GEMM benchmark/demo |
+| 5 | [demo_classification.cu](examples/demo_classification.cu) | Binary logistic regression |
+| 6 | [knn.cu](examples/knn.cu) | KNN classification on MNIST |
+| 7 | [demo_mnist.cu](examples/demo_mnist.cu) | 10-class logistic regression on MNIST |
+| 8 | [pagerank.cu](examples/pagerank.cu) | PageRank demo |
+| 9 | [demo_rectified.cu](examples/demo_rectified.cu) | Rectified flow (two Gaussians) |
+| 10 | [demo_rectified_infer.cu](examples/demo_rectified_infer.cu) | Rectified flow inference demo |
+| 11 | [demo_cnn_mnist_cpu.cpp](examples/demo_cnn_mnist_cpu.cpp) | CNN on MNIST (CPU) |
+| 12 | [demo_cnn_mnist_mps.cu](examples/demo_cnn_mnist_mps.cu) | CNN on MNIST (Apple Silicon / Metal) |
+| 13 | [demo_cnn_mnist_cudnn.cu](examples/demo_cnn_mnist_cudnn.cu) | CNN on MNIST (CUDA + cuDNN) |
+| 14 | [demo_cnn_rectified.cu](examples/demo_cnn_rectified.cu) | Rectified flow on CIFAR-10 (conv UNet) |
+| 15 | [demo_gui.cu](examples/demo_gui.cu) | GUI demo |
+| 16 | [compute_fid.py](examples/compute_fid.py) | Compute FID score from generated image folders |
+
 ## Supported Platforms
-- Linux (CPU/GPU)
-- MacOS (CPU)
-- Windows (CPU/GPU*), you will need to install Visual Studio 2019 to compile the code. 
-## ```std::move``` Sementics
+- Linux (CPU / NVIDIA GPU)
+- macOS (CPU / Apple Silicon via Metal)
+- Windows (CPU / NVIDIA GPU — requires Visual Studio 2019+)
+
+## `std::move` Semantics
 Consider the following examples:
 1. Copy. 
     ```c++

@@ -248,6 +248,79 @@ int test5(){
 
 }
 
+int test6() {
+    int ret = 0;
+
+    // Shape validation: hstack requires matching row counts.
+    try {
+        M A = M::ones(2, 2);
+        M B = M::ones(3, 1);
+        auto C = hstack<float>({A, B});
+        (void)C;
+        LOG_ERROR("hstack mismatched rows did not throw");
+        ret += 1;
+    } catch (const std::invalid_argument&) {
+    }
+
+    // Shape validation: vstack requires matching column counts.
+    try {
+        M A = M::ones(2, 2);
+        M B = M::ones(1, 3);
+        auto C = vstack<float>({A, B});
+        (void)C;
+        LOG_ERROR("vstack mismatched cols did not throw");
+        ret += 1;
+    } catch (const std::invalid_argument&) {
+    }
+
+    // Empty-input validation.
+    try {
+        std::vector<MatrixView<float>> empty;
+        auto C = hstack<float>(empty);
+        (void)C;
+        LOG_ERROR("hstack empty input did not throw");
+        ret += 1;
+    } catch (const std::invalid_argument&) {
+    }
+
+    try {
+        std::vector<MatrixView<float>> empty;
+        auto C = vstack<float>(empty);
+        (void)C;
+        LOG_ERROR("vstack empty input did not throw");
+        ret += 1;
+    } catch (const std::invalid_argument&) {
+    }
+
+#ifdef CUDA
+    // Regression: CUDA vstack should return materialized (non-transposed) output
+    // and preserve values when inputs/views are transposed.
+    {
+        M Ah = {"Ah", {{1, 2, 3}, {4, 5, 6}}};
+        M Bh = {"Bh", {{7, 8, 9}, {10, 11, 12}}};
+        CM A(Ah);
+        CM B(Bh);
+
+        auto C = vstack(std::vector<MatrixView<CUDAfloat>>{A.T(), B.T()});
+        M Cref = vstack<float>(std::vector<MatrixView<float>>{Ah.T(), Bh.T()});
+
+        if (C.get_transpose() != 0) {
+            LOG_ERROR("CUDA vstack output keeps transpose flag set");
+            ret += 1;
+        }
+        if ((C.to_host() - Cref).norm() > 1e-5f) {
+            LOG_ERROR("CUDA vstack transpose regression mismatch");
+            ret += 1;
+        }
+    }
+#endif
+
+    if (ret == 0) {
+        LOG_INFO("stack validation/regression test passed!");
+    }
+    return ret;
+}
+
 int compute()
 {
     // spdlog::set_level(spdlog::level::debug);
@@ -270,6 +343,9 @@ int compute()
 #endif
 
     ret += test5();
+    std::cout << std::endl;
+
+    ret += test6();
     std::cout << std::endl;
 
     if (ret == 0)
