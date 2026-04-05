@@ -264,9 +264,9 @@ Matrix<MPSfloat> Matrix<MPSfloat>::rand(size_t m, size_t n)
 }
 Matrix<MPSfloat> Matrix<MPSfloat>::randn(size_t m, size_t n)
 {
-    Matrix<MPSfloat> M("randn", m, n);
-    mpsRandn((float*) M.elements.get(), m * n);
-    return M;
+    // MPS normal RNG can occasionally emit non-finite values under stress.
+    // Use CPU normal RNG and upload for stable behavior.
+    return Matrix<MPSfloat>(Matrix<float>::randn(m, n));
 }
 
 Matrix<MPSfloat> Matrix<MPSfloat>::zeros(size_t m, size_t n)

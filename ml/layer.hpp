@@ -1256,141 +1256,40 @@ namespace Juzhen
 		int batchN;
 		bool use_relu = true;
 
-		static inline size_t idx_chw(int c, int h, int w, int H, int W) {
-			return (size_t)c * (size_t)H * (size_t)W + (size_t)h * (size_t)W + (size_t)w;
-		}
-
-		static inline size_t idx_w_deconv(int ci, int co, int kh, int kw, int Cout, int kH, int kW) {
-			return ((size_t)ci * (size_t)Cout * (size_t)kH * (size_t)kW)
-				 + ((size_t)co * (size_t)kH * (size_t)kW)
-				 + ((size_t)kh * (size_t)kW)
-				 + (size_t)kw;
-		}
-
-		Matrix<D> pack_input_2d(const Matrix<D>& input) const {
-			const int P_in = H_in * W_in;
-			Matrix<D> x2d("deconv_x2d", C_in, batchN * P_in);
-			for (int n = 0; n < batchN; ++n) {
-				for (int ci = 0; ci < C_in; ++ci) {
-					for (int ih = 0; ih < H_in; ++ih) {
-						for (int iw = 0; iw < W_in; ++iw) {
-							const int col = n * P_in + ih * W_in + iw;
-							x2d.elem(ci, col) = input.elem(idx_chw(ci, ih, iw, H_in, W_in), n);
-						}
-					}
-				}
-			}
-			return x2d;
-		}
-
-		Matrix<D> flatten_weights_2d(const Matrix<D>& w) const {
-			Matrix<D> w2d("deconv_w2d", C_out * kH * kW, C_in);
+		Matrix<D> flatten_weights_2d() const {
+			const int rows = C_out * kH * kW;
+			Matrix<D> w2d("deconv_w2d", rows, C_in);
 			for (int ci = 0; ci < C_in; ++ci) {
-				for (int co = 0; co < C_out; ++co) {
-					for (int kh_i = 0; kh_i < kH; ++kh_i) {
-						for (int kw_i = 0; kw_i < kW; ++kw_i) {
-							const int row = (co * kH + kh_i) * kW + kw_i;
-							w2d.elem(row, ci) = w.elem(idx_w_deconv(ci, co, kh_i, kw_i, C_out, kH, kW), 0);
-						}
-					}
-				}
+				mpsCopyMatrixBlock(ptr(this->weights), ptr(w2d),
+					C_in * rows, 1, false,
+					ci * rows, 0,
+					rows, 1,
+					rows, C_in, false,
+					0, ci);
 			}
 			return w2d;
 		}
 
-		Matrix<D> unpack_forward_from_patches(const Matrix<D>& patches) const {
-			Matrix<D> out("convtrans_out", C_out * H_out * W_out, batchN);
-			out.zeros();
-
-			for (int n = 0; n < batchN; ++n) {
-				for (int co = 0; co < C_out; ++co) {
-					const float b = this->bias.elem(co, 0);
-					for (int oh = 0; oh < H_out; ++oh) {
-						for (int ow = 0; ow < W_out; ++ow) {
-							out.elem(idx_chw(co, oh, ow, H_out, W_out), n) = b;
-						}
-					}
-				}
-			}
-
-			for (int n = 0; n < batchN; ++n) {
-				for (int ih = 0; ih < H_in; ++ih) {
-					for (int iw = 0; iw < W_in; ++iw) {
-						const int col = n * H_in * W_in + ih * W_in + iw;
-						for (int co = 0; co < C_out; ++co) {
-							for (int kh_i = 0; kh_i < kH; ++kh_i) {
-								for (int kw_i = 0; kw_i < kW; ++kw_i) {
-									const int oh = ih * stride_h - pad_h + kh_i;
-									const int ow = iw * stride_w - pad_w + kw_i;
-									if (oh < 0 || oh >= H_out || ow < 0 || ow >= W_out) continue;
-									const int row = (co * kH + kh_i) * kW + kw_i;
-									out.elem(idx_chw(co, oh, ow, H_out, W_out), n) += patches.elem(row, col);
-								}
-							}
-						}
-					}
-				}
-			}
-
-			return out;
-		}
-
-		Matrix<D> build_upstream_patches(const Matrix<D>& t) const {
-			const int P_in = H_in * W_in;
-			Matrix<D> tp("deconv_tp", C_out * kH * kW, batchN * P_in);
-			tp.zeros();
-
-			for (int n = 0; n < batchN; ++n) {
-				for (int ih = 0; ih < H_in; ++ih) {
-					for (int iw = 0; iw < W_in; ++iw) {
-						const int col = n * P_in + ih * W_in + iw;
-						for (int co = 0; co < C_out; ++co) {
-							for (int kh_i = 0; kh_i < kH; ++kh_i) {
-								for (int kw_i = 0; kw_i < kW; ++kw_i) {
-									const int oh = ih * stride_h - pad_h + kh_i;
-									const int ow = iw * stride_w - pad_w + kw_i;
-									if (oh < 0 || oh >= H_out || ow < 0 || ow >= W_out) continue;
-									const int row = (co * kH + kh_i) * kW + kw_i;
-									tp.elem(row, col) = t.elem(idx_chw(co, oh, ow, H_out, W_out), n);
-								}
-							}
-						}
-					}
-				}
-			}
-
-			return tp;
-		}
-
-		Matrix<D> unpack_dx_from_2d(const Matrix<D>& dx2d) const {
-			const int P_in = H_in * W_in;
-			Matrix<D> dx("convtrans_dx", C_in * H_in * W_in, batchN);
-			for (int n = 0; n < batchN; ++n) {
-				for (int ci = 0; ci < C_in; ++ci) {
-					for (int ih = 0; ih < H_in; ++ih) {
-						for (int iw = 0; iw < W_in; ++iw) {
-							const int col = n * P_in + ih * W_in + iw;
-							dx.elem(idx_chw(ci, ih, iw, H_in, W_in), n) = dx2d.elem(ci, col);
-						}
-					}
-				}
-			}
-			return dx;
-		}
-
 		Matrix<D> pack_weight_grad(const Matrix<D>& dW2d) const {
-			Matrix<D> dW("convtrans_dW", C_in * C_out * kH * kW, 1);
+			const int rows = C_out * kH * kW;
+			Matrix<D> dW("convtrans_dW", C_in * rows, 1);
 			for (int ci = 0; ci < C_in; ++ci) {
-				for (int co = 0; co < C_out; ++co) {
-					for (int kh_i = 0; kh_i < kH; ++kh_i) {
-						for (int kw_i = 0; kw_i < kW; ++kw_i) {
-							const int row = (co * kH + kh_i) * kW + kw_i;
-							dW.elem(idx_w_deconv(ci, co, kh_i, kw_i, C_out, kH, kW), 0) = dW2d.elem(row, ci);
-						}
-					}
-				}
+				mpsCopyMatrixBlock(ptr(dW2d), ptr(dW),
+					rows, C_in, false,
+					0, ci,
+					rows, 1,
+					C_in * rows, 1, false,
+					ci * rows, 0);
 			}
 			return dW;
+		}
+
+		Matrix<D> unpack_2d_feature_map(const Matrix<D>& packed, int C, int H, int W) const {
+			Matrix<D> out("deconv_unpacked", C * H * W, batchN);
+			Matrix<D> zero_bias("deconv_zero_bias", C, 1);
+			zero_bias.zeros();
+			mpsConv2dOutputAddBias(ptr(packed), ptr(zero_bias), ptr(out), batchN, C, H, W);
+			return out;
 		}
 
 		static float* ptr(const Matrix<D>& m) {
@@ -1425,59 +1324,23 @@ namespace Juzhen
 		}
 
 		void eval(const Matrix<D>& input) override {
-			auto wh = this->weights.to_host();
-			auto bh = this->bias.to_host();
-
 			const int P_in = H_in * W_in;
 			Matrix<D> x2d("deconv_x2d", C_in, batchN * P_in);
 			mpsPackFeatureMap2D(ptr(input), ptr(x2d), batchN, C_in, P_in);
 
-			Matrix<float> w2d("deconv_w2d", C_out * kH * kW, C_in);
-			for (int ci = 0; ci < C_in; ++ci) {
-				for (int co = 0; co < C_out; ++co) {
-					for (int kh = 0; kh < kH; ++kh) {
-						for (int kw = 0; kw < kW; ++kw) {
-							const int row = (co * kH + kh) * kW + kw;
-							w2d.elem(row, ci) = wh.elem(idx_w_deconv(ci, co, kh, kw, C_out, kH, kW), 0);
-						}
-					}
-				}
-			}
+			Matrix<D> w2d = flatten_weights_2d();
+			Matrix<D> patches = w2d * x2d;
 
-			auto patches = (Matrix<D>(w2d) * x2d).to_host();
+			Matrix<D> out_no_bias("deconv_out_nobias", C_out * H_out * W_out, batchN);
+			mpsCol2im(ptr(patches), ptr(out_no_bias), batchN, C_out, H_out, W_out,
+			          kH, kW, pad_h, pad_w, stride_h, stride_w, H_in, W_in);
 
-			Matrix<float> y("deconv_out_host", C_out * H_out * W_out, batchN);
-			y.zeros();
-			for (int n = 0; n < batchN; ++n) {
-				for (int co = 0; co < C_out; ++co) {
-					for (int oh = 0; oh < H_out; ++oh) {
-						for (int ow = 0; ow < W_out; ++ow) {
-							y.elem(idx_chw(co, oh, ow, H_out, W_out), n) = bh.elem(co, 0);
-						}
-					}
-				}
-			}
+			const int P_out = H_out * W_out;
+			Matrix<D> packed_out("deconv_out_packed", C_out, batchN * P_out);
+			mpsPackFeatureMap2D(ptr(out_no_bias), ptr(packed_out), batchN, C_out, P_out);
 
-			for (int n = 0; n < batchN; ++n) {
-				for (int ih = 0; ih < H_in; ++ih) {
-					for (int iw = 0; iw < W_in; ++iw) {
-						const int col = n * H_in * W_in + ih * W_in + iw;
-						for (int co = 0; co < C_out; ++co) {
-							for (int kh = 0; kh < kH; ++kh) {
-								for (int kw = 0; kw < kW; ++kw) {
-									const int oh = ih * stride_h - pad_h + kh;
-									const int ow = iw * stride_w - pad_w + kw;
-									if (oh < 0 || oh >= H_out || ow < 0 || ow >= W_out) continue;
-									const int row = (co * kH + kh) * kW + kw;
-									y.elem(idx_chw(co, oh, ow, H_out, W_out), n) += patches.elem(row, col);
-								}
-							}
-						}
-					}
-				}
-			}
-
-			this->val = Matrix<D>(y);
+			this->val = Matrix<D>("convtrans_out", C_out * H_out * W_out, batchN);
+			mpsConv2dOutputAddBias(ptr(packed_out), ptr(this->bias), ptr(this->val), batchN, C_out, H_out, W_out);
 			if (use_relu) {
 				this->val = relu(Matrix<D>(this->val));
 			}
@@ -1492,58 +1355,32 @@ namespace Juzhen
 				? hadmd(d_relu(Matrix<D>(this->val)), std::move(upstream_grad))
 				: std::move(upstream_grad);
 
-			auto xh = input.to_host();
-			auto wh = this->weights.to_host();
-			auto th = t.to_host();
+			const int P_in = H_in * W_in;
+			const int P_out = H_out * W_out;
 
-			Matrix<float> dx("deconv_dx_host", C_in * H_in * W_in, batchN);
-			dx.zeros();
-			Matrix<float> dW("deconv_dW_host", C_in * C_out * kH * kW, 1);
-			dW.zeros();
-			Matrix<float> db("deconv_db_host", C_out, 1);
-			db.zeros();
+			Matrix<D> x2d("deconv_x2d", C_in, batchN * P_in);
+			mpsPackFeatureMap2D(ptr(input), ptr(x2d), batchN, C_in, P_in);
 
-			for (int n = 0; n < batchN; ++n) {
-				for (int co = 0; co < C_out; ++co) {
-					float sb = 0.0f;
-					for (int oh = 0; oh < H_out; ++oh) {
-						for (int ow = 0; ow < W_out; ++ow) {
-							sb += th.elem(idx_chw(co, oh, ow, H_out, W_out), n);
-						}
-					}
-					db.elem(co, 0) += sb;
-				}
-			}
+			Matrix<D> w2d = flatten_weights_2d();
 
-			for (int n = 0; n < batchN; ++n) {
-				for (int ci = 0; ci < C_in; ++ci) {
-					for (int ih = 0; ih < H_in; ++ih) {
-						for (int iw = 0; iw < W_in; ++iw) {
-							float acc_dx = 0.0f;
-							for (int co = 0; co < C_out; ++co) {
-								for (int kh = 0; kh < kH; ++kh) {
-									for (int kw = 0; kw < kW; ++kw) {
-										const int oh = ih * stride_h - pad_h + kh;
-										const int ow = iw * stride_w - pad_w + kw;
-										if (oh < 0 || oh >= H_out || ow < 0 || ow >= W_out) continue;
-										const float gv = th.elem(idx_chw(co, oh, ow, H_out, W_out), n);
-										acc_dx += gv * wh.elem(idx_w_deconv(ci, co, kh, kw, C_out, kH, kW), 0);
-										dW.elem(idx_w_deconv(ci, co, kh, kw, C_out, kH, kW), 0) +=
-											xh.elem(idx_chw(ci, ih, iw, H_in, W_in), n) * gv;
-									}
-								}
-							}
-							dx.elem(idx_chw(ci, ih, iw, H_in, W_in), n) = acc_dx;
-						}
-					}
-				}
-			}
+			Matrix<D> tp("deconv_tp", C_out * kH * kW, batchN * P_in);
+			mpsIm2col(ptr(t), ptr(tp), batchN, C_out, H_out, W_out,
+			         kH, kW, pad_h, pad_w, stride_h, stride_w, H_in, W_in);
+
+			Matrix<D> dW2d = tp * x2d.T();
+			Matrix<D> dx2d = w2d.T() * tp;
+
+			Matrix<D> dx = unpack_2d_feature_map(dx2d, C_in, H_in, W_in);
+
+			Matrix<D> t2d("deconv_t2d", C_out, batchN * P_out);
+			mpsPackFeatureMap2D(ptr(t), ptr(t2d), batchN, C_out, P_out);
+			Matrix<D> db = sum(t2d, 1);
 
 			if (this->need_update) {
-				this->update(Matrix<D>(dW), Matrix<D>(db));
+				this->update(pack_weight_grad(dW2d), std::move(db));
 			}
 
-			return Matrix<D>(dx);
+			return dx;
 		}
 	};
 

@@ -301,8 +301,8 @@ void mpsRandn(float *A, int N){
     commandBuffer = [commandQueue commandBuffer];
 
     // Matrix descriptor to wrap buffer A
-    MPSMatrixDescriptor* matrixDesc = [MPSMatrixDescriptor matrixDescriptorWithRows:1 columns:N
-                                                                           rowBytes:N * sizeof(float)
+    MPSMatrixDescriptor* matrixDesc = [MPSMatrixDescriptor matrixDescriptorWithRows:N columns:1
+                                                                           rowBytes:sizeof(float)
                                                                            dataType:MPSDataTypeFloat32];
     auto matA = [[MPSMatrix alloc] initWithBuffer:bufferA descriptor:matrixDesc];
 
@@ -321,8 +321,8 @@ void mpsRand(float *A, int N){
     commandBuffer = [commandQueue commandBuffer];
 
     // Matrix descriptor to wrap buffer A
-    MPSMatrixDescriptor* matrixDesc = [MPSMatrixDescriptor matrixDescriptorWithRows:1 columns:N
-                                                                           rowBytes:N * sizeof(float)
+    MPSMatrixDescriptor* matrixDesc = [MPSMatrixDescriptor matrixDescriptorWithRows:N columns:1
+                                                                           rowBytes:sizeof(float)
                                                                            dataType:MPSDataTypeFloat32];
     auto matA = [[MPSMatrix alloc] initWithBuffer:bufferA descriptor:matrixDesc];
 
