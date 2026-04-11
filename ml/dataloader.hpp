@@ -67,11 +67,20 @@ namespace Juzhen
                 ERROR_OUT;
             }
 
-            d = getw(fp_input); 
+            int id = getw(fp_input);
             int dout = getw(fp_output);
-            n = getw(fp_input); 
+            int in = getw(fp_input); 
             int nout = getw(fp_output);
             
+            if (id < 0 || dout < 0 || in < 0 || nout < 0 ||
+                ferror(fp_input) || ferror(fp_output)) {
+                std::cout << "Error reading dataset dimensions" << std::endl;
+                ERROR_OUT;
+            }
+
+            d = (size_t)id;
+            n = (size_t)in;
+
             int trans1 = getw(fp_input);
             int trans2 = getw(fp_output);
             if( trans1 || trans2 ) {
@@ -104,8 +113,13 @@ namespace Juzhen
             Matrix<D2> y("output", 1, samples_to_read);
 
             // read the input
-            fread((D1 *)x.data(), sizeof(D1), samples_to_read * d, fp_input);
-            fread((D2 *)y.data(), sizeof(D2), samples_to_read * 1, fp_output);
+            size_t in_read = fread((D1 *)x.data(), sizeof(D1), samples_to_read * d, fp_input);
+            size_t out_read = fread((D2 *)y.data(), sizeof(D2), samples_to_read * 1, fp_output);
+
+            if (in_read != samples_to_read * d || out_read != samples_to_read) {
+                std::cout << "Error reading batch from dataset" << std::endl;
+                ERROR_OUT;
+            }
 
             // update the batch index
             batch_idx++;

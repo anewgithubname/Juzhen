@@ -29,6 +29,7 @@
 #include "helper.hpp"
 #include "memory.hpp"
 
+#include <climits>
 #include <sstream>
 #include <fstream>
 
@@ -578,15 +579,32 @@ Matrix<D> Matrix<D>::eleminv(double l) const {
 template <class D>
 void read(FILE *f, Matrix<D> &M){
     // read int variables from the file.
-    size_t numrow = getw(f);
-    size_t numcol = getw(f);
-    size_t transpose = getw(f);
+    int irow = getw(f);
+    int icol = getw(f);
+    int itrans = getw(f);
+
+    if (irow < 0 || icol < 0 || ferror(f)) {
+        LOG_ERROR("read: invalid matrix dimensions in file");
+        ERROR_OUT;
+    }
+
+    size_t numrow = (size_t)irow;
+    size_t numcol = (size_t)icol;
+
+    if (numcol != 0 && numrow > SIZE_MAX / numcol) {
+        LOG_ERROR("read: matrix dimensions overflow");
+        ERROR_OUT;
+    }
 
     M.numrow = numrow;
     M.numcol = numcol;
-    M.transpose = transpose;
+    M.transpose = itrans;
     M.elements.reset(new D[numrow * numcol]);
-    fread(M.elements.get(), sizeof(D), numcol * numrow, f);
+    size_t bytesread = fread(M.elements.get(), sizeof(D), numcol * numrow, f);
+    if (bytesread != numcol * numrow) {
+        LOG_ERROR("read: unexpected end of file");
+        ERROR_OUT;
+    }
 }
 
 /*
@@ -597,14 +615,38 @@ void read(FILE *f, Matrix<D> &M){
 template <class D>
 Matrix<D> read(std::string filename) {
     FILE *f = fopen(filename.c_str(), "rb");
-    // read int variables to the file.
-    size_t numrow = getw(f);
-    size_t numcol = getw(f);
-    size_t transpose = getw(f);
+    if (!f) {
+        LOG_ERROR("read: cannot open file {}", filename);
+        ERROR_OUT;
+    }
+    // read int variables from the file.
+    int irow = getw(f);
+    int icol = getw(f);
+    int itrans = getw(f);
 
-    Matrix<D> A(filename.c_str(), numrow, numcol, transpose);
-    int bytesread = fread(A.elements.get(), sizeof(D), numcol * numrow, f);
+    if (irow < 0 || icol < 0 || ferror(f)) {
+        fclose(f);
+        LOG_ERROR("read: invalid matrix dimensions in {}", filename);
+        ERROR_OUT;
+    }
+
+    size_t numrow = (size_t)irow;
+    size_t numcol = (size_t)icol;
+
+    if (numcol != 0 && numrow > SIZE_MAX / numcol) {
+        fclose(f);
+        LOG_ERROR("read: matrix dimensions overflow in {}", filename);
+        ERROR_OUT;
+    }
+
+    Matrix<D> A(filename.c_str(), numrow, numcol, itrans);
+    size_t bytesread = fread(A.elements.get(), sizeof(D), numcol * numrow, f);
     fclose(f);
+
+    if (bytesread != numcol * numrow) {
+        LOG_ERROR("read: unexpected end of file in {}", filename);
+        ERROR_OUT;
+    }
 
     return A;
 }
@@ -668,11 +710,11 @@ Matrix<T> readfromcsv(const std::string& filename, int n, int d) {
     std::ifstream file(filename);
     std::string line;
     int i = 0;
-    while (std::getline(file, line)) {
+    while (std::getline(file, line) && i < n) {
         std::stringstream ss(line);
         std::string token;
         int j = 0;
-        while (std::getline(ss, token, ',')) {
+        while (std::getline(ss, token, ',') && j < d) {
             ret.elem(i, j) = std::stof(token);
             j++;
         }
