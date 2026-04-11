@@ -123,7 +123,7 @@ int compute() {
 
     constexpr int batchsize = 4;
     constexpr int T = 100;
-    constexpr int n_iters = 1200;
+    constexpr int n_iters = 3000;
     constexpr float lr = 3e-4f;
 
     VPSchedule sched(T);

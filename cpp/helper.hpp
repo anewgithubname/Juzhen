@@ -44,12 +44,17 @@ typedef std::chrono::high_resolution_clock Clock;
 #include <cblas.h>
 #endif
 
+#ifdef ROCM_HIP
+#include "hipbackend.hpp"
+#endif
+
 #include <boost/serialization/strong_typedef.hpp>
 #include <boost/type_index.hpp>
 #define datatype(D) boost::typeindex::type_id<D>().pretty_name() 
 
 BOOST_STRONG_TYPEDEF(float, CUDAfloat)
 BOOST_STRONG_TYPEDEF(float, MPSfloat)
+BOOST_STRONG_TYPEDEF(float, ROCMfloat)
 
 typedef std::vector<size_t> idxlist;
 
@@ -177,6 +182,30 @@ inline void gemv(CBLAS_TRANSPOSE transM, int m, int n, float alpha, int *A, int 
     std::cout << "gemv: int* not implemented" << std::endl;
 }
 
+inline void gemv(CBLAS_TRANSPOSE transM, int m, int n, float alpha, ROCMfloat *A, int lda, ROCMfloat *x, int ldx, float beta, ROCMfloat *y, int ldy){
+#ifdef ROCM_HIP
+    const bool transA = (transM == CblasTrans);
+    int rc = Juzhen::RocmGemv(reinterpret_cast<const float*>(A),
+                              reinterpret_cast<const float*>(x),
+                              reinterpret_cast<float*>(y),
+                              m,
+                              n,
+                              transA,
+                              lda,
+                              ldx,
+                              ldy,
+                              alpha,
+                              beta);
+    if (rc != 0) {
+        LOG_ERROR("ROCm GEMV failed with code {}", rc);
+        ERROR_OUT;
+    }
+#else
+    (void)transM; (void)m; (void)n; (void)alpha; (void)A; (void)lda; (void)x; (void)ldx; (void)beta; (void)y; (void)ldy;
+    std::cout << "gemv: ROCMfloat* only valid in ROCM_HIP build" << std::endl;
+#endif
+}
+
 inline void gemm(CBLAS_TRANSPOSE transA, CBLAS_TRANSPOSE transB, int nr, int nc, int nk, 
             float alpha, float *A, int lda, float *B, int ldb, float beta, float *C, int ldc){
     STATIC_TIC;
@@ -193,6 +222,34 @@ inline void gemm(CBLAS_TRANSPOSE transA, CBLAS_TRANSPOSE transB, int nr, int nc,
 inline void gemm(CBLAS_TRANSPOSE transA, CBLAS_TRANSPOSE transB, int nr, int nc, int nk, 
             float alpha, int *A, int lda, int *B, int ldb, float beta, int *C, int ldc){
     std::cout << "CBLAS gemm not implemented for int!" << std::endl;
+}
+
+inline void gemm(CBLAS_TRANSPOSE transA, CBLAS_TRANSPOSE transB, int nr, int nc, int nk,
+            float alpha, ROCMfloat *A, int lda, ROCMfloat *B, int ldb, float beta, ROCMfloat *C, int ldc){
+#ifdef ROCM_HIP
+    const bool tA = (transA == CblasTrans);
+    const bool tB = (transB == CblasTrans);
+    int rc = Juzhen::RocmGemm(reinterpret_cast<const float*>(A),
+                              reinterpret_cast<const float*>(B),
+                              reinterpret_cast<float*>(C),
+                              nr,
+                              nc,
+                              nk,
+                              tA,
+                              tB,
+                              lda,
+                              ldb,
+                              ldc,
+                              alpha,
+                              beta);
+    if (rc != 0) {
+        LOG_ERROR("ROCm GEMM failed with code {}", rc);
+        ERROR_OUT;
+    }
+#else
+    (void)transA; (void)transB; (void)nr; (void)nc; (void)nk; (void)alpha; (void)A; (void)lda; (void)B; (void)ldb; (void)beta; (void)C; (void)ldc;
+    std::cout << "gemm: ROCMfloat* only valid in ROCM_HIP build" << std::endl;
+#endif
 }
 
 inline void getrf_(int *m, int *n, float *a, int *lda, int *ipiv, int *info){

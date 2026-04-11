@@ -19,7 +19,7 @@ using namespace std;
 
 #if defined(APPLE_SILICON)
 int compute() {
-    cout << "testDiffusionTrajectoryCompare is intended for CPU/CUDA comparison. Skipping on Apple Silicon.\n";
+    cout << "testDiffusionTrajectoryCompare is intended for CPU/CUDA/ROCm comparison. Skipping on Apple Silicon.\n";
     return 0;
 }
 #else
@@ -27,6 +27,9 @@ int compute() {
 #if defined(CUDA)
 using BackendT = CUDAfloat;
 static const char* kBackendName = "cuda";
+#elif defined(ROCM_HIP)
+using BackendT = ROCMfloat;
+static const char* kBackendName = "rocm";
 #else
 using BackendT = float;
 static const char* kBackendName = "cpu";

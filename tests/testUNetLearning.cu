@@ -16,12 +16,18 @@
 
 using namespace Juzhen;
 
-#if !defined(CUDA) || !defined(CUDNN_AVAILABLE)
+#if defined(CUDA) && defined(CUDNN_AVAILABLE)
+using BackendT = CUDAfloat;
+#elif defined(ROCM_HIP)
+using BackendT = ROCMfloat;
+#else
 int compute() {
-    std::cout << "testUNetLearning requires CUDA + cuDNN. Skipping.\n";
+    std::cout << "testUNetLearning requires CUDA+cuDNN or ROCm. Skipping.\n";
     return 0;
 }
-#else
+#endif
+
+#if defined(CUDA) && defined(CUDNN_AVAILABLE) || defined(ROCM_HIP)
 
 class TinyUNetLearner {
 public:
@@ -31,13 +37,13 @@ public:
 
     ConvLayer      enc1;
     ConvLayer      enc2;
-    convtransLayer up1;
+    ConvTransLayer up1;
     ConvLayer      dec1;
     ConvLayer      head;
 
-    Matrix<CUDAfloat> e1;
-    Matrix<CUDAfloat> e2;
-    Matrix<CUDAfloat> c_cat;
+    Matrix<BackendT> e1;
+    Matrix<BackendT> e2;
+    Matrix<BackendT> c_cat;
 
     explicit TinyUNetLearner(int batch_size)
         : enc1(batch_size, 1, H, W, 8, 3, 3, 1, 1, true),
@@ -49,7 +55,7 @@ public:
           e2("e2", 16 * (H / 2) * (W / 2), batch_size),
           c_cat("cc", 16 * D, batch_size) {}
 
-    std::list<Layer<CUDAfloat>*> layers() {
+    std::list<Layer<BackendT>*> layers() {
         return {&head, &dec1, &up1, &enc2, &enc1};
     }
 
@@ -60,19 +66,19 @@ public:
         }
     }
 
-    const Matrix<CUDAfloat>& fwd(const Matrix<CUDAfloat>& x) {
+    const Matrix<BackendT>& fwd(const Matrix<BackendT>& x) {
         enc1.eval(x);
         e1 = enc1.value();
         enc2.eval(e1);
         e2 = enc2.value();
         up1.eval(e2);
-        c_cat = vstack(std::vector<MatrixView<CUDAfloat>>{up1.value(), e1});
+        c_cat = vstack(std::vector<MatrixView<BackendT>>{up1.value(), e1});
         dec1.eval(c_cat);
         head.eval(dec1.value());
         return head.value();
     }
 
-    void bwd(const Matrix<CUDAfloat>& x, Matrix<CUDAfloat>&& g) {
+    void bwd(const Matrix<BackendT>& x, Matrix<BackendT>&& g) {
         auto g2 = head.backward(dec1.value(), std::move(g));
         auto g_cat = dec1.backward(c_cat, std::move(g2));
         const size_t up_sz = 8ULL * D;
@@ -119,7 +125,10 @@ static Matrix<float> make_clean_batch(int batch_size) {
 }
 
 int compute() {
+#if defined(CUDA)
     GPUSampler sampler(11);
+#endif
+    global_rand_gen.seed(11);
 
     constexpr int batch_size = 1;
     constexpr int train_iters = 4000;
@@ -128,8 +137,8 @@ int compute() {
 
     auto clean_cpu = make_clean_batch(batch_size);
 
-    auto clean = Matrix<CUDAfloat>(clean_cpu);
-    auto inp = Matrix<CUDAfloat>(clean_cpu);
+    auto clean = Matrix<BackendT>(clean_cpu);
+    auto inp = Matrix<BackendT>(clean_cpu);
 
     TinyUNetLearner net(batch_size);
     net.set_lr(lr);

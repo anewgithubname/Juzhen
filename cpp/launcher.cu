@@ -55,7 +55,7 @@ int main()
 
     PrintSeparationLine();
     DisplayCPU();
-#ifdef CUDA
+#if defined(CUDA) || defined(ROCM_HIP)
     DisplayGPU();
 #endif
     PrintSeparationLine();
@@ -69,6 +69,9 @@ int main()
 #ifdef CUDA
         CuBLASErrorCheck(cublasCreate(&Matrix<CUDAfloat>::global_handle));
         Memory<CUDAfloat> gpumd;
+#endif
+#ifdef ROCM_HIP
+        Memory<ROCMfloat> rocmmd;
 #endif
 #ifdef APPLE_SILICON
         mpsInit();

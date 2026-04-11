@@ -39,7 +39,7 @@
  
      {
 
-        const int DIM = 10000;
+        const int DIM = 5000;
         
         HLINE;
         std::cout << "This program is for benchmarking the matrix multiplication performance." << std::endl;
@@ -88,6 +88,27 @@
              std::cout << "\033[34mCUDA GEMM TFLPOS: " << (2.0 * DIM * DIM * DIM) * 10 / duration / 1e9 << "\033[0m" << std::endl;
          }
  #endif
+
+#ifdef ROCM_HIP
+         {
+            HLINE;
+            auto A1 = CM::randn(DIM, DIM);
+            auto A2 = CM::randn(DIM, DIM);
+            CM A3 = CM::zeros(DIM, DIM);
+             std::chrono::high_resolution_clock::time_point t1 = std::chrono::high_resolution_clock::now();
+             for (int i = 0; i < 10; i++)
+             {
+                 A3 += A1 * A2 / DIM;
+                 std::cout << ".";
+             }
+             A3.slice(0,5,0,5).to_host();
+
+             std::chrono::high_resolution_clock::time_point t2 = std::chrono::high_resolution_clock::now();
+             auto duration = std::chrono::duration_cast<std::chrono::milliseconds>(t2 - t1).count();
+             std::cout << std::endl << "Duration: " << duration << " ms" << std::endl;
+             std::cout << "\033[34mROCM GEMM TFLPOS: " << (2.0 * DIM * DIM * DIM) * 10 / duration / 1e9 << "\033[0m" << std::endl;
+         }
+#endif
 
          {
              HLINE;

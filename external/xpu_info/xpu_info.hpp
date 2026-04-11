@@ -282,6 +282,33 @@ std::string getGPUInfo(){
     return ss.str();
 }
 
+#elif defined(ROCM_HIP) && __has_include(<hip/hip_runtime_api.h>)
+
+#include <hip/hip_runtime_api.h>
+
+std::string getGPUInfo(){
+    using namespace std;
+    int devCount = 0;
+    hipError_t st = hipGetDeviceCount(&devCount);
+    if (st != hipSuccess || devCount <= 0) {
+        return "ROCm runtime unavailable";
+    }
+
+    stringstream ss;
+    for (int i = 0; i < devCount; ++i)
+    {
+        hipDeviceProp_t props;
+        if (hipGetDeviceProperties(&props, i) != hipSuccess) continue;
+        if (i > 0) ss << "; ";
+        ss << i << ": " << props.name << " "
+           << std::setprecision(2) << props.totalGlobalMem / 1024.0 / 1024 / 1024
+           << "GB (" << props.gcnArchName << ")";
+    }
+
+    if (ss.str().empty()) return "ROCm device query failed";
+    return ss.str();
+}
+
 #else
 
 std::string getGPUInfo(){

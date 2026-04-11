@@ -15,14 +15,20 @@
 
 using namespace Juzhen;
 
-#if !defined(CUDA) || !defined(CUDNN_AVAILABLE)
+#if defined(CUDA) && defined(CUDNN_AVAILABLE)
+using BackendT = CUDAfloat;
+#elif defined(ROCM_HIP)
+using BackendT = ROCMfloat;
+#else
 int compute() {
-    std::cout << "testUNet requires CUDA + cuDNN. Skipping.\n";
+    std::cout << "testUNet requires CUDA+cuDNN or ROCm. Skipping.\n";
     return 0;
 }
-#else
+#endif
 
-static float scalar_loss(const Matrix<CUDAfloat>& y, const Matrix<CUDAfloat>& g) {
+#if defined(CUDA) && defined(CUDNN_AVAILABLE) || defined(ROCM_HIP)
+
+static float scalar_loss(const Matrix<BackendT>& y, const Matrix<BackendT>& g) {
     return item(sum(sum(hadmd(y, g), 0), 1));
 }
 
@@ -59,13 +65,13 @@ public:
 
     ConvLayer enc1;
     ConvLayer enc2;
-    convtransLayer up1;
+    ConvTransLayer up1;
     ConvLayer dec1;
     ConvLayer head;
 
-    Matrix<CUDAfloat> e1;
-    Matrix<CUDAfloat> e2;
-    Matrix<CUDAfloat> c_cat;
+    Matrix<BackendT> e1;
+    Matrix<BackendT> e2;
+    Matrix<BackendT> c_cat;
 
     TinyUNet()
         : enc1(N, C0, H, W, C1, 3, 3, 1, 1, true),
@@ -77,30 +83,30 @@ public:
           e2("e2", C2 * H2 * W2, N),
           c_cat("cc", (C1 + C1) * D, N) {}
 
-    std::list<Layer<CUDAfloat>*> layers() {
+    std::list<Layer<BackendT>*> layers() {
         return {&head, &dec1, &up1, &enc2, &enc1};
     }
 
     void zero_all_params() {
         for (auto* layer : layers()) {
-            layer->W() = Matrix<CUDAfloat>::zeros(layer->W().num_row(), layer->W().num_col());
-            layer->b() = Matrix<CUDAfloat>::zeros(layer->b().num_row(), layer->b().num_col());
+            layer->W() = Matrix<BackendT>::zeros(layer->W().num_row(), layer->W().num_col());
+            layer->b() = Matrix<BackendT>::zeros(layer->b().num_row(), layer->b().num_col());
         }
     }
 
-    const Matrix<CUDAfloat>& fwd(const Matrix<CUDAfloat>& inp) {
+    const Matrix<BackendT>& fwd(const Matrix<BackendT>& inp) {
         enc1.eval(inp);
         e1 = enc1.value();
         enc2.eval(e1);
         e2 = enc2.value();
         up1.eval(e2);
-        c_cat = vstack(std::vector<MatrixView<CUDAfloat>>{up1.value(), e1});
+        c_cat = vstack(std::vector<MatrixView<BackendT>>{up1.value(), e1});
         dec1.eval(c_cat);
         head.eval(dec1.value());
         return head.value();
     }
 
-    Matrix<CUDAfloat> backward_input(const Matrix<CUDAfloat>& inp, Matrix<CUDAfloat>&& g) {
+    Matrix<BackendT> backward_input(const Matrix<BackendT>& inp, Matrix<BackendT>&& g) {
         auto g2 = head.backward(dec1.value(), std::move(g));
         auto g_cat = dec1.backward(c_cat, std::move(g2));
         const size_t up_sz = (size_t)C1 * (size_t)D;
@@ -115,15 +121,15 @@ public:
 
 template <class NetT>
 static float forward_loss(NetT& net,
-                          const Matrix<CUDAfloat>& x,
-                          const Matrix<CUDAfloat>& upstream) {
+                          const Matrix<BackendT>& x,
+                          const Matrix<BackendT>& upstream) {
     return scalar_loss(net.fwd(x), upstream);
 }
 
 static int check_zero_output() {
     TinyUNet net;
     net.zero_all_params();
-    auto x = Matrix<CUDAfloat>::rand(TinyUNet::C0 * TinyUNet::D, TinyUNet::N);
+    auto x = Matrix<BackendT>::rand(TinyUNet::C0 * TinyUNet::D, TinyUNet::N);
     auto y = net.fwd(x).to_host();
 
     float max_abs = 0.0f;
@@ -146,9 +152,9 @@ static int check_head_bias_output() {
     net.zero_all_params();
     Matrix<float> head_b("hb", 1, 1);
     head_b.elem(0, 0) = -0.375f;
-    net.head.b() = Matrix<CUDAfloat>(head_b);
+    net.head.b() = Matrix<BackendT>(head_b);
 
-    auto x = Matrix<CUDAfloat>::rand(TinyUNet::C0 * TinyUNet::D, TinyUNet::N);
+    auto x = Matrix<BackendT>::rand(TinyUNet::C0 * TinyUNet::D, TinyUNet::N);
     auto y = net.fwd(x).to_host();
 
     float max_abs = 0.0f;
@@ -171,11 +177,11 @@ static int check_input_gradient() {
     auto layers = net.layers();
     freeze(layers);
 
-    auto x = Matrix<CUDAfloat>::rand(TinyUNet::C0 * TinyUNet::D, TinyUNet::N) - 0.5f;
-    auto g = Matrix<CUDAfloat>::rand(TinyUNet::D, TinyUNet::N) - 0.5f;
+    auto x = Matrix<BackendT>::rand(TinyUNet::C0 * TinyUNet::D, TinyUNet::N) - 0.5f;
+    auto g = Matrix<BackendT>::rand(TinyUNet::D, TinyUNet::N) - 0.5f;
 
     net.fwd(x);
-    auto dx = net.backward_input(x, Matrix<CUDAfloat>(g)).to_host();
+    auto dx = net.backward_input(x, Matrix<BackendT>(g)).to_host();
     auto x_h = x.to_host();
 
     std::vector<float> analytic((size_t)dx.num_row() * (size_t)dx.num_col());
@@ -192,8 +198,8 @@ static int check_input_gradient() {
         size_t c = idx / x_h.num_row();
         xp.elem(r, c) += eps;
         xm.elem(r, c) -= eps;
-        float lp = forward_loss(net, Matrix<CUDAfloat>(xp), g);
-        float lm = forward_loss(net, Matrix<CUDAfloat>(xm), g);
+        float lp = forward_loss(net, Matrix<BackendT>(xp), g);
+        float lm = forward_loss(net, Matrix<BackendT>(xm), g);
         numeric[idx] = (lp - lm) / (2.0f * eps);
     }
 
@@ -216,12 +222,12 @@ static int check_directional_derivative() {
     auto layers = net.layers();
     freeze(layers);
 
-    auto x = Matrix<CUDAfloat>::rand(TinyUNet::C0 * TinyUNet::D, TinyUNet::N) - 0.5f;
-    auto g = Matrix<CUDAfloat>::rand(TinyUNet::D, TinyUNet::N) - 0.5f;
-    auto v = Matrix<CUDAfloat>::rand(TinyUNet::C0 * TinyUNet::D, TinyUNet::N) - 0.5f;
+    auto x = Matrix<BackendT>::rand(TinyUNet::C0 * TinyUNet::D, TinyUNet::N) - 0.5f;
+    auto g = Matrix<BackendT>::rand(TinyUNet::D, TinyUNet::N) - 0.5f;
+    auto v = Matrix<BackendT>::rand(TinyUNet::C0 * TinyUNet::D, TinyUNet::N) - 0.5f;
 
     net.fwd(x);
-    auto dx = net.backward_input(x, Matrix<CUDAfloat>(g));
+    auto dx = net.backward_input(x, Matrix<BackendT>(g));
     float lhs = scalar_loss(dx, v);
 
     const float eps = 1e-3f;
@@ -244,7 +250,10 @@ static int check_directional_derivative() {
 }
 
 int compute() {
+#if defined(CUDA)
     GPUSampler sampler(7);
+#endif
+    global_rand_gen.seed(7);
 
     int ret = 0;
     ret += check_zero_output();

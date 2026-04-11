@@ -35,10 +35,14 @@ std::string getCPUInfo();
 std::string getGPUInfo();
 std::string getRAMInfo();
 
-#ifdef CUDA
+#if defined(CUDA)
 #define FLOAT CUDAfloat
 inline Matrix<CUDAfloat> randn(int m, int n) { return Matrix<CUDAfloat>::randn(m, n); }
 inline Matrix<CUDAfloat> ones(int m, int n) { return Matrix<CUDAfloat>::ones(m, n); }
+#elif defined(ROCM_HIP)
+#define FLOAT ROCMfloat
+inline Matrix<ROCMfloat> randn(int m, int n) { return Matrix<ROCMfloat>::randn(m, n); }
+inline Matrix<ROCMfloat> ones(int m, int n) { return Matrix<ROCMfloat>::ones(m, n); }
 #elif defined(APPLE_SILICON)
 #define FLOAT MPSfloat
 inline Matrix<float> randn(int m, int n) { return Matrix<float>::randn(m, n); }
@@ -56,6 +60,9 @@ int compute() {
 #ifdef CUDA
     GPUSampler sampler(1);
 #endif
+#ifdef ROCM_HIP
+    global_rand_gen.seed(1);
+#endif
     const int d = 28*28, k = 10, batchsize = 32;
     auto vecXY = mnist_dataset();
     auto X = vecXY[0]; 
@@ -63,13 +70,13 @@ int compute() {
     
     const size_t numbatches = X.num_col() / batchsize;
 
-#if defined(CUDA) || defined(APPLE_SILICON)
+#if defined(CUDA) || defined(ROCM_HIP) || defined(APPLE_SILICON)
     auto XT = Matrix<FLOAT>(vecXY[2]);
 #else
     auto &XT = vecXY[2];
 #endif
 
-#if defined(CUDA) || defined(APPLE_SILICON)
+#if defined(CUDA) || defined(ROCM_HIP) || defined(APPLE_SILICON)
     auto YT = Matrix<FLOAT>(vecXY[3]);
 #else
     auto &YT = vecXY[3];
@@ -97,7 +104,7 @@ int compute() {
         size_t batch_id = (iter % numbatches);
 
         // obtaining batches
-#if defined(CUDA) || defined(APPLE_SILICON)
+#if defined(CUDA) || defined(ROCM_HIP) || defined(APPLE_SILICON)
         auto X_i = Matrix<FLOAT>(X.columns(batchsize * batch_id, batchsize * (batch_id + 1)));
         auto Y_i = Matrix<FLOAT>(Y.columns(batchsize * batch_id, batchsize * (batch_id + 1)));
 #else
@@ -113,7 +120,7 @@ int compute() {
         backprop(trainnn, X_i);
         trainnn.pop_front();
         if (iter % 1000 == 0) {
-#if defined(CUDA) || defined(APPLE_SILICON)
+#if defined(CUDA) || defined(ROCM_HIP) || defined(APPLE_SILICON)
             cout << "Misclassification Rate: " << forward(testnn, XT).to_host().elem(0, 0) << endl;
 #else
             cout << "Misclassification Rate: " << forward(testnn, XT).elem(0, 0) << endl;

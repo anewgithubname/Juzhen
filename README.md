@@ -5,7 +5,7 @@
 
 Juzhen is a set of C++ APIs for matrix operations. It provides a higher-level interface for lower-level numerical calculation software like [CBLAS](http://www.netlib.org/blas/) and [CUDA](https://en.wikipedia.org/wiki/CUDA). It supports a Neural Net API similar to the ones used in PyTorch or TensorFlow, including convolutional layers backed by cuDNN and Metal on Apple Silicon.
 
-Developed under C++20. Supports NVIDIA CUDA 12.x (with cuDNN) and Apple Silicon (Metal).
+Developed under C++20. Supports NVIDIA CUDA 12.x (with cuDNN), Apple Silicon (through Metal Performance Shaders) and ROCm.
 
 ## Example
 
@@ -78,19 +78,36 @@ cmake --build build_cuda -j
 
 This enables CUDA and automatically searches for cuDNN (in standard paths and the active conda environment). Convolutional layers (`ConvLayer`, `ConvTransLayer`) require cuDNN.
 
+### AMD ROCm/HIP build 
+
+```bash
+cmake -S . -B build_rocm -DROCM_HIP=ON -DNVIDIA_CUDA=OFF -DAPPLE_SILICON=OFF
+cmake --build build_rocm -j
+```
+
+### CMake options
+
+| Option | Default | Description |
+|---|---|---|
+| `NVIDIA_CUDA` | OFF | NVIDIA CUDA backend |
+| `ROCM_HIP` | OFF | AMD ROCm/HIP backend |
+| `APPLE_SILICON` | OFF | Apple Metal backend |
+| `JUZHEN_ENABLE_FTXUI` | ON | Build with FTXUI terminal-UI |
+
+Only one GPU backend may be enabled at a time.
+
 ### Running examples
 
 ```bash
 # basic
 ./build/helloworld
 
-# MNIST CNN demos
-./build_cpu/demo_cnn_mnist_cpu
-./build/demo_cnn_mnist_mps
-./build_cuda/demo_cnn_mnist_cudnn
+# MNIST CNN (unified binary – adapts to whichever backend was built)
+./build_cpu/demo_cnn_mnist
+./build_cuda/demo_cnn_mnist
 
 # rectified flow on CIFAR-10
-./build/demo_cnn_rectified
+./build_cuda/demo_cnn_rectified
 ```
 
 ### Running tests
@@ -117,7 +134,7 @@ RF_EPOCHS=200 RF_BATCH_SIZE=128 ./build_cuda/demo_cnn_rectified
 RF_EPOCHS=10 RF_BATCH_SIZE=128 ./build/demo_cnn_rectified
 ```
 
-Environment variables for MNIST CNN demos (`demo_cnn_mnist_cpu`, `demo_cnn_mnist_mps`, `demo_cnn_mnist_cudnn`):
+Environment variables for `demo_cnn_mnist`:
 
 | Variable | Default | Description |
 |---|---|---|
@@ -127,7 +144,7 @@ Environment variables for MNIST CNN demos (`demo_cnn_mnist_cpu`, `demo_cnn_mnist
 
 Example:
 ```bash
-CNN_MNIST_EPOCHS=10 CNN_MNIST_SEED=43 ./build/demo_cnn_mnist_mps
+CNN_MNIST_EPOCHS=10 CNN_MNIST_SEED=43 ./build_cuda/demo_cnn_mnist
 ```
 
 ## Examples
@@ -144,15 +161,13 @@ CNN_MNIST_EPOCHS=10 CNN_MNIST_SEED=43 ./build/demo_cnn_mnist_mps
 | 8 | [pagerank.cu](examples/pagerank.cu) | PageRank demo |
 | 9 | [demo_rectified.cu](examples/demo_rectified.cu) | Rectified flow (two Gaussians) |
 | 10 | [demo_rectified_infer.cu](examples/demo_rectified_infer.cu) | Rectified flow inference demo |
-| 11 | [demo_cnn_mnist_cpu.cpp](examples/demo_cnn_mnist_cpu.cpp) | CNN on MNIST (CPU) |
-| 12 | [demo_cnn_mnist_mps.cu](examples/demo_cnn_mnist_mps.cu) | CNN on MNIST (Apple Silicon / Metal) |
-| 13 | [demo_cnn_mnist_cudnn.cu](examples/demo_cnn_mnist_cudnn.cu) | CNN on MNIST (CUDA + cuDNN) |
-| 14 | [demo_cnn_rectified.cu](examples/demo_cnn_rectified.cu) | Rectified flow on CIFAR-10 (conv UNet) |
-| 15 | [demo_gui.cu](examples/demo_gui.cu) | GUI demo |
-| 16 | [compute_fid.py](examples/compute_fid.py) | Compute FID score from generated image folders |
+| 11 | [demo_cnn_mnist.cu](examples/demo_cnn_mnist.cu) | CNN on MNIST (all backends) |
+| 12 | [demo_cnn_rectified.cu](examples/demo_cnn_rectified.cu) | Rectified flow on CIFAR-10 (conv UNet) |
+| 13 | [demo_gui.cu](examples/demo_gui.cu) | GUI demo |
+| 14 | [compute_fid.py](examples/compute_fid.py) | Compute FID score from generated image folders |
 
 ## Supported Platforms
-- Linux (CPU / NVIDIA GPU)
+- Linux (CPU / NVIDIA GPU / AMD GPU via ROCm)
 - macOS (CPU / Apple Silicon via Metal)
 - Windows (CPU / NVIDIA GPU — requires Visual Studio 2019+)
 

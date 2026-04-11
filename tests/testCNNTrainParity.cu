@@ -57,7 +57,7 @@ static void load_batches(std::vector<Matrix<float>>& Xs,
 }
 
 #if defined(CUDA) && defined(CUDNN_AVAILABLE)
-// ── GPU training path ────────────────────────────────────────────────────────
+// ── GPU training path (CUDA/cuDNN) ──────────────────────────────────────────
 int compute() {
     GPUSampler sampler(42);
     global_rand_gen.seed(42);
@@ -132,10 +132,91 @@ int compute() {
               << " iters: " << max_diff << "\n";
 
     if (max_diff > 5e-2f) {
-        std::cout << "[FAIL] testCNNTrainParity\n";
+        std::cout << "[FAIL] testCNNTrainParity (CUDA)\n";
         return 1;
     }
-    std::cout << "[PASS] testCNNTrainParity\n";
+    std::cout << "[PASS] testCNNTrainParity (CUDA)\n";
+    return 0;
+}
+
+#elif defined(ROCM_HIP)
+// ── GPU training path (ROCm/HIP) ────────────────────────────────────────────
+int compute() {
+    global_rand_gen.seed(42);
+
+    std::vector<Matrix<float>> Xs, Ys;
+    load_batches(Xs, Ys);
+
+    ConvLayer c1(BS, C,  H,  W,  C1, kH, kW, pad, S1);
+    ConvLayer c2(BS, C1, H1, W1, C2, kH, kW, pad, S2);
+    ConvLayer c3(BS, C2, H2, W2, C3, kH, kW, pad, S3);
+    ReluLayer<ROCMfloat>   L1(fc_hidden, conv_out, BS);
+    LinearLayer<ROCMfloat> L2(k_classes, fc_hidden, BS);
+
+    std::list<Layer<ROCMfloat>*> net;
+    net.push_back(&L2); net.push_back(&L1);
+    net.push_back(&c3); net.push_back(&c2); net.push_back(&c1);
+
+    std::vector<float> gpu_losses;
+    gpu_losses.reserve(N_ITERS);
+
+    for (int iter = 0; iter < N_ITERS; ++iter) {
+        auto Xg = Matrix<ROCMfloat>(Xs[iter]);
+        auto Yg = Matrix<ROCMfloat>(Ys[iter]);
+
+        forward(net, Xg);
+        LogisticLayer<ROCMfloat> loss(BS, std::move(Yg));
+        loss.eval(L2.value());
+        gpu_losses.push_back(loss.value().to_host().elem(0, 0));
+
+        std::list<Layer<ROCMfloat>*> train;
+        train.push_back(&loss); train.push_back(&L2); train.push_back(&L1);
+        train.push_back(&c3);   train.push_back(&c2); train.push_back(&c1);
+        backprop(train, Xg);
+    }
+
+    std::ifstream ref(REF_FILE);
+    if (!ref.is_open()) {
+        std::cout << "No CPU reference file found at " << REF_FILE << "\n";
+        std::cout << "Run the CPU build first to generate it.\n";
+        std::cout << "\nROCm losses (100 iters):\n";
+        for (int i = 0; i < N_ITERS; ++i)
+            std::cout << "  iter " << std::setw(3) << i
+                      << " loss=" << std::fixed << std::setprecision(6)
+                      << gpu_losses[i] << "\n";
+        return 0;
+    }
+
+    std::vector<float> cpu_losses;
+    std::string line;
+    while (std::getline(ref, line)) {
+        std::istringstream ss(line);
+        float v;  ss >> v;  cpu_losses.push_back(v);
+    }
+
+    float max_diff = 0.0f;
+    std::cout << std::setw(5) << "iter"
+              << std::setw(12) << "loss_cpu"
+              << std::setw(12) << "loss_rocm"
+              << std::setw(12) << "diff" << "\n";
+    for (int i = 0; i < N_ITERS; ++i) {
+        const float diff = std::fabs(cpu_losses[i] - gpu_losses[i]);
+        max_diff = std::max(max_diff, diff);
+        std::cout << std::setw(5) << i
+                  << std::fixed << std::setprecision(6)
+                  << std::setw(12) << cpu_losses[i]
+                  << std::setw(12) << gpu_losses[i]
+                  << std::setw(12) << diff << "\n";
+    }
+
+    std::cout << "\nmax |loss_cpu - loss_rocm| over " << N_ITERS
+              << " iters: " << max_diff << "\n";
+
+    if (max_diff > 5e-2f) {
+        std::cout << "[FAIL] testCNNTrainParity (ROCm)\n";
+        return 1;
+    }
+    std::cout << "[PASS] testCNNTrainParity (ROCm)\n";
     return 0;
 }
 

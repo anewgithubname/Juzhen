@@ -210,7 +210,10 @@ int compute() {
     global_rand_gen.seed(777);
 
 #if defined(CUDA)
+    GPUSampler sampler(777);
     using BackendT = CUDAfloat;
+#elif defined(ROCM_HIP)
+    using BackendT = ROCMfloat;
 #elif defined(APPLE_SILICON)
     using BackendT = MPSfloat;
 #else

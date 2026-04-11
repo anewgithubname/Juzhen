@@ -35,6 +35,10 @@
 #include "../cpp/cumatrix.cuh"
 #endif
 
+#ifdef ROCM_HIP
+#include "../cpp/hipmatrix.cuh"
+#endif
+
 #if defined(CUDA) && defined(CUDNN_AVAILABLE)
 #include <cudnn.h>
 #endif
@@ -355,6 +359,10 @@ namespace Juzhen
 	void dumpweights(std::list<Layer<D>*> neuralnet, std::string filename)
 	{
 		FILE *fp = fopen(filename.c_str(), "wb");
+		if (!fp) {
+			LOG_ERROR("dumpweights: cannot open file '{}'", filename);
+			ERROR_OUT;
+		}
 
 		for(auto& l : neuralnet) {
 			auto layertype = typeid(*l).name();
@@ -389,12 +397,17 @@ namespace Juzhen
 	template <class D>
 	void loadweights(std::list<Layer<D>*> neuralnet, std::string filename){
 		FILE *fp = fopen(filename.c_str(), "rb");
+		if (!fp) {
+			LOG_ERROR("loadweights: cannot open file '{}'", filename);
+			ERROR_OUT;
+		}
 
 		for(auto& l : neuralnet) {
 			auto layertype = typeid(*l).name();
-			char buf[100];
-			fread(buf, sizeof(char), strlen(layertype), fp); buf[strlen(layertype)] = '\0';
-			if(strcmp(buf, layertype) != 0) {
+			size_t typelen = strlen(layertype);
+			std::vector<char> buf(typelen + 1, '\0');
+			fread(buf.data(), sizeof(char), typelen, fp);
+			if(strcmp(buf.data(), layertype) != 0) {
 				LOG_ERROR("layer type mismatch");
 				ERROR_OUT;
 			}
@@ -1387,7 +1400,266 @@ namespace Juzhen
 	using ConvTransLayer = convtransLayer;
 #endif // APPLE_SILICON
 
-#if !defined(CUDA) && !defined(APPLE_SILICON)
+#if defined(ROCM_HIP)
+	/**
+	 * Convolutional layer (conv + optional ReLU) for ROCm/HIP backend.
+	 * Uses im2col + rocBLAS GEMM (no MIOpen dependency).
+	 *
+	 * Memory layout: column-major, input (C_in*H_in*W_in, N), output (C_out*H_out*W_out, N).
+	 * Weights stored as 1-D column (C_out*C_in*kH*kW, 1); in memory this is (K, C_out)
+	 * column-major where K = C_in*kH*kW.
+	 */
+	class ConvLayer : public Layer<ROCMfloat> {
+		using D = ROCMfloat;
+
+		int C_in, H_in, W_in;
+		int C_out, kH, kW;
+		int pad_h, pad_w, stride_h, stride_w;
+		int H_out, W_out;
+		int batchN;
+		bool use_relu = true;
+
+		static float* ptr(const Matrix<D>& m) {
+			return const_cast<float*>(reinterpret_cast<const float*>(m.data()));
+		}
+
+	public:
+		ConvLayer(int N, int C_in, int H_in, int W_in,
+		          int C_out, int kH, int kW,
+		          int pad = 0, int stride = 1, bool relu = true)
+			: Layer<D>(
+				  C_out * ((H_in + 2*pad - kH)/stride + 1) *
+				          ((W_in + 2*pad - kW)/stride + 1),
+				  1, N),
+			  C_in(C_in), H_in(H_in), W_in(W_in),
+			  C_out(C_out), kH(kH), kW(kW),
+			  pad_h(pad), pad_w(pad), stride_h(stride), stride_w(stride),
+			  H_out((H_in + 2*pad - kH)/stride + 1),
+			  W_out((W_in + 2*pad - kW)/stride + 1),
+			  batchN(N), use_relu(relu)
+		{
+			if (H_out <= 0 || W_out <= 0) {
+				LOG_ERROR("Invalid conv output shape: H_out={}, W_out={}", H_out, W_out);
+				ERROR_OUT;
+			}
+			this->weights = Matrix<D>::randn(C_out * C_in * kH * kW, 1) * 0.001f;
+			this->bias    = Matrix<D>::zeros(C_out, 1);
+			this->val     = Matrix<D>("conv_out", C_out * H_out * W_out, N);
+			this->adamW   = adam_state<D>(0.0001, C_out * C_in * kH * kW, 1);
+			this->adamb   = adam_state<D>(0.0001, C_out, 1);
+		}
+
+		void eval(const Matrix<D>& input) override {
+			const int K = C_in * kH * kW;
+			const int P = H_out * W_out;
+
+			// 1. im2col: input (C_in*H_in*W_in, N) → col (K, P*N)
+			Matrix<D> col("conv_col", K, P * batchN);
+			RocmIm2col(ptr(input), ptr(col),
+			           C_in, H_in, W_in, kH, kW,
+			           pad_h, pad_w, stride_h, stride_w,
+			           H_out, W_out, batchN);
+
+			// 2. GEMM: y2d(C_out, P*N) = W(K, C_out)^T * col(K, P*N)
+			//    Weights in memory are (K, C_out) col-major; use transA.
+			Matrix<D> y2d("conv_y2d", C_out, P * batchN);
+			RocmGemm(ptr(this->weights), ptr(col), ptr(y2d),
+			         C_out, P * batchN, K,
+			         true, false,
+			         K, K, C_out);
+
+			// 3. Reshape + bias: y2d(C_out, P*N) → val(C_out*P, N) + bias
+			RocmConvForwardReshapeBias(ptr(y2d), ptr(this->val), ptr(this->bias),
+			                            C_out, P, batchN);
+
+			// 4. Optional ReLU
+			if (use_relu)
+				this->val = relu(Matrix<D>(this->val));
+		}
+
+		Matrix<D> grad(const Matrix<D>&) const override {
+			return Matrix<D>::ones(1, 1);
+		}
+
+		Matrix<D> backward(const Matrix<D>& input, Matrix<D>&& upstream_grad) override {
+			auto t = use_relu
+				? hadmd(d_relu(Matrix<D>(this->val)), std::move(upstream_grad))
+				: std::move(upstream_grad);
+
+			const int K = C_in * kH * kW;
+			const int P = H_out * W_out;
+
+			// 1. Reshape upstream: t(C_out*P, N) → t2d(C_out, P*N)
+			Matrix<D> t2d("conv_t2d", C_out, P * batchN);
+			RocmConvBackwardReshape(ptr(t), ptr(t2d), C_out, P, batchN);
+
+			// 2. im2col on forward input
+			Matrix<D> col("conv_col", K, P * batchN);
+			RocmIm2col(ptr(input), ptr(col),
+			           C_in, H_in, W_in, kH, kW,
+			           pad_h, pad_w, stride_h, stride_w,
+			           H_out, W_out, batchN);
+
+			// 3. dW: stored(K, C_out) = col(K, P*N) * t2d(C_out, P*N)^T
+			Matrix<D> dW("conv_dW", C_out * K, 1);
+			RocmGemm(ptr(col), ptr(t2d), ptr(dW),
+			         K, C_out, P * batchN,
+			         false, true,
+			         K, C_out, K);
+
+			// 4. dx_col(K, P*N) = W_stored(K, C_out) * t2d(C_out, P*N)
+			Matrix<D> dx_col("conv_dx_col", K, P * batchN);
+			RocmGemm(ptr(this->weights), ptr(t2d), ptr(dx_col),
+			         K, P * batchN, C_out,
+			         false, false,
+			         K, C_out, K);
+
+			// 5. col2im: dx_col(K, P*N) → dx(C_in*H_in*W_in, N)
+			Matrix<D> dx("conv_dx", C_in * H_in * W_in, batchN);
+			RocmCol2im(ptr(dx_col), ptr(dx),
+			           C_in, H_in, W_in, kH, kW,
+			           pad_h, pad_w, stride_h, stride_w,
+			           H_out, W_out, batchN);
+
+			// 6. Bias gradient: db = sum(t2d, 1) → (C_out, 1)
+			Matrix<D> db = sum(t2d, 1);
+
+			if (this->need_update)
+				this->update(std::move(dW), std::move(db));
+
+			return dx;
+		}
+	};
+
+	/**
+	 * Transposed convolutional layer for ROCm/HIP backend.
+	 * Uses GEMM + scatter/gather kernels.
+	 *
+	 * Weights stored as (C_in*C_out*kH*kW, 1); in memory this is
+	 * (C_out*kH*kW, C_in) column-major.
+	 */
+	class convtransLayer : public Layer<ROCMfloat> {
+		using D = ROCMfloat;
+
+		int C_in, H_in, W_in;
+		int C_out, kH, kW;
+		int pad_h, pad_w, stride_h, stride_w;
+		int H_out, W_out;
+		int batchN;
+		bool use_relu = true;
+
+		static float* ptr(const Matrix<D>& m) {
+			return const_cast<float*>(reinterpret_cast<const float*>(m.data()));
+		}
+
+	public:
+		convtransLayer(int N, int C_in, int H_in, int W_in,
+		               int C_out, int kH, int kW,
+		               int pad = 0, int stride = 1, bool relu = true)
+			: Layer<D>(
+				  C_out * ((H_in - 1) * stride - 2 * pad + kH) *
+				          ((W_in - 1) * stride - 2 * pad + kW),
+				  1, N),
+			  C_in(C_in), H_in(H_in), W_in(W_in),
+			  C_out(C_out), kH(kH), kW(kW),
+			  pad_h(pad), pad_w(pad), stride_h(stride), stride_w(stride),
+			  H_out((H_in - 1) * stride - 2 * pad + kH),
+			  W_out((W_in - 1) * stride - 2 * pad + kW),
+			  batchN(N), use_relu(relu)
+		{
+			if (H_out <= 0 || W_out <= 0) {
+				LOG_ERROR("Invalid transposed-conv output shape: H_out={}, W_out={}", H_out, W_out);
+				ERROR_OUT;
+			}
+			this->weights = Matrix<D>::randn(C_in * C_out * kH * kW, 1) * 0.001f;
+			this->bias    = Matrix<D>::zeros(C_out, 1);
+			this->val     = Matrix<D>("convtrans_out", C_out * H_out * W_out, N);
+			this->adamW   = adam_state<D>(0.0001, C_in * C_out * kH * kW, 1);
+			this->adamb   = adam_state<D>(0.0001, C_out, 1);
+		}
+
+		void eval(const Matrix<D>& input) override {
+			const int P_in = H_in * W_in;
+			const int patch_rows = C_out * kH * kW;
+
+			// 1. Reshape input: (C_in*P_in, N) → x2d(C_in, P_in*N)
+			Matrix<D> x2d("deconv_x2d", C_in, P_in * batchN);
+			RocmConvTransReshape(ptr(input), ptr(x2d), C_in, P_in, batchN, 0);
+
+			// 2. GEMM: patches(patch_rows, P_in*N) = W(patch_rows, C_in) * x2d(C_in, P_in*N)
+			Matrix<D> patches("deconv_patches", patch_rows, P_in * batchN);
+			RocmGemm(ptr(this->weights), ptr(x2d), ptr(patches),
+			         patch_rows, P_in * batchN, C_in,
+			         false, false,
+			         patch_rows, C_in, patch_rows);
+
+			// 3. Scatter patches → output + bias
+			RocmConvTransScatter(ptr(patches), ptr(this->val), ptr(this->bias),
+			                      C_out, H_out, W_out, H_in, W_in,
+			                      kH, kW, pad_h, pad_w, stride_h, stride_w, batchN);
+
+			if (use_relu)
+				this->val = relu(Matrix<D>(this->val));
+		}
+
+		Matrix<D> grad(const Matrix<D>&) const override {
+			return Matrix<D>::ones(1, 1);
+		}
+
+		Matrix<D> backward(const Matrix<D>& input, Matrix<D>&& upstream_grad) override {
+			auto t = use_relu
+				? hadmd(d_relu(Matrix<D>(this->val)), std::move(upstream_grad))
+				: std::move(upstream_grad);
+
+			const int P_in = H_in * W_in;
+			const int patch_rows = C_out * kH * kW;
+
+			// 1. Gather upstream: t(C_out*H_out*W_out, N) → tp(patch_rows, P_in*N)
+			Matrix<D> tp("deconv_tp", patch_rows, P_in * batchN);
+			RocmConvTransGather(ptr(t), ptr(tp),
+			                     C_out, H_out, W_out, H_in, W_in,
+			                     kH, kW, pad_h, pad_w, stride_h, stride_w, batchN);
+
+			// 2. Pack input: (C_in*P_in, N) → x2d(C_in, P_in*N)
+			Matrix<D> x2d("deconv_x2d", C_in, P_in * batchN);
+			RocmConvTransReshape(ptr(input), ptr(x2d), C_in, P_in, batchN, 0);
+
+			// 3. dW: W_stored(patch_rows, C_in) = tp(patch_rows, P_in*N) * x2d(C_in, P_in*N)^T
+			Matrix<D> dW("deconv_dW", C_in * C_out * kH * kW, 1);
+			RocmGemm(ptr(tp), ptr(x2d), ptr(dW),
+			         patch_rows, C_in, P_in * batchN,
+			         false, true,
+			         patch_rows, C_in, patch_rows);
+
+			// 4. dx2d(C_in, P_in*N) = W(patch_rows, C_in)^T * tp(patch_rows, P_in*N)
+			Matrix<D> dx2d("deconv_dx2d", C_in, P_in * batchN);
+			RocmGemm(ptr(this->weights), ptr(tp), ptr(dx2d),
+			         C_in, P_in * batchN, patch_rows,
+			         true, false,
+			         patch_rows, patch_rows, C_in);
+
+			// 5. Unpack: dx2d(C_in, P_in*N) → dx(C_in*P_in, N)
+			Matrix<D> dx("deconv_dx", C_in * P_in, batchN);
+			RocmConvTransReshape(ptr(dx2d), ptr(dx), C_in, P_in, batchN, 1);
+
+			// 6. Bias gradient: sum over spatial+batch from upstream t
+			//    Reshape t → (C_out, H_out*W_out*N), then row-sum
+			const int P_out = H_out * W_out;
+			Matrix<D> t2d("deconv_t2d", C_out, P_out * batchN);
+			RocmConvBackwardReshape(ptr(t), ptr(t2d), C_out, P_out, batchN);
+			Matrix<D> db = sum(t2d, 1);
+
+			if (this->need_update)
+				this->update(std::move(dW), std::move(db));
+
+			return dx;
+		}
+	};
+
+	using ConvTransLayer = convtransLayer;
+#endif // ROCM_HIP
+
+#if !defined(CUDA) && !defined(APPLE_SILICON) && !defined(ROCM_HIP)
 	class ConvLayer : public Layer<float> {
 		using D = float;
 
@@ -1813,7 +2085,7 @@ namespace Juzhen
 	};
 
 	using ConvTransLayer = convtransLayer;
-#endif // !CUDA && !APPLE_SILICON
+#endif // !CUDA && !APPLE_SILICON && !ROCM_HIP
 
 }
 

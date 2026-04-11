@@ -91,3 +91,5 @@ Zt.csv
 stock_analysis/**
 build_cuda126/**
 build*/**
+
+*.txt

@@ -25,12 +25,6 @@
 
 #include "../cpp/juzhen.hpp"
 
-#ifdef CUDA
-#define __GPU_CPU__ __device__ __host__
-#else
-#define __GPU_CPU__
-#endif
-
 template <class T>
 Matrix<T> comp_dist(const Matrix<T> &a, const Matrix<T> &b)
 {
@@ -137,7 +131,7 @@ int compute()
 	}
 	auto YT = read<int>(base + "/test_y.matrix");
 
-#ifdef CUDA
+#if defined(CUDA) || defined(ROCM_HIP)
 	auto X = (CM) read<float>(base + "/train_x.matrix");
 	auto Y = (CM) Yhost;
 	auto XT = (CM) read<float>(base + "/test_x.matrix");
@@ -169,7 +163,7 @@ int compute()
 #endif
 	auto pred = predict(nn5, Y);
 
-#ifdef CUDA
+#if defined(CUDA) || defined(ROCM_HIP)
 	M hpred = pred.to_host();
 #else
 	M &hpred = pred;

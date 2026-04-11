@@ -47,6 +47,12 @@ inline Matrix<CUDAfloat> randn(int m, int n) { return Matrix<CUDAfloat>::randn(m
 inline Matrix<CUDAfloat> ones(int m, int n)  { return Matrix<CUDAfloat>::ones(m, n);  }
 inline Matrix<CUDAfloat> zeros(int m, int n) { return Matrix<CUDAfloat>::zeros(m, n); }
 inline Matrix<CUDAfloat> vs(std::vector<MatrixView<CUDAfloat>> matrices) { return vstack(matrices); }
+#elif defined(ROCM_HIP)
+#define FLOAT ROCMfloat
+inline Matrix<ROCMfloat> randn(int m, int n) { return Matrix<ROCMfloat>::randn(m, n); }
+inline Matrix<ROCMfloat> ones(int m, int n)  { return Matrix<ROCMfloat>::ones(m, n);  }
+inline Matrix<ROCMfloat> zeros(int m, int n) { return Matrix<ROCMfloat>::zeros(m, n); }
+inline Matrix<ROCMfloat> vs(std::vector<MatrixView<ROCMfloat>> matrices) { return vstack(matrices); }
 #elif defined(APPLE_SILICON)
 #define FLOAT MPSfloat
 inline Matrix<MPSfloat> randn(int m, int n) { return Matrix<MPSfloat>::randn(m, n); }
@@ -62,7 +68,7 @@ inline Matrix<float> vs(std::vector<MatrixView<float>> matrices) { return vstack
 #endif
 
 static Matrix<float> to_host(const Matrix<FLOAT>& M) {
-#if defined(CUDA) || defined(APPLE_SILICON)
+#if defined(CUDA) || defined(ROCM_HIP) || defined(APPLE_SILICON)
     return M.to_host();
 #else
     return M;
@@ -366,7 +372,7 @@ static Matrix<FLOAT> euler_sample(RectifiedUNet& net, int batchsize, int euler_s
             t_host.elem(0, b) = tv;
         build_time_channels(temb_host, t_host, H, W, batchsize);
 
-#if defined(CUDA) || defined(APPLE_SILICON)
+#if defined(CUDA) || defined(ROCM_HIP) || defined(APPLE_SILICON)
         Matrix<FLOAT> temb(temb_host);
 #else
         Matrix<FLOAT>& temb = temb_host;
@@ -402,7 +408,11 @@ int compute() {
 
     // Create output directory
     {
+#ifdef _WIN32
+        std::string cmd = "mkdir \"" + out_dir + "\" 2>nul";
+#else
         std::string cmd = "mkdir -p " + out_dir;
+#endif
         if (system(cmd.c_str()) != 0)
             std::cerr << "Warning: could not create " << out_dir << std::endl;
     }
@@ -410,6 +420,8 @@ int compute() {
     const std::string backend_str =
 #ifdef CUDA
         "cuda";
+#elif defined(ROCM_HIP)
+        "rocm";
 #elif defined(APPLE_SILICON)
         "metal";
 #else
@@ -471,7 +483,7 @@ int compute() {
                     x1_host.elem(p, b) = cifar_host.elem(p, img_idx);
             }
 
-#if defined(CUDA) || defined(APPLE_SILICON)
+#if defined(CUDA) || defined(ROCM_HIP) || defined(APPLE_SILICON)
             Matrix<FLOAT> x1(x1_host);
 #else
             Matrix<FLOAT>& x1 = x1_host;
@@ -482,7 +494,7 @@ int compute() {
             for (int b = 0; b < batchsize; ++b)
                 t_host.elem(0, b) = udist(global_rand_gen);
 
-#if defined(CUDA) || defined(APPLE_SILICON)
+#if defined(CUDA) || defined(ROCM_HIP) || defined(APPLE_SILICON)
             Matrix<FLOAT> t_val(t_host);
 #else
             Matrix<FLOAT>& t_val = t_host;
@@ -502,7 +514,7 @@ int compute() {
             // Multi-frequency time encoding
             Matrix<float> temb_host("temb", TIME_CH * H * W, batchsize);
             build_time_channels(temb_host, t_host, H, W, batchsize);
-#if defined(CUDA) || defined(APPLE_SILICON)
+#if defined(CUDA) || defined(ROCM_HIP) || defined(APPLE_SILICON)
             Matrix<FLOAT> temb(temb_host);
 #else
             Matrix<FLOAT>& temb = temb_host;

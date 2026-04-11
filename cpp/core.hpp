@@ -241,6 +241,7 @@ class Matrix {
     friend class Memory<D>;
     friend class Matrix<CUDAfloat>;
     friend class Matrix<MPSfloat>;
+    friend class Matrix<ROCMfloat>;
 };
 
 template <class D>
@@ -576,12 +577,16 @@ Matrix<D> Matrix<D>::eleminv(double l) const {
 
 template <class D>
 void read(FILE *f, Matrix<D> &M){
-    // read int variables to the file.
+    // read int variables from the file.
     size_t numrow = getw(f);
     size_t numcol = getw(f);
     size_t transpose = getw(f);
 
-    int bytesread = fread(M.elements.get(), sizeof(D), numcol * numrow, f);
+    M.numrow = numrow;
+    M.numcol = numcol;
+    M.transpose = transpose;
+    M.elements.reset(new D[numrow * numcol]);
+    fread(M.elements.get(), sizeof(D), numcol * numrow, f);
 }
 
 /*
@@ -610,7 +615,7 @@ void write(FILE *f, const Matrix<D> &M) {
     putw(M.numrow, f);
     putw(M.numcol, f);
     putw(M.transpose, f);
-    fwrite(M.elements.get(), sizeof(CUDAfloat), M.numcol * M.numrow, f);
+    fwrite(M.elements.get(), sizeof(D), M.numcol * M.numrow, f);
 }
 
 template <class D>
@@ -621,7 +626,10 @@ template <class D>
     */
 void write(std::string filename, const Matrix<D> &M) {
     FILE *f = fopen(filename.c_str(), "wb");
-    // write int variables to the file.
+    if (!f) {
+        LOG_ERROR("write: cannot open file %s", filename.c_str());
+        return;
+    }
 
     write(f, M);
 

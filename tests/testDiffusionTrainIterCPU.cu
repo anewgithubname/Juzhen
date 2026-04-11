@@ -11,7 +11,7 @@
 using namespace Juzhen;
 using namespace std;
 
-#if defined(CUDA) || defined(APPLE_SILICON)
+#if defined(CUDA) || defined(APPLE_SILICON) || defined(ROCM_HIP)
 int compute() {
     cout << "testDiffusionTrainIterCPU requires a CPU-only build." << endl;
     return 0;

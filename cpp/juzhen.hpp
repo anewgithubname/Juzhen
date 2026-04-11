@@ -1,6 +1,10 @@
 #ifndef JUZHEN_HPP
 #define JUZHEN_HPP
 
+#if __has_include("juzhen_config.h")
+#include "juzhen_config.h"
+#endif
+
 int compute();
 
 class Codeimp;
@@ -25,6 +29,14 @@ typedef Matrix<float> M;
 #include "cumatrix.cuh"
 typedef Matrix<CUDAfloat> CM;
 #define __GPU_CPU__ __device__ __host__
+#elif defined(ROCM_HIP)
+#include "hipmatrix.cuh"
+typedef Matrix<ROCMfloat> CM;
+#if defined(__HIP__)
+#define __GPU_CPU__ __device__ __host__
+#else
+#define __GPU_CPU__
+#endif
 #else
 #define __GPU_CPU__
 #endif
