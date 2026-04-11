@@ -29,7 +29,7 @@
 #include "helper.hpp"
 #include "memory.hpp"
 
-#include <climits>
+#include <cstdint>
 #include <sstream>
 #include <fstream>
 
@@ -600,8 +600,8 @@ void read(FILE *f, Matrix<D> &M){
     M.numcol = numcol;
     M.transpose = itrans;
     M.elements.reset(new D[numrow * numcol]);
-    size_t bytesread = fread(M.elements.get(), sizeof(D), numcol * numrow, f);
-    if (bytesread != numcol * numrow) {
+    size_t itemsread = fread(M.elements.get(), sizeof(D), numcol * numrow, f);
+    if (itemsread != numcol * numrow) {
         LOG_ERROR("read: unexpected end of file");
         ERROR_OUT;
     }
@@ -640,9 +640,9 @@ Matrix<D> read(std::string filename) {
     }
 
     Matrix<D> A(filename.c_str(), numrow, numcol, itrans);
-    size_t bytesread = fread(A.elements.get(), sizeof(D), numcol * numrow, f);
+    size_t itemsread = fread(A.elements.get(), sizeof(D), numcol * numrow, f);
 
-    if (bytesread != numcol * numrow) {
+    if (itemsread != numcol * numrow) {
         fclose(f);
         LOG_ERROR("read: unexpected end of file in {}", filename);
         ERROR_OUT;
