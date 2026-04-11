@@ -81,6 +81,11 @@ namespace Juzhen
             d = (size_t)id;
             n = (size_t)in;
 
+            if (d != 0 && n > SIZE_MAX / d) {
+                std::cout << "Error: dataset dimensions overflow" << std::endl;
+                ERROR_OUT;
+            }
+
             int trans1 = getw(fp_input);
             int trans2 = getw(fp_output);
             if( trans1 || trans2 ) {

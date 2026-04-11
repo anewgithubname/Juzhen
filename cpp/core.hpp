@@ -641,12 +641,14 @@ Matrix<D> read(std::string filename) {
 
     Matrix<D> A(filename.c_str(), numrow, numcol, itrans);
     size_t bytesread = fread(A.elements.get(), sizeof(D), numcol * numrow, f);
-    fclose(f);
 
     if (bytesread != numcol * numrow) {
+        fclose(f);
         LOG_ERROR("read: unexpected end of file in {}", filename);
         ERROR_OUT;
     }
+
+    fclose(f);
 
     return A;
 }
