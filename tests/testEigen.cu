@@ -4,6 +4,7 @@
  */
 
 #define EIGEN_USE_BLAS
+#define EIGEN_NO_CUDA
 
 #include "../cpp/juzhen.hpp"
 #include "../external/Eigen3/include/eigen3/Eigen/Dense"

@@ -93,3 +93,8 @@ build_cuda126/**
 build*/**
 
 *.txt
+*.log
+external/boost**
+
+# demo_transformer downloadable corpus (e.g. tiny-shakespeare); regenerate with curl
+examples/corpus.txt

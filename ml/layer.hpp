@@ -27,6 +27,7 @@
 #define LAYER2_HPP
 
 #include <cfloat>
+#include <type_traits>
 #include "../cpp/core.hpp" 
 #include "../cpp/matrix.hpp"
 #include "./util.cuh"
@@ -218,12 +219,30 @@ namespace Juzhen
 		}
 
 		Matrix<D> grad(const Matrix<D>& input) const override {
-			auto Z = oneK1 * sum(exp(input), 0);
-			return - (output - exp(input) / std::move(Z)) / Layer<D>::nb;
+			// Numerically stable softmax: subtract column-wise max before exp.
+			auto mx = reduce(
+				[] __GPU_CPU__(float* v, float* vdes, int lenv, int) {
+					float m = -1e30f;
+					for (int i = 0; i < lenv; i++) m = m > v[i] ? m : v[i];
+					vdes[0] = m;
+				}, input, 0, 1);                       // (1, N)
+			auto shifted = input - oneK1 * mx;         // (K, N)
+			auto E = exp(std::move(shifted));
+			auto Z = oneK1 * sum(E, 0);
+			return - (output - E / std::move(Z)) / Layer<D>::nb;
 		}
 
 		void eval(const Matrix<D>& input) override {
-			Layer<D>::val = sum(hadmd(input, output), 0) - log(sum(exp(input),0));
+			// Numerically stable log-sum-exp: max subtraction prevents overflow.
+			auto mx = reduce(
+				[] __GPU_CPU__(float* v, float* vdes, int lenv, int) {
+					float m = -1e30f;
+					for (int i = 0; i < lenv; i++) m = m > v[i] ? m : v[i];
+					vdes[0] = m;
+				}, input, 0, 1);                       // (1, N)
+			auto shifted = input - oneK1 * mx;         // (K, N)
+			auto lse = log(sum(exp(std::move(shifted)), 0)) + mx; // (1, N)
+			Layer<D>::val = sum(hadmd(input, output), 0) - lse;
 			Layer<D>::val = - sum(Layer<D>::val, 1) / Layer<D>::nb;
 		}
 	};
@@ -2086,6 +2105,532 @@ namespace Juzhen
 
 	using ConvTransLayer = convtransLayer;
 #endif // !CUDA && !APPLE_SILICON && !ROCM_HIP
+
+	// ── Transformer Layer ─────────────────────────────────────────────────
+
+	// Column-wise softmax: softmax along dim-0 (each column independently).
+	// M shape: (rows, cols).  Returns same shape.
+	template <class D>
+	Matrix<D> col_softmax(const Matrix<D>& M) {
+		// max per column for numerical stability
+		auto mx = reduce(
+			[] __GPU_CPU__(float* v, float* vdes, int lenv, int) {
+				float m = -1e30f;
+				for (int i = 0; i < lenv; i++) m = m > v[i] ? m : v[i];
+				vdes[0] = m;
+			}, M, 0, 1);                           // (1, cols)
+		auto shifted = M - Matrix<D>::ones(M.num_row(), 1) * mx;
+		auto e = exp(std::move(shifted));
+		auto s = sum(e, 0);                        // (1, cols)
+		return hadmd(e, Matrix<D>::ones(M.num_row(), 1) * (elemwise(
+			[] __GPU_CPU__(float x) { return 1.0f / (x + 1e-12f); }, std::move(s))));
+	}
+
+	// Row-wise softmax: softmax along dim-1 (each row independently).
+	// This is the axis attention needs: for a scores matrix indexed
+	// [query, key], each query row becomes a distribution over keys.
+	// Implemented as a column-softmax of the transpose.
+	template <class D>
+	Matrix<D> row_softmax(const Matrix<D>& M) {
+		return col_softmax(M.T()).T();
+	}
+
+#ifdef CUDA
+	// Row-wise softmax within each (seq_len x seq_len) attention block.
+	// Input/output are stored (seq_len, seq_len * batchN) column-major; for each
+	// (batch, query-row) pair we normalize across the seq_len keys of that block.
+	__global__ void softmax_rows_batched_kernel(const float* x, float* y, int seq_len, int batchN) {
+		int gid = blockIdx.x * blockDim.x + threadIdx.x;
+		int total = seq_len * batchN;
+		if (gid >= total) return;
+
+		int blk = gid / seq_len;
+		int a = gid % seq_len;            // query row within the block
+		int col0 = blk * seq_len;
+
+		float m = -1e30f;
+		for (int b = 0; b < seq_len; ++b) {
+			float v = x[a + (col0 + b) * seq_len];
+			m = m > v ? m : v;
+		}
+
+		float s = 0.0f;
+		for (int b = 0; b < seq_len; ++b) {
+			float e = expf(x[a + (col0 + b) * seq_len] - m);
+			y[a + (col0 + b) * seq_len] = e;
+			s += e;
+		}
+
+		float inv = 1.0f / (s + 1e-12f);
+		for (int b = 0; b < seq_len; ++b) {
+			y[a + (col0 + b) * seq_len] *= inv;
+		}
+	}
+
+	__global__ void causal_mask_kernel(float* s, int seq_len, int batchN, float mask_val) {
+		int idx = blockIdx.x * blockDim.x + threadIdx.x;
+		int total = seq_len * seq_len * batchN;
+		if (idx >= total) return;
+
+		int local = idx % (seq_len * seq_len);
+		int row = local % seq_len;
+		int col = local / seq_len;
+
+		// Causal masking: forbid attending to future keys (key index > query index).
+		if (col > row) s[idx] = mask_val;
+	}
+
+	// Backward of the row-wise softmax.  A (row-normalized) is stored
+	// (seq_len, seq_len*batchN) with A[a,b] at a + (blk*seq_len + b)*seq_len.
+	// dAT holds d(A^T): dA[a,b] = dAT[b + (blk*seq_len + a)*seq_len].
+	// One thread per (block, query-row a); reduces over keys b.
+	__global__ void softmax_backward_rows_kernel(
+		const float* A,
+		const float* dAT,
+		float* dS,
+		int seq_len,
+		int batchN,
+		float scale) {
+		int gid = blockIdx.x * blockDim.x + threadIdx.x;
+		int total = seq_len * batchN;
+		if (gid >= total) return;
+
+		int blk = gid / seq_len;
+		int a = gid % seq_len;            // query row
+		int col0 = blk * seq_len;
+
+		float row_sum = 0.0f;
+		for (int b = 0; b < seq_len; ++b) {
+			float av = A[a + (col0 + b) * seq_len];
+			float da = dAT[b + (col0 + a) * seq_len];
+			row_sum += av * da;
+		}
+
+		for (int b = 0; b < seq_len; ++b) {
+			float av = A[a + (col0 + b) * seq_len];
+			float da = dAT[b + (col0 + a) * seq_len];
+			dS[a + (col0 + b) * seq_len] = av * (da - row_sum) * scale;
+		}
+	}
+
+	inline void cuda_softmax_rows_batched(const float* x, float* y, int seq_len, int batchN) {
+		const int total = seq_len * batchN;
+		const int threads = 128;
+		const int blocks = (total + threads - 1) / threads;
+		softmax_rows_batched_kernel<<<blocks, threads>>>(x, y, seq_len, batchN);
+		CudaErrorCheck(cudaGetLastError());
+	}
+
+	inline void cuda_apply_causal_mask(float* s, int seq_len, int batchN, float mask_val = -1e9f) {
+		const int total = seq_len * seq_len * batchN;
+		const int threads = 256;
+		const int blocks = (total + threads - 1) / threads;
+		causal_mask_kernel<<<blocks, threads>>>(s, seq_len, batchN, mask_val);
+		CudaErrorCheck(cudaGetLastError());
+	}
+
+	inline void cuda_softmax_backward_rows(
+		const float* A,
+		const float* dAT,
+		float* dS,
+		int seq_len,
+		int batchN,
+		float scale) {
+		const int total = seq_len * batchN;
+		const int threads = 128;
+		const int blocks = (total + threads - 1) / threads;
+		softmax_backward_rows_kernel<<<blocks, threads>>>(
+			A, dAT, dS, seq_len, batchN, scale);
+		CudaErrorCheck(cudaGetLastError());
+	}
+#endif
+
+	//
+	// Single-head self-attention + feed-forward block (pre-norm style).
+	//
+	// Input  shape: (d_model, seq_len * batch)   — each column is one token.
+	// Output shape: (d_model, seq_len * batch)   — same as input.
+	//
+	// Forward:
+	//   1. Q = Wq * x,  K = Wk * x,  V = Wv * x          (linear projections)
+	//   2. For each sequence in the batch:
+	//        A = softmax( Q_i^T K_i / sqrt(d_k) , dim=1 )  (seq_len x seq_len)
+	//        H_i = V_i * A^T                                (d_model x seq_len)
+	//   3. O = Wo * H + bo                                  (output projection)
+	//   4. R = x + O                                        (residual)
+	//   5. F = W2 * relu(W1 * R + b1) + b2                 (FFN)
+	//   6. out = R + F                                      (residual)
+	//
+	// Weight dimensions:
+	//   Wq, Wk, Wv : (d_k, d_model)          Wo : (d_model, d_k)
+	//   bo         : (d_model, 1)
+	//   W1         : (d_ff, d_model)          b1 : (d_ff, 1)
+	//   W2         : (d_model, d_ff)          b2 : (d_model, 1)
+	//
+	// Template on D so the same code compiles for float, CUDAfloat, MPSfloat, etc.
+	// All heavy lifting is done through the existing Matrix<D> BLAS/cuBLAS paths.
+
+	template <class D>
+	class TransformerLayer : public Layer<D> {
+		int d_model, d_k, d_ff, seq_len, batchN;
+
+		// ── Attention weights ──
+		Matrix<D> Wq, Wk, Wv, Wo, bo;
+		adam_state<D> adam_Wq, adam_Wk, adam_Wv, adam_Wo, adam_bo;
+
+		// ── FFN weights ──
+		Matrix<D> W1, b1, W2, b2;
+		adam_state<D> adam_W1, adam_b1, adam_W2, adam_b2;
+
+		// ── Cached forward intermediates (needed for backward) ──
+		Matrix<D> cached_input;         // x
+		Matrix<D> cached_Q, cached_K, cached_V;
+		Matrix<D> cached_H;             // attention output before Wo
+		Matrix<D> cached_R;             // residual after attention
+		Matrix<D> cached_F1;            // W1*R + b1  (pre-relu)
+		Matrix<D> cached_F1_relu;       // relu(F1)
+
+		// Per-sequence attention weight matrices: A_i = softmax(...)  shape (seq_len, seq_len)
+		// Stored concatenated: (seq_len, seq_len * batchN)
+		Matrix<D> cached_A;
+
+		// Reusable buffers to avoid repeated allocation in hot loops.
+		Matrix<D> ones_1N, ones_seq1, ones_1seq;
+		Matrix<D> attn_scores_scratch, attn_dAiT_scratch, attn_dS_scratch;
+
+	public:
+		/**
+		 * @param d_model  Token embedding dimension (input & output width).
+		 * @param d_k      Dimension of Q/K/V projections.
+		 * @param d_ff     Hidden dimension of the feed-forward sub-layer.
+		 * @param seq_len  Number of tokens per sequence.
+		 * @param batch    Number of sequences in a mini-batch.
+		 */
+		TransformerLayer(int d_model, int d_k, int d_ff, int seq_len, int batch)
+			: Layer<D>(d_model, 1, seq_len * batch),
+			  d_model(d_model), d_k(d_k), d_ff(d_ff),
+			  seq_len(seq_len), batchN(batch),
+			  // Attention weights
+			  Wq(Matrix<D>::randn(d_k, d_model) * (1.0f / sqrtf((float)d_model))),
+			  Wk(Matrix<D>::randn(d_k, d_model) * (1.0f / sqrtf((float)d_model))),
+			  Wv(Matrix<D>::randn(d_k, d_model) * (1.0f / sqrtf((float)d_model))),
+			  Wo(Matrix<D>::randn(d_model, d_k) * (1.0f / sqrtf((float)d_k))),
+			  bo(Matrix<D>::zeros(d_model, 1)),
+			  adam_Wq(0.0001, d_k, d_model), adam_Wk(0.0001, d_k, d_model),
+			  adam_Wv(0.0001, d_k, d_model), adam_Wo(0.0001, d_model, d_k),
+			  adam_bo(0.0001, d_model, 1),
+			  // FFN weights
+			  W1(Matrix<D>::randn(d_ff, d_model) * (1.0f / sqrtf((float)d_model))),
+			  b1(Matrix<D>::zeros(d_ff, 1)),
+			  W2(Matrix<D>::randn(d_model, d_ff) * (1.0f / sqrtf((float)d_ff))),
+			  b2(Matrix<D>::zeros(d_model, 1)),
+			  adam_W1(0.0001, d_ff, d_model), adam_b1(0.0001, d_ff, 1),
+			  adam_W2(0.0001, d_model, d_ff), adam_b2(0.0001, d_model, 1),
+			  // Cached tensors (fixed-size for this layer instance)
+			  cached_input("ti", d_model, seq_len * batch),
+			  cached_Q("tq", d_k, seq_len * batch), cached_K("tk", d_k, seq_len * batch),
+			  cached_V("tv", d_k, seq_len * batch), cached_H("th", d_k, seq_len * batch),
+			  cached_R("tr", d_model, seq_len * batch),
+			  cached_F1("tf1", d_ff, seq_len * batch), cached_F1_relu("tf1r", d_ff, seq_len * batch),
+			  cached_A("ta", seq_len, seq_len * batch),
+			  ones_1N("ones_1N", 1, seq_len * batch), ones_seq1("ones_seq1", seq_len, 1),
+			  ones_1seq("ones_1seq", 1, seq_len),
+			  attn_scores_scratch("attn_scores", seq_len, seq_len * batch),
+			  attn_dAiT_scratch("attn_dAiT", seq_len, seq_len * batch),
+			  attn_dS_scratch("attn_dS", seq_len, seq_len * batch)
+		{
+			// Override base-class weights/bias/adam to be dummy (unused).
+			this->weights = Matrix<D>::zeros(1, 1);
+			this->bias    = Matrix<D>::zeros(1, 1);
+			this->adamW   = adam_state<D>(0.0001, 1, 1);
+			this->adamb   = adam_state<D>(0.0001, 1, 1);
+			ones_1N.ones();
+			ones_seq1.ones();
+			ones_1seq.ones();
+		}
+
+		void eval(const Matrix<D>& input) override {
+			const int N = seq_len * batchN;
+			cached_input = input;
+
+			// 1. Linear projections  — Q,K,V : (d_k, N)
+			cached_Q = Wq * input;
+			cached_K = Wk * input;
+			cached_V = Wv * input;
+
+			// 2. Self-attention per sequence
+			//    H : (d_k, N),  A : (seq_len, seq_len * batchN)
+			const float scale = 1.0f / sqrtf((float)d_k);
+
+#ifdef CUDA
+			if constexpr (std::is_same_v<D, CUDAfloat>) {
+				const float zero = 0.0f;
+				const long long stride_qkv = (long long)d_k * (long long)seq_len;
+				const long long stride_attn = (long long)seq_len * (long long)seq_len;
+
+				const float* q_ptr = reinterpret_cast<const float*>(cached_Q.data());
+				const float* k_ptr = reinterpret_cast<const float*>(cached_K.data());
+				float* scores_ptr = const_cast<float*>(reinterpret_cast<const float*>(attn_scores_scratch.data()));
+				CuBLASErrorCheck(cublasSgemmStridedBatched(
+					Matrix<CUDAfloat>::global_handle,
+					CUBLAS_OP_T, CUBLAS_OP_N,
+					seq_len, seq_len, d_k,
+					&scale,
+					q_ptr, d_k, stride_qkv,
+					k_ptr, d_k, stride_qkv,
+					&zero,
+					scores_ptr, seq_len, stride_attn,
+					batchN));
+
+				cuda_apply_causal_mask(scores_ptr, seq_len, batchN);
+
+				cuda_softmax_rows_batched(
+					reinterpret_cast<const float*>(attn_scores_scratch.data()),
+					const_cast<float*>(reinterpret_cast<const float*>(cached_A.data())),
+					seq_len,
+					batchN);
+
+				const float one = 1.0f;
+				const float* v_ptr = reinterpret_cast<const float*>(cached_V.data());
+				const float* a_ptr = reinterpret_cast<const float*>(cached_A.data());
+				float* h_ptr = const_cast<float*>(reinterpret_cast<const float*>(cached_H.data()));
+				CuBLASErrorCheck(cublasSgemmStridedBatched(
+					Matrix<CUDAfloat>::global_handle,
+					CUBLAS_OP_N, CUBLAS_OP_T,
+					d_k, seq_len, seq_len,
+					&one,
+					v_ptr, d_k, stride_qkv,
+					a_ptr, seq_len, stride_attn,
+					&zero,
+					h_ptr, d_k, stride_qkv,
+					batchN));
+			} else
+#endif
+			{
+				for (int b = 0; b < batchN; ++b) {
+					const int c0 = b * seq_len;
+					// Q_i, K_i, V_i : (d_k, seq_len)  — columns c0..c0+seq_len-1
+					auto Qi = cached_Q.slice(0, d_k, c0, c0 + seq_len);
+					auto Ki = cached_K.slice(0, d_k, c0, c0 + seq_len);
+					auto Vi = cached_V.slice(0, d_k, c0, c0 + seq_len);
+
+					// scores : (seq_len, seq_len) = Qi^T * Ki * scale
+					auto scores = Qi.T() * Ki * scale;
+					// Causal masking: for query row, disallow future keys col > row.
+					for (int row = 0; row < seq_len; ++row) {
+						for (int col = row + 1; col < seq_len; ++col) {
+							scores.elem(row, col) = -1e9f;
+						}
+					}
+					// A_i : (seq_len, seq_len) — softmax each row (over keys)
+					auto Ai = row_softmax(scores);
+
+					// H_i : (d_k, seq_len) = Vi * Ai.T
+					auto Hi = Vi * Ai.T();
+
+					// Store into cached_H, cached_A
+					cached_H.slice(0, d_k, c0, c0 + seq_len, Hi);
+					cached_A.slice(0, seq_len, b * seq_len, (b + 1) * seq_len, Ai);
+				}
+			}
+
+			// 3. Output projection + residual
+			auto O = Wo * cached_H + bo * ones_1N;
+			cached_R = input + O;
+
+			// 4. FFN: relu(W1*R + b1) then W2*...+b2
+			cached_F1 = W1 * cached_R + b1 * ones_1N;
+			cached_F1_relu = relu(Matrix<D>(cached_F1));
+			auto F = W2 * cached_F1_relu + b2 * ones_1N;
+
+			// 5. Second residual
+			this->val = cached_R + F;
+		}
+
+		Matrix<D> grad(const Matrix<D>&) const override {
+			return Matrix<D>::ones(1, 1);
+		}
+
+		Matrix<D> backward(const Matrix<D>& input, Matrix<D>&& upstream_grad) override {
+			const int N = seq_len * batchN;
+			auto dout = std::move(upstream_grad);         // (d_model, N)
+
+			// ── FFN backward ──────────────────────────────────────────────
+			// dF = dout  (from second residual)
+			auto dF = Matrix<D>(dout);
+			auto dW2 = dF * cached_F1_relu.T();           // (d_model, d_ff)
+			auto db2 = sum(dF, 1);                         // (d_model, 1)
+			auto dF1_relu = W2.T() * dF;                   // (d_ff, N)
+			auto dF1 = hadmd(d_relu(Matrix<D>(cached_F1)), std::move(dF1_relu)); // (d_ff, N)
+			auto dW1 = dF1 * cached_R.T();                 // (d_ff, d_model)
+			auto db1 = sum(dF1, 1);                         // (d_ff, 1)
+			auto dR = W1.T() * dF1 + dout;                 // (d_model, N) — from FFN + residual
+
+			// ── Attention output projection backward ──────────────────────
+			// O = Wo * H + bo  →  dR flows into dO
+			auto dO = Matrix<D>(dR);                        // (d_model, N)
+			auto dWo = dO * cached_H.T();                   // (d_model, d_k)
+			auto dbo = sum(dO, 1);                           // (d_model, 1)
+			auto dH = Wo.T() * dO;                           // (d_k, N)
+			// dR also flows through residual to dx
+			auto dx = Matrix<D>(dR);                         // will accumulate
+
+			// ── Self-attention backward (per sequence) ────────────────────
+			Matrix<D> dQ = Matrix<D>::zeros(d_k, N);
+			Matrix<D> dK = Matrix<D>::zeros(d_k, N);
+			Matrix<D> dV = Matrix<D>::zeros(d_k, N);
+			const float scale = 1.0f / sqrtf((float)d_k);
+
+#ifdef CUDA
+			if constexpr (std::is_same_v<D, CUDAfloat>) {
+				const float one = 1.0f;
+				const float zero = 0.0f;
+				const long long stride_qkv = (long long)d_k * (long long)seq_len;
+				const long long stride_attn = (long long)seq_len * (long long)seq_len;
+
+				const float* dh_ptr = reinterpret_cast<const float*>(dH.data());
+				const float* a_ptr = reinterpret_cast<const float*>(cached_A.data());
+				float* dv_ptr = const_cast<float*>(reinterpret_cast<const float*>(dV.data()));
+				CuBLASErrorCheck(cublasSgemmStridedBatched(
+					Matrix<CUDAfloat>::global_handle,
+					CUBLAS_OP_N, CUBLAS_OP_N,
+					d_k, seq_len, seq_len,
+					&one,
+					dh_ptr, d_k, stride_qkv,
+					a_ptr, seq_len, stride_attn,
+					&zero,
+					dv_ptr, d_k, stride_qkv,
+					batchN));
+
+				const float* v_ptr = reinterpret_cast<const float*>(cached_V.data());
+				float* dait_ptr = const_cast<float*>(reinterpret_cast<const float*>(attn_dAiT_scratch.data()));
+				CuBLASErrorCheck(cublasSgemmStridedBatched(
+					Matrix<CUDAfloat>::global_handle,
+					CUBLAS_OP_T, CUBLAS_OP_N,
+					seq_len, seq_len, d_k,
+					&one,
+					v_ptr, d_k, stride_qkv,
+					dh_ptr, d_k, stride_qkv,
+					&zero,
+					dait_ptr, seq_len, stride_attn,
+					batchN));
+
+				cuda_softmax_backward_rows(
+					reinterpret_cast<const float*>(cached_A.data()),
+					reinterpret_cast<const float*>(attn_dAiT_scratch.data()),
+					const_cast<float*>(reinterpret_cast<const float*>(attn_dS_scratch.data())),
+					seq_len,
+					batchN,
+					scale);
+
+				const float* k_ptr = reinterpret_cast<const float*>(cached_K.data());
+				const float* q_ptr = reinterpret_cast<const float*>(cached_Q.data());
+				const float* ds_ptr = reinterpret_cast<const float*>(attn_dS_scratch.data());
+				float* dq_ptr = const_cast<float*>(reinterpret_cast<const float*>(dQ.data()));
+				float* dk_ptr = const_cast<float*>(reinterpret_cast<const float*>(dK.data()));
+
+				CuBLASErrorCheck(cublasSgemmStridedBatched(
+					Matrix<CUDAfloat>::global_handle,
+					CUBLAS_OP_N, CUBLAS_OP_T,
+					d_k, seq_len, seq_len,
+					&one,
+					k_ptr, d_k, stride_qkv,
+					ds_ptr, seq_len, stride_attn,
+					&zero,
+					dq_ptr, d_k, stride_qkv,
+					batchN));
+
+				CuBLASErrorCheck(cublasSgemmStridedBatched(
+					Matrix<CUDAfloat>::global_handle,
+					CUBLAS_OP_N, CUBLAS_OP_N,
+					d_k, seq_len, seq_len,
+					&one,
+					q_ptr, d_k, stride_qkv,
+					ds_ptr, seq_len, stride_attn,
+					&zero,
+					dk_ptr, d_k, stride_qkv,
+					batchN));
+			} else
+#endif
+			{
+				for (int b = 0; b < batchN; ++b) {
+					const int c0 = b * seq_len;
+					auto Qi = cached_Q.slice(0, d_k, c0, c0 + seq_len);
+					auto Ki = cached_K.slice(0, d_k, c0, c0 + seq_len);
+					auto Vi = cached_V.slice(0, d_k, c0, c0 + seq_len);
+					auto Ai = cached_A.slice(0, seq_len, b * seq_len, (b + 1) * seq_len);
+					auto dHi = dH.slice(0, d_k, c0, c0 + seq_len);
+
+					// H_i = V_i * A_i^T
+					// dV_i = dH_i * A_i            (d_k, seq_len)
+					// dA_i^T = V_i^T * dH_i        (seq_len, seq_len)
+					auto dVi = dHi * Ai;
+					auto dAiT = Vi.T() * dHi;       // (seq_len, seq_len) — gradient of A^T
+					auto dAi = dAiT.T();             // gradient of A itself
+
+					// Softmax backward (row-wise softmax over keys):
+					// A_i = softmax(S_i, dim=1) where S_i = Q_i^T K_i * scale
+					// dS = A ⊙ (dA − (sum(A ⊙ dA, over keys))·1ᵀ)
+					auto AodA = hadmd(Ai, dAi);                              // (seq_len, seq_len)
+					auto row_sum = sum(AodA, 1);                             // (seq_len, 1)
+					auto dSi = hadmd(Ai, dAi - row_sum * ones_1seq) * scale;
+					// S_i = Q_i^T * K_i * scale
+					// dQ_i = K_i * dS_i^T          (d_k, seq_len)
+					// dK_i = Q_i * dS_i            (d_k, seq_len)
+					auto dQi = Ki * dSi.T();
+					auto dKi = Qi * dSi;
+
+					dQ.slice(0, d_k, c0, c0 + seq_len, dQi);
+					dK.slice(0, d_k, c0, c0 + seq_len, dKi);
+					dV.slice(0, d_k, c0, c0 + seq_len, dVi);
+				}
+			}
+
+			// Projection backward: Q = Wq*x, K = Wk*x, V = Wv*x
+			auto dWq = dQ * cached_input.T();
+			auto dWk = dK * cached_input.T();
+			auto dWv = dV * cached_input.T();
+
+			// dx += Wq^T * dQ + Wk^T * dK + Wv^T * dV
+			dx += Wq.T() * dQ + Wk.T() * dK + Wv.T() * dV;
+
+			// ── Parameter updates ─────────────────────────────────────────
+			if (this->need_update) {
+				Wq -= adam_update(std::move(dWq), adam_Wq);
+				Wk -= adam_update(std::move(dWk), adam_Wk);
+				Wv -= adam_update(std::move(dWv), adam_Wv);
+				Wo -= adam_update(std::move(dWo), adam_Wo);
+				bo -= adam_update(std::move(dbo), adam_bo);
+				W1 -= adam_update(std::move(dW1), adam_W1);
+				b1 -= adam_update(std::move(db1), adam_b1);
+				W2 -= adam_update(std::move(dW2), adam_W2);
+				b2 -= adam_update(std::move(db2), adam_b2);
+			}
+
+			return dx;
+		}
+
+		// ── Accessors for parity testing ──
+		void set_Wq(const Matrix<D>& w) { Wq = w; }
+		void set_Wk(const Matrix<D>& w) { Wk = w; }
+		void set_Wv(const Matrix<D>& w) { Wv = w; }
+		void set_Wo(const Matrix<D>& w) { Wo = w; }
+		void set_bo(const Matrix<D>& w) { bo = w; }
+		void set_W1(const Matrix<D>& w) { W1 = w; }
+		void set_b1(const Matrix<D>& w) { b1 = w; }
+		void set_W2(const Matrix<D>& w) { W2 = w; }
+		void set_b2(const Matrix<D>& w) { b2 = w; }
+
+		const Matrix<D>& get_Wq() const { return Wq; }
+		const Matrix<D>& get_Wk() const { return Wk; }
+		const Matrix<D>& get_Wv() const { return Wv; }
+		const Matrix<D>& get_Wo() const { return Wo; }
+		const Matrix<D>& get_bo() const { return bo; }
+		const Matrix<D>& get_W1() const { return W1; }
+		const Matrix<D>& get_b1() const { return b1; }
+		const Matrix<D>& get_W2() const { return W2; }
+		const Matrix<D>& get_b2() const { return b2; }
+	};
 
 }
 

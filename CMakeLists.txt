@@ -3,50 +3,38 @@ cmake_minimum_required(VERSION 3.20 FATAL_ERROR)
 add_subdirectory(external/spdlog)
 
 # set the project directory as a macro, so that we can use it in the code
-# Use a generated header to avoid command-line quoting issues with hipcc/clang
-file(WRITE "${CMAKE_BINARY_DIR}/juzhen_config.h"
-    "#pragma once\n#define PROJECT_DIR \"${CMAKE_SOURCE_DIR}\"\n#define BENCHMARKSERVER \"DONOTKNOW\"\n"
-)
-include_directories("${CMAKE_BINARY_DIR}")
+add_definitions(-DPROJECT_DIR="${CMAKE_SOURCE_DIR}")
+# if you have a benchmark server running, you can specify it here
+add_definitions(-DBENCHMARKSERVER="DONOTKNOW")
 
-# do you need GPU support?
-option(NVIDIA_CUDA "Build with NVIDIA CUDA backend" OFF)
-option(ROCM_HIP "Build with AMD ROCm/HIP backend (scaffold)" OFF)
+# do you need GPU support? 
+option(NVIDIA_CUDA "Build with NVIDIA CUDA backend" ON)
 option(APPLE_SILICON "Build with Apple Silicon backend" OFF)
-option(JUZHEN_ENABLE_FTXUI "Build with FTXUI UI dependency" ON)
-set(ROCM_OFFLOAD_ARCH "" CACHE STRING "ROCm offload architecture, e.g. gfx1151")
+
+if(CMAKE_SYSTEM_NAME STREQUAL "Linux" AND NOT DEFINED CACHE{NVIDIA_CUDA})
+    set(NVIDIA_CUDA ON CACHE BOOL "Build with NVIDIA CUDA backend" FORCE)
+endif()
+
+if(APPLE AND NOT DEFINED CACHE{APPLE_SILICON})
+    set(APPLE_SILICON ON CACHE BOOL "Build with Apple Silicon backend" FORCE)
+endif()
+
+if(NVIDIA_CUDA AND APPLE_SILICON)
+    message(FATAL_ERROR "NVIDIA_CUDA and APPLE_SILICON cannot both be enabled.")
+endif()
+
 set(HAS_CONCEPTS ON)
 
 set(CMAKE_CXX_STANDARD 20)
 
 include(FetchContent)
-
-set(JUZHEN_UI_LIBS "")
-if(JUZHEN_ENABLE_FTXUI)
-        FetchContent_Declare(ftxui
-            GIT_REPOSITORY https://github.com/ArthurSonzogni/FTXUI
-            GIT_TAG v6.1.9  # Replace with a version, tag, or commit hash
-        )
-
-        FetchContent_MakeAvailable(ftxui)
-        list(APPEND JUZHEN_UI_LIBS ftxui::screen ftxui::dom ftxui::component)
-else()
-        message(STATUS "FTXUI disabled (JUZHEN_ENABLE_FTXUI=OFF)")
-endif()
-
-set(_gpu_backend_count 0)
-if(NVIDIA_CUDA)
-    math(EXPR _gpu_backend_count "${_gpu_backend_count}+1")
-endif()
-if(ROCM_HIP)
-    math(EXPR _gpu_backend_count "${_gpu_backend_count}+1")
-endif()
-if(APPLE_SILICON)
-    math(EXPR _gpu_backend_count "${_gpu_backend_count}+1")
-endif()
-if(_gpu_backend_count GREATER 1)
-    message(FATAL_ERROR "Select only one GPU backend: NVIDIA_CUDA, ROCM_HIP, or APPLE_SILICON")
-endif()
+ 
+FetchContent_Declare(ftxui
+  GIT_REPOSITORY https://github.com/ArthurSonzogni/FTXUI
+  GIT_TAG v6.1.9  # Replace with a version, tag, or commit hash
+)
+ 
+FetchContent_MakeAvailable(ftxui)
 
 if(NVIDIA_CUDA)
     message("BUILD WITH CUDA SUPPORT!")
@@ -59,53 +47,8 @@ if(NVIDIA_CUDA)
     set(CMAKE_CUDA_ARCHITECTURES 61)
     project(animated_octo_sniffle LANGUAGES CXX CUDA)
     find_package(CUDAToolkit REQUIRED)
-    set(CUDA_BACKEND_INCLUDE_DIRS ${CUDAToolkit_INCLUDE_DIRS})
-    if(NOT CUDA_BACKEND_INCLUDE_DIRS)
-        set(CUDA_BACKEND_INCLUDE_DIRS ${CUDA_INCLUDE_DIRS})
-    endif()
 
     set(CMAKE_CUDA_STANDARD 20)
-
-elseif(ROCM_HIP)
-    message("BUILD WITH ROCM/HIP SUPPORT! (scaffold)")
-    add_definitions(-DROCM_HIP)
-    project(animated_octo_sniffle LANGUAGES CXX)
-
-    # Try to pick up ROCm math/runtime libraries when available.
-    find_package(hipblas CONFIG QUIET)
-    find_package(rocblas CONFIG QUIET)
-    find_package(rocrand CONFIG QUIET)
-    find_package(rocsolver CONFIG QUIET)
-    find_package(MIOpen CONFIG QUIET)
-
-    set(ROCM_BACKEND_LIBS "")
-    if(TARGET hip::hipblas)
-        list(APPEND ROCM_BACKEND_LIBS hip::hipblas)
-    endif()
-    if(NOT TARGET hip::hipblas)
-        find_library(HIPBLAS_LIBRARY
-            NAMES hipblas libhipblas
-            HINTS
-                ${ROCM_PATH}/lib
-                $ENV{ROCM_PATH}/lib
-                $ENV{HIP_PATH}/lib
-                "C:/Program Files/AMD/ROCm/7.1/lib")
-        if(HIPBLAS_LIBRARY)
-            list(APPEND ROCM_BACKEND_LIBS ${HIPBLAS_LIBRARY})
-        endif()
-    endif()
-    if(TARGET roc::rocblas)
-        list(APPEND ROCM_BACKEND_LIBS roc::rocblas)
-    endif()
-    if(TARGET roc::rocrand)
-        list(APPEND ROCM_BACKEND_LIBS roc::rocrand)
-    endif()
-    if(TARGET roc::rocsolver)
-        list(APPEND ROCM_BACKEND_LIBS roc::rocsolver)
-    endif()
-    if(TARGET MIOpen)
-        list(APPEND ROCM_BACKEND_LIBS MIOpen)
-    endif()
 
 elseif(APPLE_SILICON)
     message("BUILD WITH APPLE SILICON SUPPORT! ")
@@ -147,12 +90,14 @@ set(OpenBLAS_INCLUDE_DIRS "external/OpenBLAS/include")
 
 set(spdlog_INCLUDE_DIRS "${PROJECT_SOURCE_DIR}/external/spdlog/include")
 
+set(BOOST_ROOT "${PROJECT_SOURCE_DIR}/external/boost_1_82_0")
+set(BOOST_INCLUDEDIR "${BOOST_ROOT}")
+set(Boost_NO_SYSTEM_PATHS ON)
+
 find_package(Boost REQUIRED)
 
 if(NVIDIA_CUDA) # add relevant backend implementations for CUDA 
     add_library(juzhen cpp/launcher.cu cpp/cumatrix.cu cpp/cukernels.cu)
-elseif(ROCM_HIP)
-    add_library(juzhen cpp/launcher.cu cpp/hipmatrix.cpp cpp/hipkernels.cpp)
 elseif(APPLE_SILICON) # add relevant backend implementations for Apple Silicon
     add_library(juzhen cpp/launcher.cu cpp/metal/MPSWrapper.mm cpp/mpsmatrix.cpp)
     add_dependencies(juzhen compile_shaders)
@@ -166,7 +111,7 @@ target_include_directories(juzhen PUBLIC ${OpenBLAS_INCLUDE_DIRS})
 target_include_directories(juzhen PUBLIC ${Boost_INCLUDE_DIRS})
 
 if(NVIDIA_CUDA) # if we are on GPU, we need to include the cuda headers
-    target_include_directories(juzhen PUBLIC ${CUDA_BACKEND_INCLUDE_DIRS})
+    target_include_directories(juzhen PUBLIC ${CUDA_INCLUDE_DIRS})
     target_compile_options(juzhen PRIVATE $<$<COMPILE_LANGUAGE:CUDA>:--extended-lambda>)
     set(CUDA_EXTRA_LIBS ${CUDA_LIBRARIES} ${CUDA_cublas_LIBRARY} ${CUDA_curand_LIBRARY} ${CUDA_cusolver_LIBRARY})
 
@@ -202,17 +147,7 @@ if(NVIDIA_CUDA) # if we are on GPU, we need to include the cuda headers
         set(CMAKE_BUILD_RPATH "${CMAKE_BUILD_RPATH};${CUDNN_LIB_DIR}")
         set(CMAKE_INSTALL_RPATH "${CMAKE_INSTALL_RPATH};${CUDNN_LIB_DIR}")
     else()
-        message(WARNING "cuDNN not found; demo_cnn_mnist_cudnn will be unavailable.")
-    endif()
-elseif(ROCM_HIP)
-    # Keep launcher.cu in C++ mode for ROCm scaffold builds.
-    set_source_files_properties(cpp/launcher.cu PROPERTIES LANGUAGE CXX)
-    set_target_properties(juzhen PROPERTIES LINKER_LANGUAGE CXX)
-    if(CMAKE_CXX_COMPILER_ID MATCHES "Clang" AND ROCM_OFFLOAD_ARCH)
-        target_compile_options(juzhen PRIVATE "--offload-arch=${ROCM_OFFLOAD_ARCH}")
-    endif()
-    if(ROCM_BACKEND_LIBS)
-        target_link_libraries(juzhen ${ROCM_BACKEND_LIBS})
+        message(WARNING "cuDNN not found; ConvLayer/demo_cnn_mnist will be disabled.")
     endif()
 else()
     set_source_files_properties(cpp/launcher.cu PROPERTIES LANGUAGE CXX) # specify cuda files lanaugae to be CXX
@@ -230,25 +165,21 @@ macro(GENERATE_PROJ TARGETNAME FILE)
 
     
     if(NVIDIA_CUDA) # if we are on GPU, we need to link the cuda libraries
-        target_include_directories(${TARGETNAME} PUBLIC ${CUDA_BACKEND_INCLUDE_DIRS})
-        target_link_libraries(${TARGETNAME} ${JUZHEN_UI_LIBS} spdlog::spdlog ${BLAS_LIBRARIES} ${OpenBLAS_LIBRARIES} juzhen ${CUDA_EXTRA_LIBS})
-        target_compile_options(${TARGETNAME} PRIVATE $<$<COMPILE_LANGUAGE:CUDA>:--extended-lambda>)
-    elseif(ROCM_HIP)
-        target_link_libraries(${TARGETNAME} ${JUZHEN_UI_LIBS} spdlog::spdlog ${BLAS_LIBRARIES} ${OpenBLAS_LIBRARIES} juzhen ${ROCM_BACKEND_LIBS})
-        if(JUZHEN_ENABLE_FTXUI)
-            target_include_directories(${TARGETNAME} PRIVATE ${ftxui_SOURCE_DIR}/include)
+        target_include_directories(${TARGETNAME} PUBLIC ${CUDA_INCLUDE_DIRS})
+        if(WIN32)
+            target_link_libraries(${TARGETNAME} spdlog::spdlog ${BLAS_LIBRARIES} ${OpenBLAS_LIBRARIES} juzhen ${CUDA_EXTRA_LIBS})
+        else()
+            target_link_libraries(${TARGETNAME} ftxui::screen ftxui::dom ftxui::component spdlog::spdlog ${BLAS_LIBRARIES} ${OpenBLAS_LIBRARIES} juzhen ${CUDA_EXTRA_LIBS})
         endif()
-        set_source_files_properties(${FILE} PROPERTIES LANGUAGE CXX COMPILE_FLAGS "-x hip")
-        set_target_properties(${TARGETNAME} PROPERTIES LINKER_LANGUAGE CXX)
-        if(CMAKE_CXX_COMPILER_ID MATCHES "Clang" AND ROCM_OFFLOAD_ARCH)
-            target_compile_options(${TARGETNAME} PRIVATE "--offload-arch=${ROCM_OFFLOAD_ARCH}")
-        endif()
+        target_compile_options(${TARGETNAME} PRIVATE
+            $<$<COMPILE_LANGUAGE:CUDA>:--extended-lambda>
+            $<$<COMPILE_LANGUAGE:CUDA>:--forward-unknown-to-host-compiler>)
     elseif(APPLE_SILICON)
-        target_link_libraries(${TARGETNAME} ${JUZHEN_UI_LIBS} spdlog::spdlog ${BLAS_LIBRARIES} "-framework Metal" "-framework Foundation" "-framework MetalPerformanceShaders" juzhen)
+        target_link_libraries(${TARGETNAME} ftxui::screen ftxui::dom ftxui::component spdlog::spdlog ${BLAS_LIBRARIES} "-framework Metal" "-framework Foundation" "-framework MetalPerformanceShaders" juzhen)
         set_source_files_properties(${FILE} PROPERTIES LANGUAGE CXX)
         set_target_properties(${TARGETNAME} PROPERTIES LINKER_LANGUAGE CXX)
     else()
-        target_link_libraries(${TARGETNAME} ${JUZHEN_UI_LIBS} spdlog::spdlog ${BLAS_LIBRARIES} ${OpenBLAS_LIBRARIES} juzhen)
+        target_link_libraries(${TARGETNAME} ftxui::screen ftxui::dom ftxui::component spdlog::spdlog ${BLAS_LIBRARIES} ${OpenBLAS_LIBRARIES} juzhen)
         set_source_files_properties(${FILE} PROPERTIES LANGUAGE CXX)
         set_target_properties(${TARGETNAME} PROPERTIES LINKER_LANGUAGE CXX)
 
@@ -267,35 +198,23 @@ endmacro()
 
 GENERATE_PROJ(testbasic tests/testbasic.cu)
 GENERATE_PROJ(testStackOps tests/testStackOps.cu)
-if(NOT ROCM_HIP)
-    GENERATE_PROJ(testEigen tests/testEigen.cu)
-endif()
+GENERATE_PROJ(testEigen tests/testEigen.cu)
 GENERATE_PROJ(testDataLoader tests/testDataLoader.cu)
 GENERATE_PROJ(testConvLayers tests/testConvLayers.cu)
 GENERATE_PROJ(testUNet tests/testUNet.cu)
 GENERATE_PROJ(testUNetLearning tests/testUNetLearning.cu)
 GENERATE_PROJ(testDiffusionScore tests/testDiffusionScore.cu)
 GENERATE_PROJ(testMPSParity tests/testMPSParity.cu)
-GENERATE_PROJ(testMPSStackComputedParity tests/testMPSStackComputedParity.cu)
-GENERATE_PROJ(testMPSRandnStability tests/testMPSRandnStability.cu)
-GENERATE_PROJ(testMPSRandStability tests/testMPSRandStability.cu)
 GENERATE_PROJ(testConvBackendParity tests/testConvBackendParity.cu)
 GENERATE_PROJ(testRectifiedPathParity tests/testRectifiedPathParity.cu)
-GENERATE_PROJ(testRectifiedFlowTinyUNetParity tests/testRectifiedFlowTinyUNetParity.cu)
 GENERATE_PROJ(testDiffusionTrajectoryCompare tests/testDiffusionTrajectoryCompare.cu)
-if(NOT ROCM_HIP)
-    GENERATE_PROJ(testCPUConv tests/testCPUConv.cu)
-    GENERATE_PROJ(testUNetScoreCPU tests/testUNetScoreCPU.cu)
-endif()
+GENERATE_PROJ(testCPUConv tests/testCPUConv.cu)
+GENERATE_PROJ(testUNetScoreCPU tests/testUNetScoreCPU.cu)
 GENERATE_PROJ(testDataLoaderCPU tests/testDataLoaderCPU.cu)
-if(NOT ROCM_HIP)
-    GENERATE_PROJ(testDiffusionTrainIterCPU tests/testDiffusionTrainIterCPU.cu)
-endif()
-if(ROCM_HIP)
-    GENERATE_PROJ(testRocmDeviceProof tests/testRocmDeviceProof.cu)
-    GENERATE_PROJ(testRocmOpsSmoke tests/testRocmOpsSmoke.cu)
-    GENERATE_PROJ(testRocmCpuParity tests/testRocmCpuParity.cu)
-endif()
+GENERATE_PROJ(testDiffusionTrainIterCPU tests/testDiffusionTrainIterCPU.cu)
+GENERATE_PROJ(testTransformer tests/testTransformer.cu)
+GENERATE_PROJ(testTransformerParity tests/testTransformerParity.cu)
+GENERATE_PROJ(testTransformerRef tests/testTransformerRef.cu)
 GENERATE_PROJ(helloworld_nn examples/helloworld_nn.cu)
 GENERATE_PROJ(helloworld examples/helloworld.cu)
 GENERATE_PROJ(demo examples/demo.cu)
@@ -306,36 +225,26 @@ GENERATE_PROJ(pagerank examples/pagerank.cu)
 GENERATE_PROJ(demo_rectified examples/demo_rectified.cu)
 GENERATE_PROJ(demo_rectified_infer examples/demo_rectified_infer.cu)
 GENERATE_PROJ(demo_gemm examples/demo_gemm.cu)
-
 GENERATE_PROJ(demo_cnn_mnist examples/demo_cnn_mnist.cu)
 GENERATE_PROJ(demo_cnn_rectified examples/demo_cnn_rectified.cu)
-
-if(NOT APPLE_SILICON)
-    GENERATE_PROJ(testCNNTrainParity tests/testCNNTrainParity.cu)
-endif()
+GENERATE_PROJ(demo_transformer examples/demo_transformer.cu)
+GENERATE_PROJ(demo_simulation examples/demo_simulation.cu)
+GENERATE_PROJ(testCNNTrainParity tests/testCNNTrainParity.cu)
 # GENERATE_PROJ(wintest examples/demo_gui.cu)
 
 enable_testing()
 
 add_test(test0 testbasic)
 add_test(test1 demo)
-if(NOT ROCM_HIP)
-    add_test(test2 testEigen)
-endif()
+add_test(test2 testEigen)
 add_test(test3 testDataLoader)
 add_test(test4 testConvLayers)
 add_test(test5 testUNet)
 add_test(test6 testUNetLearning)
 add_test(test7 testDiffusionScore)
 add_test(test8 testMPSParity)
-add_test(test9 testMPSStackComputedParity)
-add_test(test10 testMPSRandnStability)
-add_test(test11 testMPSRandStability)
-add_test(test12 testConvBackendParity)
-add_test(test13 testRectifiedPathParity)
-add_test(test14 testRectifiedFlowTinyUNetParity)
-if(ROCM_HIP)
-    add_test(test15 testRocmDeviceProof)
-    add_test(test16 testRocmOpsSmoke)
-    add_test(test17 testRocmCpuParity)
-endif()
+add_test(test9 testConvBackendParity)
+add_test(test10 testRectifiedPathParity)
+add_test(test11 testTransformer)
+add_test(test12 testTransformerParity)
+add_test(test13 testTransformerRef)
