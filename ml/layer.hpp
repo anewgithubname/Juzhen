@@ -2245,27 +2245,84 @@ namespace Juzhen
 	}
 #endif
 
+	// Layer normalization over the feature dimension (rows) of each token/column.
+	// x : (dim, N).  For each column c:
+	//   y[:,c] = gamma ⊙ (x[:,c] - mean_c) / sqrt(var_c + eps) + beta
+	// where mean/var are over the `dim` features. gamma,beta are (dim,1) learnable.
+	// Implemented with backend-generic Matrix<D> ops so it works on CPU and GPU.
+	template <class D>
+	struct LayerNorm {
+		int dim;
+		Matrix<D> gamma, beta;
+		adam_state<D> adam_g, adam_b;
+		Matrix<D> ones_d1, ones_1N;
+		Matrix<D> cached_xhat, cached_inv;   // xhat:(dim,N)  inv:(1,N)
+
+		LayerNorm(int dim, int N)
+			: dim(dim),
+			  gamma(Matrix<D>::ones(dim, 1)), beta(Matrix<D>::zeros(dim, 1)),
+			  adam_g(0.0001, dim, 1), adam_b(0.0001, dim, 1),
+			  ones_d1("ln_d1", dim, 1), ones_1N("ln_1N", 1, N),
+			  cached_xhat("ln_xhat", dim, N), cached_inv("ln_inv", 1, N) {
+			ones_d1.ones();
+			ones_1N.ones();
+		}
+
+		Matrix<D> forward(const Matrix<D>& x) {
+			const float invdim = 1.0f / (float)dim;
+			auto mu  = sum(x, 0) * invdim;                       // (1,N) column means
+			auto xc  = x - ones_d1 * mu;                         // (dim,N) centered
+			auto var = sum(hadmd(xc, xc), 0) * invdim;           // (1,N)
+			cached_inv = elemwise(
+				[] __GPU_CPU__(float v) { return 1.0f / sqrtf(v + 1e-5f); }, std::move(var));
+			cached_xhat = hadmd(xc, ones_d1 * cached_inv);       // (dim,N) standardized
+			return hadmd(gamma * ones_1N, cached_xhat) + beta * ones_1N;
+		}
+
+		// dy : (dim,N) upstream gradient.  Returns dL/dx; updates gamma,beta if `update`.
+		Matrix<D> backward(Matrix<D>&& dy, bool update) {
+			const float invdim = 1.0f / (float)dim;
+			auto dgamma = sum(hadmd(dy, cached_xhat), 1);        // (dim,1)
+			auto dbeta  = sum(dy, 1);                            // (dim,1)
+			auto dxhat  = hadmd(dy, gamma * ones_1N);            // (dim,N)
+			auto m1 = sum(dxhat, 0) * invdim;                    // (1,N)
+			auto m2 = sum(hadmd(dxhat, cached_xhat), 0) * invdim;// (1,N)
+			auto dx = hadmd(ones_d1 * cached_inv,
+				dxhat - ones_d1 * m1 - hadmd(cached_xhat, ones_d1 * m2));
+			if (update) {
+				gamma -= adam_update(std::move(dgamma), adam_g);
+				beta  -= adam_update(std::move(dbeta), adam_b);
+			}
+			return dx;
+		}
+
+		void set_gamma(const Matrix<D>& g) { gamma = g; }
+		void set_beta(const Matrix<D>& b)  { beta = b; }
+		const Matrix<D>& get_gamma() const { return gamma; }
+		const Matrix<D>& get_beta() const  { return beta; }
+	};
+
 	//
-	// Single-head self-attention + feed-forward block (pre-norm style).
+	// Pre-LN multi-head self-attention + feed-forward block.
 	//
 	// Input  shape: (d_model, seq_len * batch)   — each column is one token.
 	// Output shape: (d_model, seq_len * batch)   — same as input.
 	//
-	// Forward:
-	//   1. Q = Wq * x,  K = Wk * x,  V = Wv * x          (linear projections)
-	//   2. For each sequence in the batch:
-	//        A = softmax( Q_i^T K_i / sqrt(d_k) , dim=1 )  (seq_len x seq_len)
-	//        H_i = V_i * A^T                                (d_model x seq_len)
-	//   3. O = Wo * H + bo                                  (output projection)
-	//   4. R = x + O                                        (residual)
-	//   5. F = W2 * relu(W1 * R + b1) + b2                 (FFN)
-	//   6. out = R + F                                      (residual)
+	// Forward (pre-norm):
+	//   1. x1 = LN1(x);  Q = Wq*x1,  K = Wk*x1,  V = Wv*x1
+	//   2. Per head h and sequence i (d_h = d_k/num_heads):
+	//        A = softmax( Q_ih^T K_ih / sqrt(d_h) , dim=keys )  (seq_len x seq_len)
+	//        H_ih = V_ih * A^T
+	//   3. R = x + (Wo * H + bo)                                (residual 1)
+	//   4. x2 = LN2(R)
+	//   5. out = R + (W2 * relu(W1*x2 + b1) + b2)               (residual 2)
 	//
 	// Weight dimensions:
 	//   Wq, Wk, Wv : (d_k, d_model)          Wo : (d_model, d_k)
 	//   bo         : (d_model, 1)
 	//   W1         : (d_ff, d_model)          b1 : (d_ff, 1)
 	//   W2         : (d_model, d_ff)          b2 : (d_model, 1)
+	//   LN1, LN2   : gamma,beta each (d_model, 1)
 	//
 	// Template on D so the same code compiles for float, CUDAfloat, MPSfloat, etc.
 	// All heavy lifting is done through the existing Matrix<D> BLAS/cuBLAS paths.
@@ -2273,6 +2330,7 @@ namespace Juzhen
 	template <class D>
 	class TransformerLayer : public Layer<D> {
 		int d_model, d_k, d_ff, seq_len, batchN;
+		int num_heads, d_h;             // d_h = d_k / num_heads (per-head dim)
 
 		// ── Attention weights ──
 		Matrix<D> Wq, Wk, Wv, Wo, bo;
@@ -2287,7 +2345,8 @@ namespace Juzhen
 		Matrix<D> cached_Q, cached_K, cached_V;
 		Matrix<D> cached_H;             // attention output before Wo
 		Matrix<D> cached_R;             // residual after attention
-		Matrix<D> cached_F1;            // W1*R + b1  (pre-relu)
+		Matrix<D> cached_x1, cached_x2; // LN1(x) and LN2(R): inputs to attn / FFN
+		Matrix<D> cached_F1;            // W1*x2 + b1  (pre-relu)
 		Matrix<D> cached_F1_relu;       // relu(F1)
 
 		// Per-sequence attention weight matrices: A_i = softmax(...)  shape (seq_len, seq_len)
@@ -2298,18 +2357,24 @@ namespace Juzhen
 		Matrix<D> ones_1N, ones_seq1, ones_1seq;
 		Matrix<D> attn_scores_scratch, attn_dAiT_scratch, attn_dS_scratch;
 
+		// Pre-norm LayerNorms: LN1 before attention, LN2 before FFN.
+		LayerNorm<D> ln1, ln2;
+
 	public:
 		/**
 		 * @param d_model  Token embedding dimension (input & output width).
-		 * @param d_k      Dimension of Q/K/V projections.
+		 * @param d_k      Total dimension of Q/K/V projections (across all heads).
 		 * @param d_ff     Hidden dimension of the feed-forward sub-layer.
 		 * @param seq_len  Number of tokens per sequence.
 		 * @param batch    Number of sequences in a mini-batch.
+		 * @param heads    Number of attention heads (must divide d_k). Each head
+		 *                 attends independently over d_k/heads dims; Wo mixes them.
 		 */
-		TransformerLayer(int d_model, int d_k, int d_ff, int seq_len, int batch)
+		TransformerLayer(int d_model, int d_k, int d_ff, int seq_len, int batch, int heads = 1)
 			: Layer<D>(d_model, 1, seq_len * batch),
 			  d_model(d_model), d_k(d_k), d_ff(d_ff),
 			  seq_len(seq_len), batchN(batch),
+			  num_heads(heads), d_h(d_k / heads),
 			  // Attention weights
 			  Wq(Matrix<D>::randn(d_k, d_model) * (1.0f / sqrtf((float)d_model))),
 			  Wk(Matrix<D>::randn(d_k, d_model) * (1.0f / sqrtf((float)d_model))),
@@ -2331,14 +2396,20 @@ namespace Juzhen
 			  cached_Q("tq", d_k, seq_len * batch), cached_K("tk", d_k, seq_len * batch),
 			  cached_V("tv", d_k, seq_len * batch), cached_H("th", d_k, seq_len * batch),
 			  cached_R("tr", d_model, seq_len * batch),
+			  cached_x1("tx1", d_model, seq_len * batch), cached_x2("tx2", d_model, seq_len * batch),
 			  cached_F1("tf1", d_ff, seq_len * batch), cached_F1_relu("tf1r", d_ff, seq_len * batch),
-			  cached_A("ta", seq_len, seq_len * batch),
+			  cached_A("ta", seq_len, seq_len * batch * heads),
 			  ones_1N("ones_1N", 1, seq_len * batch), ones_seq1("ones_seq1", seq_len, 1),
 			  ones_1seq("ones_1seq", 1, seq_len),
-			  attn_scores_scratch("attn_scores", seq_len, seq_len * batch),
-			  attn_dAiT_scratch("attn_dAiT", seq_len, seq_len * batch),
-			  attn_dS_scratch("attn_dS", seq_len, seq_len * batch)
+			  attn_scores_scratch("attn_scores", seq_len, seq_len * batch * heads),
+			  attn_dAiT_scratch("attn_dAiT", seq_len, seq_len * batch * heads),
+			  attn_dS_scratch("attn_dS", seq_len, seq_len * batch * heads),
+			  ln1(d_model, seq_len * batch), ln2(d_model, seq_len * batch)
 		{
+			if (heads <= 0 || d_k % heads != 0) {
+				LOG_ERROR("TransformerLayer: num_heads ({}) must be a positive divisor of d_k ({})", heads, d_k);
+				ERROR_OUT;
+			}
 			// Override base-class weights/bias/adam to be dummy (unused).
 			this->weights = Matrix<D>::zeros(1, 1);
 			this->bias    = Matrix<D>::zeros(1, 1);
@@ -2353,97 +2424,111 @@ namespace Juzhen
 			const int N = seq_len * batchN;
 			cached_input = input;
 
-			// 1. Linear projections  — Q,K,V : (d_k, N)
-			cached_Q = Wq * input;
-			cached_K = Wk * input;
-			cached_V = Wv * input;
+			// 1. LN1 then linear projections  — Q,K,V : (d_k, N)
+			cached_x1 = ln1.forward(input);
+			cached_Q = Wq * cached_x1;
+			cached_K = Wk * cached_x1;
+			cached_V = Wv * cached_x1;
 
-			// 2. Self-attention per sequence
-			//    H : (d_k, N),  A : (seq_len, seq_len * batchN)
-			const float scale = 1.0f / sqrtf((float)d_k);
+			// 2. Multi-head self-attention. Each head attends over its own d_h
+			//    rows of Q/K/V independently; the concatenated heads (= cached_H,
+			//    d_k rows) are mixed by Wo below. Attention blocks are stored
+			//    head-major: block (head hh, sequence b) lives at column
+			//    (hh*batchN + b)*seq_len in the (seq_len, seq_len*batchN*num_heads)
+			//    scratch/cached_A buffers.
+			const float scale = 1.0f / sqrtf((float)d_h);
 
 #ifdef CUDA
 			if constexpr (std::is_same_v<D, CUDAfloat>) {
-				const float zero = 0.0f;
+				const float zero = 0.0f, one = 1.0f;
 				const long long stride_qkv = (long long)d_k * (long long)seq_len;
 				const long long stride_attn = (long long)seq_len * (long long)seq_len;
+				const long long head_attn = stride_attn * (long long)batchN;
 
 				const float* q_ptr = reinterpret_cast<const float*>(cached_Q.data());
 				const float* k_ptr = reinterpret_cast<const float*>(cached_K.data());
-				float* scores_ptr = const_cast<float*>(reinterpret_cast<const float*>(attn_scores_scratch.data()));
-				CuBLASErrorCheck(cublasSgemmStridedBatched(
-					Matrix<CUDAfloat>::global_handle,
-					CUBLAS_OP_T, CUBLAS_OP_N,
-					seq_len, seq_len, d_k,
-					&scale,
-					q_ptr, d_k, stride_qkv,
-					k_ptr, d_k, stride_qkv,
-					&zero,
-					scores_ptr, seq_len, stride_attn,
-					batchN));
-
-				cuda_apply_causal_mask(scores_ptr, seq_len, batchN);
-
-				cuda_softmax_rows_batched(
-					reinterpret_cast<const float*>(attn_scores_scratch.data()),
-					const_cast<float*>(reinterpret_cast<const float*>(cached_A.data())),
-					seq_len,
-					batchN);
-
-				const float one = 1.0f;
 				const float* v_ptr = reinterpret_cast<const float*>(cached_V.data());
+				float* scores_ptr = const_cast<float*>(reinterpret_cast<const float*>(attn_scores_scratch.data()));
 				const float* a_ptr = reinterpret_cast<const float*>(cached_A.data());
 				float* h_ptr = const_cast<float*>(reinterpret_cast<const float*>(cached_H.data()));
-				CuBLASErrorCheck(cublasSgemmStridedBatched(
-					Matrix<CUDAfloat>::global_handle,
-					CUBLAS_OP_N, CUBLAS_OP_T,
-					d_k, seq_len, seq_len,
-					&one,
-					v_ptr, d_k, stride_qkv,
-					a_ptr, seq_len, stride_attn,
-					&zero,
-					h_ptr, d_k, stride_qkv,
-					batchN));
+
+				// scores_h = (Q_h^T K_h) * scale  for each head's d_h-row slice.
+				for (int hh = 0; hh < num_heads; ++hh) {
+					CuBLASErrorCheck(cublasSgemmStridedBatched(
+						Matrix<CUDAfloat>::global_handle,
+						CUBLAS_OP_T, CUBLAS_OP_N,
+						seq_len, seq_len, d_h,
+						&scale,
+						q_ptr + hh * d_h, d_k, stride_qkv,
+						k_ptr + hh * d_h, d_k, stride_qkv,
+						&zero,
+						scores_ptr + hh * head_attn, seq_len, stride_attn,
+						batchN));
+				}
+
+				cuda_apply_causal_mask(scores_ptr, seq_len, batchN * num_heads);
+
+				cuda_softmax_rows_batched(scores_ptr,
+					const_cast<float*>(reinterpret_cast<const float*>(cached_A.data())),
+					seq_len, batchN * num_heads);
+
+				// H_h = V_h * A_h^T  written into head hh's d_h rows of cached_H.
+				for (int hh = 0; hh < num_heads; ++hh) {
+					CuBLASErrorCheck(cublasSgemmStridedBatched(
+						Matrix<CUDAfloat>::global_handle,
+						CUBLAS_OP_N, CUBLAS_OP_T,
+						d_h, seq_len, seq_len,
+						&one,
+						v_ptr + hh * d_h, d_k, stride_qkv,
+						a_ptr + hh * head_attn, seq_len, stride_attn,
+						&zero,
+						h_ptr + hh * d_h, d_k, stride_qkv,
+						batchN));
+				}
 			} else
 #endif
 			{
-				for (int b = 0; b < batchN; ++b) {
-					const int c0 = b * seq_len;
-					// Q_i, K_i, V_i : (d_k, seq_len)  — columns c0..c0+seq_len-1
-					auto Qi = cached_Q.slice(0, d_k, c0, c0 + seq_len);
-					auto Ki = cached_K.slice(0, d_k, c0, c0 + seq_len);
-					auto Vi = cached_V.slice(0, d_k, c0, c0 + seq_len);
+				for (int hh = 0; hh < num_heads; ++hh) {
+					const int r0 = hh * d_h;
+					for (int b = 0; b < batchN; ++b) {
+						const int c0 = b * seq_len;
+						// Per-head Q_i, K_i, V_i : (d_h, seq_len)
+						auto Qi = cached_Q.slice(r0, r0 + d_h, c0, c0 + seq_len);
+						auto Ki = cached_K.slice(r0, r0 + d_h, c0, c0 + seq_len);
+						auto Vi = cached_V.slice(r0, r0 + d_h, c0, c0 + seq_len);
 
-					// scores : (seq_len, seq_len) = Qi^T * Ki * scale
-					auto scores = Qi.T() * Ki * scale;
-					// Causal masking: for query row, disallow future keys col > row.
-					for (int row = 0; row < seq_len; ++row) {
-						for (int col = row + 1; col < seq_len; ++col) {
-							scores.elem(row, col) = -1e9f;
+						// scores : (seq_len, seq_len) = Qi^T * Ki * scale
+						auto scores = Qi.T() * Ki * scale;
+						// Causal masking: for query row, disallow future keys col > row.
+						for (int row = 0; row < seq_len; ++row) {
+							for (int col = row + 1; col < seq_len; ++col) {
+								scores.elem(row, col) = -1e9f;
+							}
 						}
+						// A_i : (seq_len, seq_len) — softmax each row (over keys)
+						auto Ai = row_softmax(scores);
+
+						// H_i : (d_h, seq_len) = Vi * Ai.T
+						auto Hi = Vi * Ai.T();
+
+						const int ablk = hh * batchN + b;
+						cached_H.slice(r0, r0 + d_h, c0, c0 + seq_len, Hi);
+						cached_A.slice(0, seq_len, ablk * seq_len, (ablk + 1) * seq_len, Ai);
 					}
-					// A_i : (seq_len, seq_len) — softmax each row (over keys)
-					auto Ai = row_softmax(scores);
-
-					// H_i : (d_k, seq_len) = Vi * Ai.T
-					auto Hi = Vi * Ai.T();
-
-					// Store into cached_H, cached_A
-					cached_H.slice(0, d_k, c0, c0 + seq_len, Hi);
-					cached_A.slice(0, seq_len, b * seq_len, (b + 1) * seq_len, Ai);
 				}
 			}
 
-			// 3. Output projection + residual
+			// 3. Output projection + residual 1
 			auto O = Wo * cached_H + bo * ones_1N;
 			cached_R = input + O;
 
-			// 4. FFN: relu(W1*R + b1) then W2*...+b2
-			cached_F1 = W1 * cached_R + b1 * ones_1N;
+			// 4. LN2 then FFN: relu(W1*x2 + b1) then W2*...+b2
+			cached_x2 = ln2.forward(cached_R);
+			cached_F1 = W1 * cached_x2 + b1 * ones_1N;
 			cached_F1_relu = relu(Matrix<D>(cached_F1));
 			auto F = W2 * cached_F1_relu + b2 * ones_1N;
 
-			// 5. Second residual
+			// 5. Residual 2
 			this->val = cached_R + F;
 		}
 
@@ -2462,9 +2547,11 @@ namespace Juzhen
 			auto db2 = sum(dF, 1);                         // (d_model, 1)
 			auto dF1_relu = W2.T() * dF;                   // (d_ff, N)
 			auto dF1 = hadmd(d_relu(Matrix<D>(cached_F1)), std::move(dF1_relu)); // (d_ff, N)
-			auto dW1 = dF1 * cached_R.T();                 // (d_ff, d_model)
+			auto dW1 = dF1 * cached_x2.T();                // (d_ff, d_model)
 			auto db1 = sum(dF1, 1);                         // (d_ff, 1)
-			auto dR = W1.T() * dF1 + dout;                 // (d_model, N) — from FFN + residual
+			auto dx2 = W1.T() * dF1;                        // (d_model, N) — grad wrt LN2 output
+			// Back through LN2, then add residual-1 path (out = R + F).
+			auto dR = ln2.backward(std::move(dx2), this->need_update) + dout;
 
 			// ── Attention output projection backward ──────────────────────
 			// O = Wo * H + bo  →  dR flows into dO
@@ -2479,7 +2566,7 @@ namespace Juzhen
 			Matrix<D> dQ = Matrix<D>::zeros(d_k, N);
 			Matrix<D> dK = Matrix<D>::zeros(d_k, N);
 			Matrix<D> dV = Matrix<D>::zeros(d_k, N);
-			const float scale = 1.0f / sqrtf((float)d_k);
+			const float scale = 1.0f / sqrtf((float)d_h);
 
 #ifdef CUDA
 			if constexpr (std::is_same_v<D, CUDAfloat>) {
@@ -2487,112 +2574,124 @@ namespace Juzhen
 				const float zero = 0.0f;
 				const long long stride_qkv = (long long)d_k * (long long)seq_len;
 				const long long stride_attn = (long long)seq_len * (long long)seq_len;
+				const long long head_attn = stride_attn * (long long)batchN;
 
 				const float* dh_ptr = reinterpret_cast<const float*>(dH.data());
 				const float* a_ptr = reinterpret_cast<const float*>(cached_A.data());
-				float* dv_ptr = const_cast<float*>(reinterpret_cast<const float*>(dV.data()));
-				CuBLASErrorCheck(cublasSgemmStridedBatched(
-					Matrix<CUDAfloat>::global_handle,
-					CUBLAS_OP_N, CUBLAS_OP_N,
-					d_k, seq_len, seq_len,
-					&one,
-					dh_ptr, d_k, stride_qkv,
-					a_ptr, seq_len, stride_attn,
-					&zero,
-					dv_ptr, d_k, stride_qkv,
-					batchN));
-
 				const float* v_ptr = reinterpret_cast<const float*>(cached_V.data());
+				const float* k_ptr = reinterpret_cast<const float*>(cached_K.data());
+				const float* q_ptr = reinterpret_cast<const float*>(cached_Q.data());
+				float* dv_ptr = const_cast<float*>(reinterpret_cast<const float*>(dV.data()));
 				float* dait_ptr = const_cast<float*>(reinterpret_cast<const float*>(attn_dAiT_scratch.data()));
-				CuBLASErrorCheck(cublasSgemmStridedBatched(
-					Matrix<CUDAfloat>::global_handle,
-					CUBLAS_OP_T, CUBLAS_OP_N,
-					seq_len, seq_len, d_k,
-					&one,
-					v_ptr, d_k, stride_qkv,
-					dh_ptr, d_k, stride_qkv,
-					&zero,
-					dait_ptr, seq_len, stride_attn,
-					batchN));
+				const float* ds_ptr = reinterpret_cast<const float*>(attn_dS_scratch.data());
+				float* dq_ptr = const_cast<float*>(reinterpret_cast<const float*>(dQ.data()));
+				float* dk_ptr = const_cast<float*>(reinterpret_cast<const float*>(dK.data()));
+
+				// dV_h = dH_h * A_h ;  dA_h^T = V_h^T * dH_h   (per head)
+				for (int hh = 0; hh < num_heads; ++hh) {
+					CuBLASErrorCheck(cublasSgemmStridedBatched(
+						Matrix<CUDAfloat>::global_handle,
+						CUBLAS_OP_N, CUBLAS_OP_N,
+						d_h, seq_len, seq_len,
+						&one,
+						dh_ptr + hh * d_h, d_k, stride_qkv,
+						a_ptr + hh * head_attn, seq_len, stride_attn,
+						&zero,
+						dv_ptr + hh * d_h, d_k, stride_qkv,
+						batchN));
+
+					CuBLASErrorCheck(cublasSgemmStridedBatched(
+						Matrix<CUDAfloat>::global_handle,
+						CUBLAS_OP_T, CUBLAS_OP_N,
+						seq_len, seq_len, d_h,
+						&one,
+						v_ptr + hh * d_h, d_k, stride_qkv,
+						dh_ptr + hh * d_h, d_k, stride_qkv,
+						&zero,
+						dait_ptr + hh * head_attn, seq_len, stride_attn,
+						batchN));
+				}
 
 				cuda_softmax_backward_rows(
 					reinterpret_cast<const float*>(cached_A.data()),
 					reinterpret_cast<const float*>(attn_dAiT_scratch.data()),
 					const_cast<float*>(reinterpret_cast<const float*>(attn_dS_scratch.data())),
 					seq_len,
-					batchN,
+					batchN * num_heads,
 					scale);
 
-				const float* k_ptr = reinterpret_cast<const float*>(cached_K.data());
-				const float* q_ptr = reinterpret_cast<const float*>(cached_Q.data());
-				const float* ds_ptr = reinterpret_cast<const float*>(attn_dS_scratch.data());
-				float* dq_ptr = const_cast<float*>(reinterpret_cast<const float*>(dQ.data()));
-				float* dk_ptr = const_cast<float*>(reinterpret_cast<const float*>(dK.data()));
+				// dQ_h = K_h * dS_h^T ;  dK_h = Q_h * dS_h   (per head)
+				for (int hh = 0; hh < num_heads; ++hh) {
+					CuBLASErrorCheck(cublasSgemmStridedBatched(
+						Matrix<CUDAfloat>::global_handle,
+						CUBLAS_OP_N, CUBLAS_OP_T,
+						d_h, seq_len, seq_len,
+						&one,
+						k_ptr + hh * d_h, d_k, stride_qkv,
+						ds_ptr + hh * head_attn, seq_len, stride_attn,
+						&zero,
+						dq_ptr + hh * d_h, d_k, stride_qkv,
+						batchN));
 
-				CuBLASErrorCheck(cublasSgemmStridedBatched(
-					Matrix<CUDAfloat>::global_handle,
-					CUBLAS_OP_N, CUBLAS_OP_T,
-					d_k, seq_len, seq_len,
-					&one,
-					k_ptr, d_k, stride_qkv,
-					ds_ptr, seq_len, stride_attn,
-					&zero,
-					dq_ptr, d_k, stride_qkv,
-					batchN));
-
-				CuBLASErrorCheck(cublasSgemmStridedBatched(
-					Matrix<CUDAfloat>::global_handle,
-					CUBLAS_OP_N, CUBLAS_OP_N,
-					d_k, seq_len, seq_len,
-					&one,
-					q_ptr, d_k, stride_qkv,
-					ds_ptr, seq_len, stride_attn,
-					&zero,
-					dk_ptr, d_k, stride_qkv,
-					batchN));
+					CuBLASErrorCheck(cublasSgemmStridedBatched(
+						Matrix<CUDAfloat>::global_handle,
+						CUBLAS_OP_N, CUBLAS_OP_N,
+						d_h, seq_len, seq_len,
+						&one,
+						q_ptr + hh * d_h, d_k, stride_qkv,
+						ds_ptr + hh * head_attn, seq_len, stride_attn,
+						&zero,
+						dk_ptr + hh * d_h, d_k, stride_qkv,
+						batchN));
+				}
 			} else
 #endif
 			{
-				for (int b = 0; b < batchN; ++b) {
-					const int c0 = b * seq_len;
-					auto Qi = cached_Q.slice(0, d_k, c0, c0 + seq_len);
-					auto Ki = cached_K.slice(0, d_k, c0, c0 + seq_len);
-					auto Vi = cached_V.slice(0, d_k, c0, c0 + seq_len);
-					auto Ai = cached_A.slice(0, seq_len, b * seq_len, (b + 1) * seq_len);
-					auto dHi = dH.slice(0, d_k, c0, c0 + seq_len);
+				for (int hh = 0; hh < num_heads; ++hh) {
+					const int r0 = hh * d_h;
+					for (int b = 0; b < batchN; ++b) {
+						const int c0 = b * seq_len;
+						const int ablk = hh * batchN + b;
+						auto Qi = cached_Q.slice(r0, r0 + d_h, c0, c0 + seq_len);
+						auto Ki = cached_K.slice(r0, r0 + d_h, c0, c0 + seq_len);
+						auto Vi = cached_V.slice(r0, r0 + d_h, c0, c0 + seq_len);
+						auto Ai = cached_A.slice(0, seq_len, ablk * seq_len, (ablk + 1) * seq_len);
+						auto dHi = dH.slice(r0, r0 + d_h, c0, c0 + seq_len);
 
-					// H_i = V_i * A_i^T
-					// dV_i = dH_i * A_i            (d_k, seq_len)
-					// dA_i^T = V_i^T * dH_i        (seq_len, seq_len)
-					auto dVi = dHi * Ai;
-					auto dAiT = Vi.T() * dHi;       // (seq_len, seq_len) — gradient of A^T
-					auto dAi = dAiT.T();             // gradient of A itself
+						// H_i = V_i * A_i^T
+						// dV_i = dH_i * A_i            (d_h, seq_len)
+						// dA_i^T = V_i^T * dH_i        (seq_len, seq_len)
+						auto dVi = dHi * Ai;
+						auto dAiT = Vi.T() * dHi;       // (seq_len, seq_len) — gradient of A^T
+						auto dAi = dAiT.T();             // gradient of A itself
 
-					// Softmax backward (row-wise softmax over keys):
-					// A_i = softmax(S_i, dim=1) where S_i = Q_i^T K_i * scale
-					// dS = A ⊙ (dA − (sum(A ⊙ dA, over keys))·1ᵀ)
-					auto AodA = hadmd(Ai, dAi);                              // (seq_len, seq_len)
-					auto row_sum = sum(AodA, 1);                             // (seq_len, 1)
-					auto dSi = hadmd(Ai, dAi - row_sum * ones_1seq) * scale;
-					// S_i = Q_i^T * K_i * scale
-					// dQ_i = K_i * dS_i^T          (d_k, seq_len)
-					// dK_i = Q_i * dS_i            (d_k, seq_len)
-					auto dQi = Ki * dSi.T();
-					auto dKi = Qi * dSi;
+						// Softmax backward (row-wise softmax over keys):
+						// A_i = softmax(S_i, dim=1) where S_i = Q_i^T K_i * scale
+						// dS = A ⊙ (dA − (sum(A ⊙ dA, over keys))·1ᵀ)
+						auto AodA = hadmd(Ai, dAi);                              // (seq_len, seq_len)
+						auto row_sum = sum(AodA, 1);                             // (seq_len, 1)
+						auto dSi = hadmd(Ai, dAi - row_sum * ones_1seq) * scale;
+						// S_i = Q_i^T * K_i * scale
+						// dQ_i = K_i * dS_i^T          (d_h, seq_len)
+						// dK_i = Q_i * dS_i            (d_h, seq_len)
+						auto dQi = Ki * dSi.T();
+						auto dKi = Qi * dSi;
 
-					dQ.slice(0, d_k, c0, c0 + seq_len, dQi);
-					dK.slice(0, d_k, c0, c0 + seq_len, dKi);
-					dV.slice(0, d_k, c0, c0 + seq_len, dVi);
+						dQ.slice(r0, r0 + d_h, c0, c0 + seq_len, dQi);
+						dK.slice(r0, r0 + d_h, c0, c0 + seq_len, dKi);
+						dV.slice(r0, r0 + d_h, c0, c0 + seq_len, dVi);
+					}
 				}
 			}
 
-			// Projection backward: Q = Wq*x, K = Wk*x, V = Wv*x
-			auto dWq = dQ * cached_input.T();
-			auto dWk = dK * cached_input.T();
-			auto dWv = dV * cached_input.T();
+			// Projection backward: Q = Wq*x1, K = Wk*x1, V = Wv*x1  (x1 = LN1(input))
+			auto dWq = dQ * cached_x1.T();
+			auto dWk = dK * cached_x1.T();
+			auto dWv = dV * cached_x1.T();
 
-			// dx += Wq^T * dQ + Wk^T * dK + Wv^T * dV
-			dx += Wq.T() * dQ + Wk.T() * dK + Wv.T() * dV;
+			// Grad wrt LN1 output, then back through LN1 and add to residual path.
+			auto dx1 = Wq.T() * dQ + Wk.T() * dK + Wv.T() * dV;
+			dx += ln1.backward(std::move(dx1), this->need_update);
 
 			// ── Parameter updates ─────────────────────────────────────────
 			if (this->need_update) {
@@ -2630,6 +2729,16 @@ namespace Juzhen
 		const Matrix<D>& get_b1() const { return b1; }
 		const Matrix<D>& get_W2() const { return W2; }
 		const Matrix<D>& get_b2() const { return b2; }
+		int heads() const { return num_heads; }
+
+		void set_ln1_gamma(const Matrix<D>& v) { ln1.set_gamma(v); }
+		void set_ln1_beta(const Matrix<D>& v)  { ln1.set_beta(v); }
+		void set_ln2_gamma(const Matrix<D>& v) { ln2.set_gamma(v); }
+		void set_ln2_beta(const Matrix<D>& v)  { ln2.set_beta(v); }
+		const Matrix<D>& get_ln1_gamma() const { return ln1.get_gamma(); }
+		const Matrix<D>& get_ln1_beta() const  { return ln1.get_beta(); }
+		const Matrix<D>& get_ln2_gamma() const { return ln2.get_gamma(); }
+		const Matrix<D>& get_ln2_beta() const  { return ln2.get_beta(); }
 	};
 
 }

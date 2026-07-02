@@ -47,17 +47,21 @@ static void sync_weights(const TransformerLayer<float>& cpu,
     gpu.set_b1(Matrix<CUDAfloat>(cpu.get_b1()));
     gpu.set_W2(Matrix<CUDAfloat>(cpu.get_W2()));
     gpu.set_b2(Matrix<CUDAfloat>(cpu.get_b2()));
+    gpu.set_ln1_gamma(Matrix<CUDAfloat>(cpu.get_ln1_gamma()));
+    gpu.set_ln1_beta(Matrix<CUDAfloat>(cpu.get_ln1_beta()));
+    gpu.set_ln2_gamma(Matrix<CUDAfloat>(cpu.get_ln2_gamma()));
+    gpu.set_ln2_beta(Matrix<CUDAfloat>(cpu.get_ln2_beta()));
 }
 
 int compute() {
     global_rand_gen.seed(123);
     GPUSampler sampler(123);
 
-    const int d_model = 8, d_k = 6, d_ff = 12, seq = 4, batch = 2;
+    const int d_model = 8, d_k = 8, d_ff = 12, seq = 4, batch = 2, num_heads = 4;
     const int N = seq * batch;
 
-    TransformerLayer<float>      cpu_tf(d_model, d_k, d_ff, seq, batch);
-    TransformerLayer<CUDAfloat>  gpu_tf(d_model, d_k, d_ff, seq, batch);
+    TransformerLayer<float>      cpu_tf(d_model, d_k, d_ff, seq, batch, num_heads);
+    TransformerLayer<CUDAfloat>  gpu_tf(d_model, d_k, d_ff, seq, batch, num_heads);
     sync_weights(cpu_tf, gpu_tf);
 
     auto x_h = Matrix<float>::randn(d_model, N) * 0.5f;

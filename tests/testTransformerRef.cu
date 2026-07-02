@@ -38,44 +38,70 @@ Matrix<float> as_host<float>(const Matrix<float>& m) { return m; }
 
 struct TFWeights {
     Matrix<float> Wq, Wk, Wv, Wo, bo, W1, b1, W2, b2;
+    Matrix<float> ln1_g, ln1_b, ln2_g, ln2_b;
 };
 
-struct TFConfig { int d_model, d_k, d_ff, seq, batch; };
+struct TFConfig { int d_model, d_k, d_ff, seq, batch, num_heads; };
+
+// Independent LayerNorm over rows (features) of each column/token.
+static Matrix<float> layernorm(const Matrix<float>& x,
+                               const Matrix<float>& g, const Matrix<float>& b) {
+    const int D = (int)x.num_row(), N = (int)x.num_col();
+    Matrix<float> y("ln_ref", D, N);
+    for (int c = 0; c < N; ++c) {
+        float mu = 0.0f;
+        for (int r = 0; r < D; ++r) mu += x.elem(r, c);
+        mu /= D;
+        float var = 0.0f;
+        for (int r = 0; r < D; ++r) { float d = x.elem(r, c) - mu; var += d * d; }
+        var /= D;
+        const float inv = 1.0f / std::sqrt(var + 1e-5f);
+        for (int r = 0; r < D; ++r)
+            y.elem(r, c) = g.elem(r, 0) * ((x.elem(r, c) - mu) * inv) + b.elem(r, 0);
+    }
+    return y;
+}
 
 // Independent reference forward. All matrices are host Matrix<float>.
+// Multi-head: each head attends over its own d_h = d_k/num_heads rows of Q/K/V.
 static Matrix<float> ref_forward(const TFWeights& w, const TFConfig& c,
                                  const Matrix<float>& x) {
     const int N = c.seq * c.batch;
-    const float scale = 1.0f / std::sqrt((float)c.d_k);
+    const int d_h = c.d_k / c.num_heads;
+    const float scale = 1.0f / std::sqrt((float)d_h);
 
-    auto Q = w.Wq * x;   // (d_k, N)
-    auto K = w.Wk * x;   // (d_k, N)
-    auto V = w.Wv * x;   // (d_k, N)
+    auto x1 = layernorm(x, w.ln1_g, w.ln1_b);   // LN before attention
+    auto Q = w.Wq * x1;   // (d_k, N)
+    auto K = w.Wk * x1;   // (d_k, N)
+    auto V = w.Wv * x1;   // (d_k, N)
 
     Matrix<float> H("Href", c.d_k, N);
     H.zeros();
 
-    for (int b = 0; b < c.batch; ++b) {
-        const int c0 = b * c.seq;
-        for (int q = 0; q < c.seq; ++q) {
-            // Causal: query q attends only to keys k <= q.
-            std::vector<float> a(q + 1, 0.0f);
-            float m = -1e30f;
-            for (int k = 0; k <= q; ++k) {
-                float dot = 0.0f;
-                for (int d = 0; d < c.d_k; ++d)
-                    dot += Q.elem(d, c0 + q) * K.elem(d, c0 + k);
-                a[k] = dot * scale;
-                if (a[k] > m) m = a[k];
-            }
-            float s = 0.0f;
-            for (int k = 0; k <= q; ++k) { a[k] = std::exp(a[k] - m); s += a[k]; }
-            for (int k = 0; k <= q; ++k) a[k] /= s;   // row-softmax over keys
+    for (int hh = 0; hh < c.num_heads; ++hh) {
+        const int r0 = hh * d_h;
+        for (int b = 0; b < c.batch; ++b) {
+            const int c0 = b * c.seq;
+            for (int q = 0; q < c.seq; ++q) {
+                // Causal: query q attends only to keys k <= q.
+                std::vector<float> a(q + 1, 0.0f);
+                float m = -1e30f;
+                for (int k = 0; k <= q; ++k) {
+                    float dot = 0.0f;
+                    for (int d = 0; d < d_h; ++d)
+                        dot += Q.elem(r0 + d, c0 + q) * K.elem(r0 + d, c0 + k);
+                    a[k] = dot * scale;
+                    if (a[k] > m) m = a[k];
+                }
+                float s = 0.0f;
+                for (int k = 0; k <= q; ++k) { a[k] = std::exp(a[k] - m); s += a[k]; }
+                for (int k = 0; k <= q; ++k) a[k] /= s;   // row-softmax over keys
 
-            for (int d = 0; d < c.d_k; ++d) {
-                float acc = 0.0f;
-                for (int k = 0; k <= q; ++k) acc += a[k] * V.elem(d, c0 + k);
-                H.elem(d, c0 + q) = acc;
+                for (int d = 0; d < d_h; ++d) {
+                    float acc = 0.0f;
+                    for (int k = 0; k <= q; ++k) acc += a[k] * V.elem(r0 + d, c0 + k);
+                    H.elem(r0 + d, c0 + q) = acc;
+                }
             }
         }
     }
@@ -85,9 +111,10 @@ static Matrix<float> ref_forward(const TFWeights& w, const TFConfig& c,
         for (int r = 0; r < c.d_model; ++r)
             O.elem(r, col) += w.bo.elem(r, 0);
 
-    auto R = x + O;      // (d_model, N)
+    auto R = x + O;      // (d_model, N) — residual 1
 
-    auto F1 = w.W1 * R;  // (d_ff, N)
+    auto x2 = layernorm(R, w.ln2_g, w.ln2_b);   // LN before FFN
+    auto F1 = w.W1 * x2; // (d_ff, N)
     for (int col = 0; col < N; ++col)
         for (int r = 0; r < c.d_ff; ++r) {
             float v = F1.elem(r, col) + w.b1.elem(r, 0);
@@ -141,17 +168,20 @@ int compute() {
     using BackendT = float;
 #endif
 
-    const TFConfig c{8, 6, 12, 4, 2};
+    const TFConfig c{8, 8, 16, 5, 3, 4};   // d_k=8, num_heads=4 -> d_h=2
     const int N = c.seq * c.batch;
 
-    TransformerLayer<BackendT> tf(c.d_model, c.d_k, c.d_ff, c.seq, c.batch);
+    TransformerLayer<BackendT> tf(c.d_model, c.d_k, c.d_ff, c.seq, c.batch, c.num_heads);
+    std::cout << "num_heads=" << tf.heads() << " (d_h=" << c.d_k / c.num_heads << ")\n";
 
     // Pull the layer's (random) weights out to host for the reference.
     TFWeights w{
         as_host(tf.get_Wq()), as_host(tf.get_Wk()), as_host(tf.get_Wv()),
         as_host(tf.get_Wo()), as_host(tf.get_bo()),
         as_host(tf.get_W1()), as_host(tf.get_b1()),
-        as_host(tf.get_W2()), as_host(tf.get_b2())
+        as_host(tf.get_W2()), as_host(tf.get_b2()),
+        as_host(tf.get_ln1_gamma()), as_host(tf.get_ln1_beta()),
+        as_host(tf.get_ln2_gamma()), as_host(tf.get_ln2_beta())
     };
 
     auto x_h = Matrix<float>::randn(c.d_model, N) * 0.5f;

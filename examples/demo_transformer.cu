@@ -54,6 +54,10 @@ static void copy_tf_weights(TransformerLayer<FLOAT>& dst,
     dst.set_b1(Matrix<FLOAT>(as_host(src.get_b1())));
     dst.set_W2(Matrix<FLOAT>(as_host(src.get_W2())));
     dst.set_b2(Matrix<FLOAT>(as_host(src.get_b2())));
+    dst.set_ln1_gamma(Matrix<FLOAT>(as_host(src.get_ln1_gamma())));
+    dst.set_ln1_beta(Matrix<FLOAT>(as_host(src.get_ln1_beta())));
+    dst.set_ln2_gamma(Matrix<FLOAT>(as_host(src.get_ln2_gamma())));
+    dst.set_ln2_beta(Matrix<FLOAT>(as_host(src.get_ln2_beta())));
 }
 
 static void copy_linear_weights(LinearLayer<FLOAT>& dst,
@@ -198,6 +202,7 @@ int compute() {
     const int d_model = 128;
     const int d_k = 128;
     const int d_ff = 512;
+    const int num_heads = 4;
     const int num_blocks = 3;
     const int steps = 40000;
     const int log_every = 2000;
@@ -226,8 +231,8 @@ int compute() {
     }
     cout << "\n";
     cout << "Network: embed(" << in_dim << "->" << d_model << ") -> Transformer("
-         << d_model << "," << d_k << "," << d_ff << ") [x" << num_blocks << "] -> proj("
-         << d_model << "->" << V << ")\n";
+         << d_model << "," << d_k << "," << d_ff << "," << num_heads << "h) [x" << num_blocks
+         << "] -> proj(" << d_model << "->" << V << ")\n";
     cout << "Training: mini-batch=" << batch << " x seq_len=" << seq_len
          << " (" << N << " tokens/step), steps=" << steps << "\n\n";
 
@@ -235,7 +240,7 @@ int compute() {
     auto make_blocks = [&](int b) {
         vector<unique_ptr<TF>> v;
         for (int i = 0; i < num_blocks; ++i)
-            v.push_back(make_unique<TF>(d_model, d_k, d_ff, seq_len, b));
+            v.push_back(make_unique<TF>(d_model, d_k, d_ff, seq_len, b, num_heads));
         return v;
     };
 
