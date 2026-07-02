@@ -2739,6 +2739,17 @@ namespace Juzhen
 		const Matrix<D>& get_ln1_beta() const  { return ln1.get_beta(); }
 		const Matrix<D>& get_ln2_gamma() const { return ln2.get_gamma(); }
 		const Matrix<D>& get_ln2_beta() const  { return ln2.get_beta(); }
+
+		// Set the Adam learning rate for every parameter group in this block
+		// (attention, FFN, and both LayerNorms). Used to drive an LR schedule.
+		void set_lr(float lr) {
+			adam_Wq.alpha = lr; adam_Wk.alpha = lr; adam_Wv.alpha = lr;
+			adam_Wo.alpha = lr; adam_bo.alpha = lr;
+			adam_W1.alpha = lr; adam_b1.alpha = lr;
+			adam_W2.alpha = lr; adam_b2.alpha = lr;
+			ln1.adam_g.alpha = lr; ln1.adam_b.alpha = lr;
+			ln2.adam_g.alpha = lr; ln2.adam_b.alpha = lr;
+		}
 	};
 
 }

@@ -198,15 +198,27 @@ int compute() {
     int c2i[256] = {};
     for (int i = 0; i < V; ++i) c2i[(unsigned char)idx_to_char[i]] = i;
 
-    const int seq_len = 48;
-    const int d_model = 128;
-    const int d_k = 128;
-    const int d_ff = 512;
-    const int num_heads = 4;
-    const int num_blocks = 3;
-    const int steps = 40000;
+    const int seq_len = 64;
+    const int d_model = 256;
+    const int d_k = 256;
+    const int d_ff = 1024;
+    const int num_heads = 8;
+    const int num_blocks = 4;
+    const int steps = 30000;
     const int log_every = 2000;
     const int in_dim = V + seq_len;
+
+    // Learning-rate schedule: linear warmup then cosine decay to 10% of peak.
+    const float peak_lr = 5e-4f;
+    const int   warmup_steps = 1000;
+    const float min_lr = peak_lr * 0.1f;
+    const double PI = 3.14159265358979323846;
+    auto lr_at = [&](int step) -> float {
+        if (step < warmup_steps)
+            return peak_lr * (float)(step + 1) / (float)warmup_steps;
+        const double t = (double)(step - warmup_steps) / (double)(steps - warmup_steps);
+        return (float)(min_lr + 0.5 * (peak_lr - min_lr) * (1.0 + std::cos(PI * t)));
+    };
 
     // Every valid window start (predicting one char ahead needs off+seq_len).
     vector<int> window_starts;
@@ -216,7 +228,7 @@ int compute() {
         return 1;
     }
 
-    int batch = 128;                      // mini-batch size (sequences per step)
+    int batch = 64;                       // mini-batch size (sequences per step)
     batch = min(batch, (int)window_starts.size());
     const int N = seq_len * batch;
 
@@ -234,7 +246,8 @@ int compute() {
          << d_model << "," << d_k << "," << d_ff << "," << num_heads << "h) [x" << num_blocks
          << "] -> proj(" << d_model << "->" << V << ")\n";
     cout << "Training: mini-batch=" << batch << " x seq_len=" << seq_len
-         << " (" << N << " tokens/step), steps=" << steps << "\n\n";
+         << " (" << N << " tokens/step), steps=" << steps
+         << ", lr=warmup(" << warmup_steps << ")->" << peak_lr << "->cos->" << min_lr << "\n\n";
 
     using TF = TransformerLayer<FLOAT>;
     auto make_blocks = [&](int b) {
@@ -278,6 +291,14 @@ int compute() {
     };
     save_best();
 
+    // Drive the Adam learning rate across all parameter groups (embed/proj +
+    // every transformer block) from the schedule above.
+    auto set_all_lr = [&](float lr) {
+        embed.adamWstate().alpha = lr; embed.adambstate().alpha = lr;
+        proj.adamWstate().alpha  = lr; proj.adambstate().alpha  = lr;
+        for (int i = 0; i < num_blocks; ++i) blocks[i]->set_lr(lr);
+    };
+
     // Fixed evaluation batch (evenly spaced windows) for stable loss/acc logging.
     vector<int> eval_offs(batch);
     for (int b = 0; b < batch; ++b)
@@ -295,6 +316,8 @@ int compute() {
     float best_loss = numeric_limits<float>::infinity();
 
     for (int step = 0; step < steps; ++step) {
+        set_all_lr(lr_at(step));
+
         // Sample a fresh random mini-batch of windows.
         for (int b = 0; b < batch; ++b) offs[b] = window_starts[pick(global_rand_gen)];
         fill_batch(X_h, Y_h, corpus, offs, seq_len, V, c2i);
@@ -331,8 +354,8 @@ int compute() {
                 save_best();
             }
 
-            printf("step %5d   eval_loss = %.4f   ppl = %7.2f   acc = %5.1f%%\n",
-                   step, eval_l, expf(eval_l), acc);
+            printf("step %5d   eval_loss = %.4f   ppl = %7.2f   acc = %5.1f%%   lr = %.2e\n",
+                   step, eval_l, expf(eval_l), acc, lr_at(step));
             fflush(stdout);
         }
     }
