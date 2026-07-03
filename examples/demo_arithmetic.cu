@@ -38,9 +38,13 @@
  *    is (#operand digit positions x ln 10)/seq_len -- e.g. 9*ln(10)/17 = 1.219
  *    nats/position for 5 digits. Loss at the floor means the task is solved.
  *  - Generalization holds across unseen pairs and every carry-chain length,
- *    but NOT far outside the training distribution: near-all-zero problems
- *    like 1+1 (probability ~1e-8 under uniform operand sampling) come out
- *    wrong. The learned circuit is an algorithm, but an interpolative one.
+ *    but NOT far outside the training distribution: with operands sampled
+ *    uniformly over VALUES, near-all-zero problems like 1+1 (probability
+ *    ~1e-8) came out wrong -- the learned circuit is an algorithm, but an
+ *    interpolative one. The demo therefore samples operands with a UNIFORM
+ *    DIGIT-LENGTH (L ~ U{1..n_digits}, then a value of exactly that length),
+ *    which covers every zero-padding pattern; the edge-case showcase
+ *    verifies 1+1.
  */
 
 #include "../ml/layer.hpp"
@@ -183,13 +187,29 @@ int compute() {
     // long long: at 5+ digits a*max_operand+b overflows 32-bit int
     auto key = [&](int a, int b) { return (long long)a * max_operand + b; };
 
+    // Operand sampler uniform over digit-lengths: L ~ U{1..n_digits}, then a
+    // value OF THAT LENGTH (leading digit nonzero for L >= 2; L = 1 includes
+    // 0), so every length is exactly equally likely. Under plain uniform-value
+    // sampling, short zero-padded operands ("00001") have probability
+    // ~10^-(n_digits-1) and are effectively never trained on, so the model
+    // fails 1+1 despite ~100% in-distribution accuracy (see git history).
+    // `rnd` (uniform over all values) is kept for the carry-chain stress
+    // buckets, which need mostly-long operands.
+    uniform_int_distribution<int> rnd(0, max_operand - 1);
+    uniform_int_distribution<int> rnd_len(1, n_digits);
+    auto sample_operand = [&]() {
+        const int len = rnd_len(global_rand_gen);
+        const int lo = len == 1 ? 0 : ipow10(len - 1);
+        return uniform_int_distribution<int>(lo, ipow10(len) - 1)(global_rand_gen);
+    };
+
     // ── Held-out test set of unseen (a,b) pairs ─────────────────────────
+    // Sampled from the same length-uniform distribution as training.
     const int test_size = 4096;
     unordered_set<long long> test_keys;
     vector<pair<int,int>> test_pairs;
-    uniform_int_distribution<int> rnd(0, max_operand - 1);
     while ((int)test_pairs.size() < test_size) {
-        int a = rnd(global_rand_gen), b = rnd(global_rand_gen);
+        int a = sample_operand(), b = sample_operand();
         if (test_keys.insert(key(a, b)).second) test_pairs.push_back({a, b});
     }
 
@@ -222,7 +242,8 @@ int compute() {
     }
 
     cout << "=== Transformer Arithmetic Demo (learning a+b) ===\n";
-    cout << n_digits << "-digit operands, format e.g. \"" << make_example(12, 37, n_digits, ans_digits)
+    cout << "up-to-" << n_digits << "-digit operands (digit-length ~ U{1.." << n_digits
+         << "}), format e.g. \"" << make_example(12, 37, n_digits, ans_digits)
          << "\" (answer digits reversed)\n";
     cout << "Vocabulary (" << V << "): " << VOCAB << "\n";
     cout << "Network: embed(" << in_dim << "->" << d_model << ") -> Transformer("
@@ -420,7 +441,7 @@ int compute() {
     vector<pair<int,int>> train_eval(batch), val_eval(test_pairs.begin(), test_pairs.begin() + batch);
     for (auto& p : train_eval) {
         int a, b;
-        do { a = rnd(global_rand_gen); b = rnd(global_rand_gen); } while (test_keys.count(key(a, b)));
+        do { a = sample_operand(); b = sample_operand(); } while (test_keys.count(key(a, b)));
         p = {a, b};
     }
 
@@ -430,9 +451,11 @@ int compute() {
 
     // Reuse a previously trained model when one with this exact config exists.
     // Delete the file or set ARITH_RETRAIN=1 to train from scratch.
+    // "_ulen" marks weights trained on the length-uniform operand distribution
+    // (incompatible with models trained on uniform-value sampling).
     const string model_path = string(PROJECT_DIR) + "/res/arithmetic_tf_"
         + to_string(n_digits) + "digit_" + to_string(d_model) + "d_"
-        + to_string(num_blocks) + "blk.bin";
+        + to_string(num_blocks) + "blk_ulen.bin";
     const bool force_retrain = getenv("ARITH_RETRAIN") != nullptr;
     if (!force_retrain && load_model(model_path)) {
         cout << "Loaded trained model from " << model_path
@@ -447,7 +470,7 @@ int compute() {
 
         for (int b = 0; b < batch; ++b) {
             int a, bb;
-            do { a = rnd(global_rand_gen); bb = rnd(global_rand_gen); } while (test_keys.count(key(a, bb)));
+            do { a = sample_operand(); bb = sample_operand(); } while (test_keys.count(key(a, bb)));
             offs[b] = {a, bb};
         }
         fill_batch(offs, X_h, Y_h);
@@ -461,13 +484,17 @@ int compute() {
 
         if (step % log_every == 0 || step == steps - 1) {
             // Mean next-char NLL (nats/position) of this batch, pre-update
-            // logits. Its floor is (#operand digit positions * ln 10)/seq_len,
-            // not 0, because the operand digits themselves are unpredictable.
+            // logits. Its floor is not 0: the operand digits themselves are
+            // unpredictable (with uniform-value operands it is exactly
+            // (#operand digit positions * ln 10)/seq_len; length-uniform
+            // operands have less entropy, so the floor sits a bit lower).
             loss.eval(proj.value());
             const float nll = item(as_host(loss.value()));
             auto [tr_dig, tr_em] = eval_solve(train_eval, nullptr);
             auto [va_dig, va_em] = eval_solve(val_eval, nullptr);
-            const bool improved = va_em > best_em;
+            // >= : on ties (e.g. repeated 100% on the small val slice) keep the
+            // LATEST checkpoint -- more training on rare cases, lower LR.
+            const bool improved = va_em >= best_em;
             if (improved) { best_em = va_em; best_step = step; save_best(); }
             printf("step %5d   loss = %.4f   train_exact = %5.1f%%   val_exact = %5.1f%%   "
                    "val_digit = %5.1f%%   lr = %.2e%s\n",
@@ -505,10 +532,9 @@ int compute() {
     }
 
     // ── Edge-case showcase (padded to a full eval batch with random pairs) ──
-    // Near-all-zero problems (1+1, 0+0, ...) are out-of-distribution: both
-    // operands being tiny has probability ~1/max_operand^2 under uniform
-    // sampling, so training effectively never sees them and the model gets
-    // them wrong despite ~100% in-distribution accuracy.
+    // Under uniform-value sampling these near-all-zero problems (1+1, 0+0, ...)
+    // were out-of-distribution and failed; with length-uniform operand
+    // sampling every padding pattern is trained on, so they should pass.
     {
         vector<pair<int,int>> fun = {
             {1, 1}, {0, 0}, {0, 1}, {9, 9}, {99999, 1},
