@@ -141,11 +141,52 @@ struct adam_state{
 	}
 };
 
+#ifdef CUDA
+// Fused Adam step: one elementwise kernel replaces the ~12 matrix-op
+// kernels (and their temporaries) of the generic formulation below.
+// m, v and g are updated in place; bc1/bc2 are the host-side bias
+// corrections 1/(1-beta^t).
+__global__ void adam_update_kernel(float* g, float* m, float* v,
+                                   float alpha, float beta1, float beta2,
+                                   float eps, float bc1, float bc2, size_t n) {
+    size_t i = (size_t)blockIdx.x * blockDim.x + threadIdx.x;
+    if (i >= n) return;
+    const float gi = g[i];
+    const float mi = beta1 * m[i] + (1.0f - beta1) * gi;
+    const float vi = beta2 * v[i] + (1.0f - beta2) * gi * gi;
+    m[i] = mi;
+    v[i] = vi;
+    g[i] = alpha * (mi * bc1) / (sqrtf(vi * bc2) + eps);
+}
+#endif
+
 template <class T>
 Matrix<T> adam_update(Matrix<T> &&g, adam_state<T> &state){
     int &iteration = state.iteration;
     float &alpha = state.alpha, &beta1 = state.beta1, &beta2 = state.beta2, &eps = state.eps;
     Matrix<T> &m = state.m, &v = state.v;
+
+#ifdef CUDA
+    // Callers hand over ownership of g (an rvalue), so its buffer can be
+    // rewritten in place with the update.
+    if constexpr (std::is_same_v<T, CUDAfloat>) {
+        if (!g.get_transpose()) {
+            const size_t n = g.num_row() * g.num_col();
+            const float bc1 = 1.0f / (1.0f - powf(beta1, (float)iteration));
+            const float bc2 = 1.0f / (1.0f - powf(beta2, (float)iteration));
+            const int threads = 256;
+            const int blocks = (int)((n + threads - 1) / threads);
+            adam_update_kernel<<<blocks, threads>>>(
+                const_cast<float*>(reinterpret_cast<const float*>(g.data())),
+                const_cast<float*>(reinterpret_cast<const float*>(m.data())),
+                const_cast<float*>(reinterpret_cast<const float*>(v.data())),
+                alpha, beta1, beta2, eps, bc1, bc2, n);
+            CudaErrorCheck(cudaGetLastError());
+            iteration++;
+            return std::move(g);
+        }
+    }
+#endif
 
     m = beta1 * m + (1 - beta1) * g;
     v = beta2 * v + (1 - beta2) * square(g);
