@@ -2341,7 +2341,6 @@ namespace Juzhen
 		adam_state<D> adam_W1, adam_b1, adam_W2, adam_b2;
 
 		// ── Cached forward intermediates (needed for backward) ──
-		Matrix<D> cached_input;         // x
 		Matrix<D> cached_Q, cached_K, cached_V;
 		Matrix<D> cached_H;             // attention output before Wo
 		Matrix<D> cached_R;             // residual after attention
@@ -2392,7 +2391,6 @@ namespace Juzhen
 			  adam_W1(0.0001, d_ff, d_model), adam_b1(0.0001, d_ff, 1),
 			  adam_W2(0.0001, d_model, d_ff), adam_b2(0.0001, d_model, 1),
 			  // Cached tensors (fixed-size for this layer instance)
-			  cached_input("ti", d_model, seq_len * batch),
 			  cached_Q("tq", d_k, seq_len * batch), cached_K("tk", d_k, seq_len * batch),
 			  cached_V("tv", d_k, seq_len * batch), cached_H("th", d_k, seq_len * batch),
 			  cached_R("tr", d_model, seq_len * batch),
@@ -2422,7 +2420,6 @@ namespace Juzhen
 
 		void eval(const Matrix<D>& input) override {
 			const int N = seq_len * batchN;
-			cached_input = input;
 
 			// 1. LN1 then linear projections  — Q,K,V : (d_k, N)
 			cached_x1 = ln1.forward(input);

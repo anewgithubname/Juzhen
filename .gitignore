@@ -96,5 +96,7 @@ build*/**
 *.log
 external/boost**
 
-# demo_transformer downloadable corpus (e.g. tiny-shakespeare); regenerate with curl
+# demo_transformer downloadable corpora (tiny-shakespeare / enwik8); fetch with curl
 examples/corpus.txt
+examples/enwik8
+examples/enwik8.zip

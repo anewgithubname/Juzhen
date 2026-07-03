@@ -2,13 +2,15 @@
  * @file demo_transformer.cu
  * @brief Character language model trained on real-world text.
  *
- *   - corpus loaded from examples/corpus.txt if present, else an embedded
- *     public-domain passage (Alice's Adventures in Wonderland)
- *   - one-hot character input plus one-hot position features
+ *   - corpus loaded from examples/enwik8 (100 MB Wikipedia) if present, else
+ *     examples/corpus.txt, else an embedded public-domain passage (Alice)
+ *   - byte/char-level: one-hot character input plus one-hot position features
  *   - embed -> two TransformerLayer blocks -> projection
  *   - MINI-BATCH next-character training with the framework LogisticLayer
  *     (random windows sampled each step, so the corpus size is unbounded and
  *      memory per step is constant)
+ *   - 90/10 train/validation split; reported val loss/acc measure
+ *     generalization, and the train-vs-val gap reveals memorization
  *   - sample predictions and autoregressive generation
  */
 
@@ -66,9 +68,15 @@ static void copy_linear_weights(LinearLayer<FLOAT>& dst,
     dst.b() = Matrix<FLOAT>(as_host(src.b()));
 }
 
-// A public-domain fallback corpus: the opening of Lewis Carroll's
-// "Alice's Adventures in Wonderland" (1865). Drop a larger file at
-// examples/corpus.txt (e.g. tiny-shakespeare) to train on your own text.
+// The demo trains on enwik8 (the standard 100 MB char-LM benchmark: the first
+// 1e8 bytes of an English Wikipedia dump). Fetch it once into examples/:
+//
+//     curl -L https://mattmahoney.net/dc/enwik8.zip -o examples/enwik8.zip
+//     unzip -o examples/enwik8.zip -d examples/        # -> examples/enwik8
+//
+// load_corpus() prefers examples/enwik8, then examples/corpus.txt (e.g.
+// tiny-shakespeare), then this small embedded public-domain fallback (the
+// opening of Lewis Carroll's "Alice's Adventures in Wonderland", 1865).
 static string embedded_corpus() {
     return
         "Alice was beginning to get very tired of sitting by her sister on the "
@@ -105,15 +113,17 @@ static string embedded_corpus() {
 }
 
 static string load_corpus(string& source) {
-    const string path = string(PROJECT_DIR) + "/examples/corpus.txt";
-    ifstream f(path, ios::binary);
-    if (f) {
-        stringstream ss;
-        ss << f.rdbuf();
-        string s = ss.str();
-        if (s.size() > 64) {
-            source = path;
-            return s;
+    const string base = string(PROJECT_DIR) + "/examples/";
+    for (const char* name : {"enwik8", "corpus.txt"}) {
+        ifstream f(base + name, ios::binary);
+        if (f) {
+            stringstream ss;
+            ss << f.rdbuf();
+            string s = ss.str();
+            if (s.size() > 64) {
+                source = base + name;
+                return s;
+            }
         }
     }
     source = "embedded (Alice in Wonderland)";
@@ -204,8 +214,9 @@ int compute() {
     const int d_ff = 1024;
     const int num_heads = 8;
     const int num_blocks = 4;
-    const int steps = 30000;
-    const int log_every = 2000;
+    const int steps = 30000;       // hard cap; early stopping usually ends sooner
+    const int log_every = 1000;    // also the early-stopping evaluation interval
+    const int patience = 6;        // stop after this many evals w/o val improvement
     const int in_dim = V + seq_len;
 
     // Learning-rate schedule: linear warmup then cosine decay to 10% of peak.
@@ -220,26 +231,37 @@ int compute() {
         return (float)(min_lr + 0.5 * (peak_lr - min_lr) * (1.0 + std::cos(PI * t)));
     };
 
-    // Every valid window start (predicting one char ahead needs off+seq_len).
-    vector<int> window_starts;
-    for (int pos = 0; pos + seq_len < clen; ++pos) window_starts.push_back(pos);
-    if (window_starts.empty()) {
-        cout << "Corpus too small for seq_len=" << seq_len << "\n";
+    // Train/validation split: reserve the last 10% of the corpus for held-out
+    // evaluation. Valid window START positions form two ranges; we sample from
+    // them directly (no per-window index vector), so this scales to enwik8-sized
+    // corpora with no extra memory. Train windows lie entirely in the first 90%,
+    // val windows in the last 10%; the boundary band is simply never sampled.
+    const int split    = (int)((long long)clen * 9 / 10);
+    const int train_lo = 0,     train_hi = split - seq_len;   // start range [lo, hi)
+    const int val_lo   = split,  val_hi  = clen  - seq_len;
+    if (train_hi <= train_lo || val_hi <= val_lo) {
+        cout << "Corpus too small for seq_len=" << seq_len << " (needs a train/val split)\n";
         return 1;
     }
+    const long long train_windows = (long long)train_hi - train_lo;
+    const long long val_windows   = (long long)val_hi   - val_lo;
 
     int batch = 64;                       // mini-batch size (sequences per step)
-    batch = min(batch, (int)window_starts.size());
+    batch = min<long long>(batch, min(train_windows, val_windows));
     const int N = seq_len * batch;
 
     cout << "=== Transformer Char-LM Demo ===\n";
     cout << "Corpus source: " << corpus_source << "\n";
-    cout << "Corpus size: " << clen << " chars, " << window_starts.size() << " windows\n";
+    cout << "Corpus size: " << clen << " chars (train/val split at " << split << ", 90/10)\n";
+    cout << "Windows: " << train_windows << " train, " << val_windows << " val\n";
     cout << "Preview: \"" << corpus.substr(0, min(clen, 80)) << "...\"\n";
-    cout << "Vocabulary (" << V << " chars): ";
+    cout << "Vocabulary (" << V << " symbols): ";
     for (int i = 0; i < V; ++i) {
-        char ch = idx_to_char[i];
-        cout << (ch == ' ' ? '_' : (ch == '\n' ? '/' : ch));
+        unsigned char ch = (unsigned char)idx_to_char[i];
+        if (ch == ' ') cout << '_';
+        else if (ch == '\n') cout << '/';
+        else if (ch >= 33 && ch < 127) cout << (char)ch;
+        else cout << '.';                              // non-printable byte
     }
     cout << "\n";
     cout << "Network: embed(" << in_dim << "->" << d_model << ") -> Transformer("
@@ -299,27 +321,55 @@ int compute() {
         for (int i = 0; i < num_blocks; ++i) blocks[i]->set_lr(lr);
     };
 
-    // Fixed evaluation batch (evenly spaced windows) for stable loss/acc logging.
-    vector<int> eval_offs(batch);
-    for (int b = 0; b < batch; ++b)
-        eval_offs[b] = window_starts[(size_t)b * window_starts.size() / batch];
-    auto Xe_h = Matrix<float>::zeros(in_dim, N);
+    // Fixed train and val eval batches (evenly spaced windows) for stable,
+    // comparable logging. The train-vs-val gap reveals memorization.
+    auto make_fixed = [&](int lo, long long count, Matrix<float>& X, Matrix<float>& Y) {
+        vector<int> off_(batch);
+        for (int b = 0; b < batch; ++b) off_[b] = lo + (int)((long long)b * count / batch);
+        fill_batch(X, Y, corpus, off_, seq_len, V, c2i);
+    };
+    auto Xt_h = Matrix<float>::zeros(in_dim, N);   // fixed train eval batch
+    auto Yt_h = Matrix<float>::zeros(V, N);
+    auto Xe_h = Matrix<float>::zeros(in_dim, N);   // fixed val eval batch
     auto Ye_h = Matrix<float>::zeros(V, N);
-    fill_batch(Xe_h, Ye_h, corpus, eval_offs, seq_len, V, c2i);
+    make_fixed(train_lo, train_windows, Xt_h, Yt_h);
+    make_fixed(val_lo,   val_windows,   Xe_h, Ye_h);
+
+    // Evaluate a fixed batch (no weight update): returns {loss, accuracy%}.
+    auto eval_batch = [&](const Matrix<float>& Xh, const Matrix<float>& Yh) {
+        auto Xb = Matrix<FLOAT>(Xh);
+        LogisticLayer<FLOAT> el(N, Matrix<FLOAT>(Yh));
+        auto net = build_net(blocks, embed, proj);
+        net.push_front(&el);
+        const float loss = as_host(forward(net, Xb)).elem(0, 0);
+        auto logits = as_host(proj.value());
+        int correct = 0;
+        for (int i = 0; i < N; ++i) {
+            int pred = 0, truth = 0;
+            for (int r = 1; r < V; ++r) {
+                if (logits.elem(r, i) > logits.elem(pred, i)) pred = r;
+                if (Yh.elem(r, i) > Yh.elem(truth, i)) truth = r;
+            }
+            if (pred == truth) correct++;
+        }
+        return make_pair(loss, 100.0f * (float)correct / (float)N);
+    };
 
     auto X_h = Matrix<float>::zeros(in_dim, N);
     auto Y_h = Matrix<float>::zeros(V, N);
 
-    uniform_int_distribution<int> pick(0, (int)window_starts.size() - 1);
+    uniform_int_distribution<int> pick(train_lo, train_hi - 1);
     vector<int> offs(batch);
 
     float best_loss = numeric_limits<float>::infinity();
+    int   best_step = 0;
+    int   stale = 0;               // evals since the last val-loss improvement
 
     for (int step = 0; step < steps; ++step) {
         set_all_lr(lr_at(step));
 
-        // Sample a fresh random mini-batch of windows.
-        for (int b = 0; b < batch; ++b) offs[b] = window_starts[pick(global_rand_gen)];
+        // Sample a fresh random mini-batch from the training region only.
+        for (int b = 0; b < batch; ++b) offs[b] = pick(global_rand_gen);
         fill_batch(X_h, Y_h, corpus, offs, seq_len, V, c2i);
 
         auto X = Matrix<FLOAT>(X_h);
@@ -330,33 +380,33 @@ int compute() {
         trainnn.pop_front();
 
         if (step % log_every == 0 || step == steps - 1) {
-            // Evaluate on the fixed eval batch (no weight update here).
-            auto Xe = Matrix<FLOAT>(Xe_h);
-            LogisticLayer<FLOAT> eval_loss(N, Matrix<FLOAT>(Ye_h));
-            auto evalnet = build_net(blocks, embed, proj);
-            evalnet.push_front(&eval_loss);
-            const float eval_l = as_host(forward(evalnet, Xe)).elem(0, 0);
+            // Held-out evaluation: track the best model on VAL loss, and print
+            // train loss alongside so the generalization gap is visible.
+            auto [train_l, train_a] = eval_batch(Xt_h, Yt_h);
+            auto [val_l,   val_a]   = eval_batch(Xe_h, Ye_h);
 
-            auto logits = as_host(proj.value());
-            int correct = 0;
-            for (int i = 0; i < N; ++i) {
-                int pred = 0, truth = 0;
-                for (int r = 1; r < V; ++r) {
-                    if (logits.elem(r, i) > logits.elem(pred, i)) pred = r;
-                    if (Ye_h.elem(r, i) > Ye_h.elem(truth, i)) truth = r;
-                }
-                if (pred == truth) correct++;
-            }
-            const float acc = 100.0f * (float)correct / (float)N;
-
-            if (eval_l < best_loss) {
-                best_loss = eval_l;
+            if (val_l < best_loss) {
+                best_loss = val_l;
+                best_step = step;
                 save_best();
+                stale = 0;
+            } else {
+                stale++;
             }
 
-            printf("step %5d   eval_loss = %.4f   ppl = %7.2f   acc = %5.1f%%   lr = %.2e\n",
-                   step, eval_l, expf(eval_l), acc, lr_at(step));
+            printf("step %5d   train_loss = %.4f   val_loss = %.4f   val_ppl = %6.2f   "
+                   "val_acc = %5.1f%%   lr = %.2e%s\n",
+                   step, train_l, val_l, expf(val_l), val_a, lr_at(step),
+                   stale == 0 ? "   *best" : "");
             fflush(stdout);
+
+            // Early stopping: val loss has not improved for `patience` evals.
+            if (stale >= patience) {
+                printf("Early stopping at step %d: no val improvement for %d evals "
+                       "(best val_loss = %.4f at step %d).\n",
+                       step, patience, best_loss, best_step);
+                break;
+            }
         }
     }
 
@@ -376,9 +426,9 @@ int compute() {
     list<Layer<FLOAT>*> gennn = build_net(g_blocks, g_embed, g_proj);
     freeze(gennn);
 
-    cout << "\n--- Sample predictions ---\n";
+    cout << "\n--- Sample predictions (held-out val text) ---\n";
     for (int k = 0; k < 3; ++k) {
-        const int off = window_starts[(size_t)k * window_starts.size() / 3];
+        const int off = val_lo + (int)((long long)k * val_windows / 3);
         auto enc_h = Matrix<float>::zeros(in_dim, seq_len);
         for (int s = 0; s < seq_len; ++s) {
             enc_h.elem(c2i[(unsigned char)corpus[off + s]], s) = 1.0f;
@@ -398,7 +448,11 @@ int compute() {
             pred += idx_to_char[best];
         }
         auto clean = [](string s) {
-            for (auto& ch : s) if (ch == '\n') ch = '/';
+            for (auto& ch : s) {
+                unsigned char u = (unsigned char)ch;
+                if (u == '\n') ch = '/';
+                else if (u < 32 || u >= 127) ch = '.';   // keep terminal output readable
+            }
             return s;
         };
         printf("  in:   \"%s\"\n  want: \"%s\"\n  got:  \"%s\"\n\n",
