@@ -3,10 +3,18 @@ demo_transformer.py
 
 Tiny character language model on a toy corpus.
 
-Mirrors examples/demo_transformer.cu:
-  LinearEmbed(V+seq_len -> d_model=48)
-    -> two causal TransformerBlock layers(d_model=48, d_k=48, d_ff=96)
-  -> LinearProj(d_model=48 -> V)
+Mirrors the TransformerLayer block architecture of ml/layer.hpp (the layer
+driven by examples/demo_transformer.cu), at toy scale:
+
+  LinearEmbed(V+seq_len -> d_model)
+    -> two pre-LN causal TransformerBlock layers, each computing
+         R   = x + Wo·MultiHeadAttn(LN1(x)) + bo    (per-head 1/sqrt(d_h) scaling)
+         out = R + W2·relu(W1·LN2(R) + b1) + b2
+  -> LinearProj(d_model -> V)
+
+The .cu demo trains a much larger stack of the same blocks on enwik8 with a
+warmup+cosine LR schedule, a train/val split, and early stopping; this script
+keeps the toy corpus and full-batch Adam so it runs in seconds anywhere.
 """
 
 import copy
@@ -23,6 +31,7 @@ STRIDE = 1
 D_MODEL = 48
 D_K = 48
 D_FF = 96
+NUM_HEADS = 4  # d_h = D_K // NUM_HEADS = 12 per head, as in ml/layer.hpp
 EPOCHS = 2000
 LOG_EVERY = 200
 GEN_LEN = 48
@@ -69,30 +78,44 @@ def build_dataset(corpus: str, c2i: dict, vocab_size: int):
 
 
 class TransformerBlock(nn.Module):
-    def __init__(self, d_model: int, d_k: int, d_ff: int, seq_len: int):
+    """Pre-LN multi-head block matching ml/layer.hpp TransformerLayer:
+    R = x + Wo·MHA(LN1(x)) + bo;  out = R + W2·relu(W1·LN2(R) + b1) + b2.
+    Heads split d_k into contiguous d_h = d_k/num_heads chunks and each
+    attends independently with 1/sqrt(d_h) scaling; Wo mixes them."""
+
+    def __init__(self, d_model: int, d_k: int, d_ff: int, seq_len: int, num_heads: int):
         super().__init__()
+        assert d_k % num_heads == 0, "num_heads must divide d_k"
+        self.ln1 = nn.LayerNorm(d_model)  # eps=1e-5, same as layer.hpp
+        self.ln2 = nn.LayerNorm(d_model)
         self.Wq = nn.Linear(d_model, d_k, bias=False)
         self.Wk = nn.Linear(d_model, d_k, bias=False)
         self.Wv = nn.Linear(d_model, d_k, bias=False)
         self.Wo = nn.Linear(d_k, d_model, bias=True)
         self.ffn1 = nn.Linear(d_model, d_ff, bias=True)
         self.ffn2 = nn.Linear(d_ff, d_model, bias=True)
-        self.scale = 1.0 / math.sqrt(d_k)
+        self.num_heads = num_heads
+        self.d_h = d_k // num_heads
+        self.scale = 1.0 / math.sqrt(self.d_h)
         self.seq_len = seq_len
 
     def forward(self, x: torch.Tensor) -> torch.Tensor:
         batch = x.shape[0] // self.seq_len
         h = x.view(batch, self.seq_len, -1)
-        q = self.Wq(h)
-        k = self.Wk(h)
-        v = self.Wv(h)
-        scores = torch.matmul(q, k.transpose(1, 2)) * self.scale
+        x1 = self.ln1(h)
+
+        def heads(t: torch.Tensor) -> torch.Tensor:  # (B, S, d_k) -> (B, H, S, d_h)
+            return t.view(batch, self.seq_len, self.num_heads, self.d_h).transpose(1, 2)
+
+        q, k, v = heads(self.Wq(x1)), heads(self.Wk(x1)), heads(self.Wv(x1))
+        scores = torch.matmul(q, k.transpose(-2, -1)) * self.scale  # (B, H, S, S)
         mask = torch.triu(torch.ones(self.seq_len, self.seq_len, device=x.device), diagonal=1).bool()
-        scores = scores.masked_fill(mask.unsqueeze(0), -1e9)
+        scores = scores.masked_fill(mask, -1e9)
         a = torch.softmax(scores, dim=-1)
-        attn = torch.matmul(a, v)
+        attn = torch.matmul(a, v).transpose(1, 2).reshape(batch, self.seq_len, -1)
         r = h + self.Wo(attn)
-        out = r + self.ffn2(F.relu(self.ffn1(r)))
+        x2 = self.ln2(r)
+        out = r + self.ffn2(F.relu(self.ffn1(x2)))
         return out.reshape(batch * self.seq_len, -1)
 
 
@@ -100,8 +123,8 @@ class TinyTransformerLM(nn.Module):
     def __init__(self, vocab_size: int, in_dim: int):
         super().__init__()
         self.embed = nn.Linear(in_dim, D_MODEL, bias=True)
-        self.tf1 = TransformerBlock(D_MODEL, D_K, D_FF, SEQ_LEN)
-        self.tf2 = TransformerBlock(D_MODEL, D_K, D_FF, SEQ_LEN)
+        self.tf1 = TransformerBlock(D_MODEL, D_K, D_FF, SEQ_LEN, NUM_HEADS)
+        self.tf2 = TransformerBlock(D_MODEL, D_K, D_FF, SEQ_LEN, NUM_HEADS)
         self.proj = nn.Linear(D_MODEL, vocab_size, bias=True)
 
     def forward(self, x: torch.Tensor) -> torch.Tensor:
@@ -144,7 +167,7 @@ def main():
     print("=== Tiny Transformer Demo ===")
     print(f'Corpus: "{corpus[:96]}"')
     print(f"Vocabulary ({vocab_size} chars): {''.join(ch if ch != ' ' else '_' for ch in i2c)}")
-    print(f"Network: embed({in_dim}->{D_MODEL}) -> Transformer({D_MODEL},{D_K},{D_FF}) [x2] -> proj({D_MODEL}->{vocab_size})")
+    print(f"Network: embed({in_dim}->{D_MODEL}) -> Transformer({D_MODEL},{D_K},{D_FF},{NUM_HEADS}h) [x2] -> proj({D_MODEL}->{vocab_size})")
     print(f"Data: {len(starts)} windows x {SEQ_LEN} tokens = {x.shape[0]} predictions")
     print(f"Epochs: {EPOCHS}   Device: {DEVICE}\n")
 

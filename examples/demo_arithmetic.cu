@@ -2,7 +2,8 @@
  * @file demo_arithmetic.cu
  * @brief Transformer that learns integer addition, char by char.
  *
- * Each problem is rendered as a fixed-width string, e.g. for 3-digit operands:
+ * Each problem is rendered as a fixed-width string whose width is set by
+ * n_digits (shown here for 3-digit operands):
  *
  *     "012+037=9400"
  *      \__/ \__/ \__/
@@ -16,11 +17,30 @@
  * This is the standard trick that makes addition learnable for such models.
  *
  * Training: teacher-forced next-char prediction over the whole string (reusing
- *           the framework's TransformerLayer + LogisticLayer).
+ *           the framework's TransformerLayer + LogisticLayer), warmup + cosine
+ *           LR schedule, keeping the checkpoint with the best validation
+ *           exact-match. The trained model is saved under res/ and reloaded on
+ *           later runs (delete the file or set ARITH_RETRAIN=1 to retrain).
  * Eval:     BATCHED AUTOREGRESSIVE decoding -- the model consumes its own
  *           predicted digits -- scored as exact-match on HELD-OUT (a,b) pairs
- *           never seen in training. So the reported accuracy is real
- *           generalization to unseen sums, not memorization.
+ *           never seen in training, plus carry-chain robustness buckets and an
+ *           edge-case showcase. So the reported accuracy is real generalization
+ *           to unseen sums, not memorization.
+ *
+ * Empirical notes from scaling this demo (see git history):
+ *  - Required capacity grows quickly with n_digits: 3 digits train fine with
+ *    d_model=128 / 2 blocks, 4 digits need 256 / 3, 5 digits need 512 / 4.
+ *    An undersized model plateaus at a loss above the entropy floor with one
+ *    or more answer digits collapsed to a constant guess, and more training
+ *    steps do NOT rescue it; a sufficient model shows a sharp phase transition
+ *    to ~100% within the first few thousand steps.
+ *  - The logged loss cannot reach 0: operand digits are random, so its floor
+ *    is (#operand digit positions x ln 10)/seq_len -- e.g. 9*ln(10)/17 = 1.219
+ *    nats/position for 5 digits. Loss at the floor means the task is solved.
+ *  - Generalization holds across unseen pairs and every carry-chain length,
+ *    but NOT far outside the training distribution: near-all-zero problems
+ *    like 1+1 (probability ~1e-8 under uniform operand sampling) come out
+ *    wrong. The learned circuit is an algorithm, but an interpolative one.
  */
 
 #include "../ml/layer.hpp"
@@ -111,7 +131,7 @@ static bool read_mat(FILE* fp, Matrix<float>& out) {
 
 static int ipow10(int e) { int r = 1; while (e-- > 0) r *= 10; return r; }
 
-// Render "aaa+bbb=<reversed sum>" for the given operands.
+// Render "a..a+b..b=<reversed sum>" for the given operands (zero-padded).
 static string make_example(int a, int b, int n_digits, int ans_digits) {
     string s;
     for (int i = n_digits - 1; i >= 0; --i) s += char('0' + (a / ipow10(i)) % 10);
@@ -132,7 +152,7 @@ int compute() {
     // ── Problem definition ──────────────────────────────────────────────
     const int n_digits   = 5;                       // operands in [0, 99999]
     const int ans_digits = 6;                       // sum in [0, 199998]
-    const int prompt_len = 2 * n_digits + 2;        // "aaa+bbb=" length
+    const int prompt_len = 2 * n_digits + 2;        // "a..a+b..b=" length
     const int L          = prompt_len + ans_digits; // full string length
     const int seq_len    = L - 1;                   // next-char prediction positions
 
@@ -140,9 +160,11 @@ int compute() {
     int c2i[256] = {};
     vector<char> idx_to_char(VOCAB.begin(), VOCAB.end());
     for (int i = 0; i < V; ++i) c2i[(unsigned char)VOCAB[i]] = i;
-    const int in_dim = V + seq_len;
+    const int in_dim = V + seq_len;  // one-hot char + one-hot absolute position
 
     // ── Model / training config ─────────────────────────────────────────
+    // Sized for n_digits = 5; smaller problems train with smaller models
+    // (3 digits: 128d/2 blocks, 4 digits: 256d/3 blocks) -- see file header.
     const int d_model = 512, d_k = 512, d_ff = 1024, num_heads = 8, num_blocks = 4;
     const int batch = 256;
     const int steps = 12000, log_every = 1000;
@@ -438,7 +460,9 @@ int compute() {
         trainnn.pop_front();
 
         if (step % log_every == 0 || step == steps - 1) {
-            // Mean next-char NLL (nats/position) of this batch, pre-update logits.
+            // Mean next-char NLL (nats/position) of this batch, pre-update
+            // logits. Its floor is (#operand digit positions * ln 10)/seq_len,
+            // not 0, because the operand digits themselves are unpredictable.
             loss.eval(proj.value());
             const float nll = item(as_host(loss.value()));
             auto [tr_dig, tr_em] = eval_solve(train_eval, nullptr);
@@ -480,7 +504,11 @@ int compute() {
                L, em, dig, ex.first, ex.second, ex.first + ex.second);
     }
 
-    // ── Edge-case showcase (padded to a full eval batch with random pairs)
+    // ── Edge-case showcase (padded to a full eval batch with random pairs) ──
+    // Near-all-zero problems (1+1, 0+0, ...) are out-of-distribution: both
+    // operands being tiny has probability ~1/max_operand^2 under uniform
+    // sampling, so training effectively never sees them and the model gets
+    // them wrong despite ~100% in-distribution accuracy.
     {
         vector<pair<int,int>> fun = {
             {1, 1}, {0, 0}, {0, 1}, {9, 9}, {99999, 1},

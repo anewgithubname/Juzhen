@@ -6,16 +6,19 @@
  * passes even if forward/backward agree on the *wrong* math) and
  * testTransformerParity.cu (CPU vs CUDA, which passes if both backends share a
  * bug), this test compares TransformerLayer against a from-scratch reference
- * implementation of the attention formula used by examples/demo_transformer.py:
+ * implementation of the pre-LN multi-head block computed by ml/layer.hpp:
  *
- *     scores[q,k] = (Q_q · K_k) / sqrt(d_k)     with causal mask (k > q → -inf)
- *     A          = softmax(scores, dim=keys)     (ROW-wise: each query row sums to 1)
- *     H[:,q]     = Σ_k A[q,k] · V[:,k]
- *     R          = x + (Wo·H + bo)
- *     out        = R + (W2·relu(W1·R + b1) + b2)
+ *     x1 = LN1(x)                                 (pre-norm; gamma/beta, eps=1e-5)
+ *     per head h over its own d_h = d_k/num_heads rows of Q,K,V = W{q,k,v}·x1:
+ *       scores[q,k] = (Q_hq · K_hk) / sqrt(d_h)   with causal mask (k > q → -inf)
+ *       A           = softmax(scores, dim=keys)   (ROW-wise: each query row sums to 1)
+ *       H_h[:,q]    = Σ_k A[q,k] · V_h[:,k]
+ *     R   = x + (Wo·H + bo)                       (residual 1)
+ *     out = R + (W2·relu(W1·LN2(R) + b1) + b2)    (residual 2)
  *
  * The reference uses explicit loops (causal mask by construction, explicit
- * row-softmax) so it shares no code path with the layer under test.
+ * row-softmax, per-head slices) so it shares no code path with the layer
+ * under test.
  *
  * Forward is compared directly; the input gradient is compared against the
  * numerical gradient of the reference forward.
