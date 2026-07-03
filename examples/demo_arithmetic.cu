@@ -133,6 +133,57 @@ static bool read_mat(FILE* fp, Matrix<float>& out) {
     return true;
 }
 
+#ifdef CUDA
+// ── Device-resident training batch ───────────────────────────────────────────
+// Building the dense one-hot X/Y on the host and re-uploading them was the
+// demo's dominant PCIe traffic (~700 KB/step). Instead, X and Y live on the
+// GPU permanently; each step uploads one char index and one target index per
+// column (2*N ints, ~35 KB) and this kernel scatters the one-hots in place.
+// The position-feature rows of X (V..V+seq_len-1) are constant, written once.
+__global__ void scatter_onehot_kernel(float* X, float* Y,
+                                      const int* x_idx, const int* y_idx,
+                                      int in_dim, int V, int N) {
+    int col = blockIdx.x * blockDim.x + threadIdx.x;
+    if (col >= N) return;
+    float* xc = X + (size_t)col * in_dim;   // clear + set char rows 0..V-1
+    for (int r = 0; r < V; ++r) xc[r] = 0.0f;
+    xc[x_idx[col]] = 1.0f;
+    float* yc = Y + (size_t)col * V;        // Y is one-hot over all V rows
+    for (int r = 0; r < V; ++r) yc[r] = 0.0f;
+    yc[y_idx[col]] = 1.0f;
+}
+
+struct DeviceBatch {
+    int in_dim, V, N;
+    vector<int> h_xidx, h_yidx;             // host staging: fill, then upload()
+    Matrix<CUDAfloat> X, Y;                 // persistent device matrices
+    int *d_xidx = nullptr, *d_yidx = nullptr;
+
+    // X_init carries the constant position-feature rows (single upload).
+    DeviceBatch(int in_dim, int V, int seq_len, int batch, const Matrix<float>& X_init)
+        : in_dim(in_dim), V(V), N(seq_len * batch),
+          h_xidx(N), h_yidx(N),
+          X(X_init), Y(Matrix<float>::zeros(V, seq_len * batch)) {
+        CudaErrorCheck(cudaMalloc(&d_xidx, N * sizeof(int)));
+        CudaErrorCheck(cudaMalloc(&d_yidx, N * sizeof(int)));
+    }
+    ~DeviceBatch() { cudaFree(d_xidx); cudaFree(d_yidx); }
+    DeviceBatch(const DeviceBatch&) = delete;
+    DeviceBatch& operator=(const DeviceBatch&) = delete;
+
+    void upload() {
+        CudaErrorCheck(cudaMemcpy(d_xidx, h_xidx.data(), N * sizeof(int), cudaMemcpyHostToDevice));
+        CudaErrorCheck(cudaMemcpy(d_yidx, h_yidx.data(), N * sizeof(int), cudaMemcpyHostToDevice));
+        const int threads = 256, blocks = (N + threads - 1) / threads;
+        scatter_onehot_kernel<<<blocks, threads>>>(
+            const_cast<float*>(reinterpret_cast<const float*>(X.data())),
+            const_cast<float*>(reinterpret_cast<const float*>(Y.data())),
+            d_xidx, d_yidx, in_dim, V, N);
+        CudaErrorCheck(cudaGetLastError());
+    }
+};
+#endif
+
 static int ipow10(int e) { int r = 1; while (e-- > 0) r *= 10; return r; }
 
 // Render "a..a+b..b=<reversed sum>" for the given operands (zero-padded).
@@ -451,6 +502,15 @@ int compute() {
     auto Y_h = Matrix<float>::zeros(V, N);
     vector<pair<int,int>> offs(batch);
 
+#ifdef CUDA
+    // Persistent device batch; the constant position-feature rows go up once.
+    Matrix<float> X_init = Matrix<float>::zeros(in_dim, N);
+    for (int b = 0; b < batch; ++b)
+        for (int s = 0; s < seq_len; ++s)
+            X_init.elem(V + s, b * seq_len + s) = 1.0f;
+    DeviceBatch dev_batch(in_dim, V, seq_len, batch, X_init);
+#endif
+
     // Reuse a previously trained model when one with this exact config exists.
     // Delete the file or set ARITH_RETRAIN=1 to train from scratch.
     // "_ulen" marks weights trained on the length-uniform operand distribution
@@ -475,11 +535,27 @@ int compute() {
             do { a = sample_operand(); bb = sample_operand(); } while (test_keys.count(key(a, bb)));
             offs[b] = {a, bb};
         }
-        fill_batch(offs, X_h, Y_h);
 
+#ifdef CUDA
+        // Upload char/target indices only; the dense one-hots are scattered
+        // into the persistent device matrices by DeviceBatch::upload().
+        for (int b = 0; b < batch; ++b) {
+            const string S = make_example(offs[b].first, offs[b].second, n_digits, ans_digits);
+            for (int s = 0; s < seq_len; ++s) {
+                const int col = b * seq_len + s;
+                dev_batch.h_xidx[col] = c2i[(unsigned char)S[s]];
+                dev_batch.h_yidx[col] = c2i[(unsigned char)S[s + 1]];
+            }
+        }
+        dev_batch.upload();
+        const Matrix<FLOAT>& X = dev_batch.X;
+        LogisticLayer<FLOAT> loss(N, Matrix<FLOAT>(dev_batch.Y));  // D2D copy
+#else
+        fill_batch(offs, X_h, Y_h);
         auto X = Matrix<FLOAT>(X_h);
-        forward(trainnn, X);
         LogisticLayer<FLOAT> loss(N, Matrix<FLOAT>(Y_h));
+#endif
+        forward(trainnn, X);
         trainnn.push_front(&loss);
         backprop(trainnn, X);
         trainnn.pop_front();
