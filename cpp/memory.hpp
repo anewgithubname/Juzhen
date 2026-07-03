@@ -23,25 +23,25 @@
  */
 
 #pragma once
+#include <unordered_map>
+
 #include "helper.hpp"
 
 template <class D>
-struct MemorySpace {
-    D *ptr;
-    size_t size;
-};
-
-template <class D>
 class Memory {
-    static std::list<MemorySpace<D>> alive_mems;
-    static std::list<MemorySpace<D>> dead_mems;
-    
+    // ptr -> size for live allocations; size -> ptr for recyclable blocks.
+    // Hash maps keep allocate()/free() O(1); with the previous linked lists
+    // every free() scanned all live allocations (hundreds of entries during
+    // training), which dominated the profile of allocation-heavy programs.
+    static std::unordered_map<D *, size_t> alive_mems;
+    static std::unordered_multimap<size_t, D *> dead_mems;
+
     static D* _alloc(size_t size);
     static void _free(D* ptr);
 
    public:
     /**
-    * @brief Check if there is memory in the dead memory list, 
+    * @brief Check if there is memory in the dead memory list,
     * - if so, return the pointer to the memory.
     * - if not, allocate new memory.
 	* @param size size of the memory to be allocated
@@ -50,17 +50,14 @@ class Memory {
     static D *allocate(size_t size) {
         STATIC_TIC;
 
-        // search for space in the freed space.
-        auto it =
-            std::find_if(dead_mems.begin(), dead_mems.end(),
-                         [&](MemorySpace<D> mem) { return mem.size == size; });
-
+        // search for space of the same size in the freed space.
+        auto it = dead_mems.find(size);
         if (it != dead_mems.end()) {
+            D *ret = it->second;
             LOG_DEBUG("Found {} space in dead memory: {}, address: {}",
-                      datatype(D), size * sizeof(D), fmt::ptr(it->ptr));
-            alive_mems.push_back({it->ptr, it->size});
-            D *ret = it->ptr;
+                      datatype(D), size * sizeof(D), fmt::ptr(ret));
             dead_mems.erase(it);
+            alive_mems.emplace(ret, size);
             STATIC_TOC;
             return ret;
         }
@@ -75,7 +72,7 @@ class Memory {
         }
         LOG_DEBUG("No {} space available, allocate new space: {}, address: {}",
                   datatype(D), size * sizeof(D), fmt::ptr(ptr));
-        alive_mems.push_back({ptr, size});
+        alive_mems.emplace(ptr, size);
         STATIC_TOC;
         return ptr;
     }
@@ -86,21 +83,16 @@ class Memory {
     */
     static void free(D *ptr) {
         STATIC_TIC;
-        size_t size = 0;
 
-        auto it =
-            std::find_if(alive_mems.begin(), alive_mems.end(), [&](MemorySpace<D> mem) { return mem.ptr == ptr; });
-
-        if (it != alive_mems.end()) {
-            size = it->size;
-            alive_mems.erase(it);
-        } else {
+        auto it = alive_mems.find(ptr);
+        if (it == alive_mems.end()) {
             LOG_ERROR(
                 "Failed to find address {} in alive memory type: {}", fmt::ptr(ptr), datatype(D));
             ERROR_OUT;
         }
 
-        dead_mems.push_back({ptr, size});
+        dead_mems.emplace(it->second, ptr);
+        alive_mems.erase(it);
         STATIC_TOC;
     }
 
@@ -110,16 +102,14 @@ class Memory {
     */
     ~Memory() {
         size_t size = 0;
-        // for each loop
-        for (MemorySpace<D> mem_i : alive_mems) {
-            _free(mem_i.ptr);
-            size += mem_i.size;
+        for (auto &[ptr, sz] : alive_mems) {
+            _free(ptr);
+            size += sz;
         }
 
-        // for each loop
-        for (MemorySpace<D> mem_i : dead_mems) {
-            _free(mem_i.ptr);
-            size += mem_i.size;
+        for (auto &[sz, ptr] : dead_mems) {
+            _free(ptr);
+            size += sz;
         }
 
         alive_mems.clear();
@@ -148,7 +138,7 @@ void Memory<D>::_free(D* ptr) {
 }
 
 template <class D>
-std::list<MemorySpace<D>> Memory<D>::alive_mems;
+std::unordered_map<D *, size_t> Memory<D>::alive_mems;
 template <class D>
-std::list<MemorySpace<D>> Memory<D>::dead_mems;
+std::unordered_multimap<size_t, D *> Memory<D>::dead_mems;
 
