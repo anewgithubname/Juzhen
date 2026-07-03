@@ -2243,6 +2243,98 @@ namespace Juzhen
 			A, dAT, dS, seq_len, batchN, scale);
 		CudaErrorCheck(cudaGetLastError());
 	}
+
+	// Fused LayerNorm forward for one column c (x, y, xhat are (dim, N)
+	// column-major, gamma/beta (dim,1)):
+	//   y[:,c] = gamma ⊙ (x[:,c] - mu_c)/sqrt(var_c + eps) + beta
+	// Also stores xhat and 1/sqrt(var+eps) for the backward pass. Replaces
+	// ~8 generic matrix ops (and their temporaries) with one kernel.
+	__global__ void layernorm_forward_kernel(
+		const float* x, const float* gamma, const float* beta,
+		float* y, float* xhat, float* inv_std, int dim, int N) {
+		int c = blockIdx.x * blockDim.x + threadIdx.x;
+		if (c >= N) return;
+		const float* xc = x + (size_t)c * dim;
+
+		float mu = 0.0f;
+		for (int i = 0; i < dim; ++i) mu += xc[i];
+		mu /= dim;
+
+		float var = 0.0f;
+		for (int i = 0; i < dim; ++i) {
+			const float d = xc[i] - mu;
+			var += d * d;
+		}
+		var /= dim;
+
+		const float inv = rsqrtf(var + 1e-5f);
+		inv_std[c] = inv;
+		for (int i = 0; i < dim; ++i) {
+			const float xh = (xc[i] - mu) * inv;
+			xhat[(size_t)c * dim + i] = xh;
+			y[(size_t)c * dim + i] = gamma[i] * xh + beta[i];
+		}
+	}
+
+	// Fused LayerNorm input-gradient for one column (dxhat = dy ⊙ gamma):
+	//   dx = inv_std ⊙ (dxhat - mean(dxhat) - xhat ⊙ mean(dxhat ⊙ xhat))
+	__global__ void layernorm_backward_kernel(
+		const float* dy, const float* gamma,
+		const float* xhat, const float* inv_std,
+		float* dx, int dim, int N) {
+		int c = blockIdx.x * blockDim.x + threadIdx.x;
+		if (c >= N) return;
+		const size_t c0 = (size_t)c * dim;
+
+		float m1 = 0.0f, m2 = 0.0f;
+		for (int i = 0; i < dim; ++i) {
+			const float dxh = gamma[i] * dy[c0 + i];
+			m1 += dxh;
+			m2 += dxh * xhat[c0 + i];
+		}
+		m1 /= dim;
+		m2 /= dim;
+
+		const float inv = inv_std[c];
+		for (int i = 0; i < dim; ++i) {
+			const float dxh = gamma[i] * dy[c0 + i];
+			dx[c0 + i] = inv * (dxh - m1 - xhat[c0 + i] * m2);
+		}
+	}
+
+	// y[i, c] += b[i] for every column: broadcast bias add, replacing the
+	// "+ b * ones(1, N)" idiom (an outer-product GEMM plus a full temporary).
+	__global__ void add_bias_kernel(float* y, const float* b, int rows, size_t total) {
+		size_t idx = (size_t)blockIdx.x * blockDim.x + threadIdx.x;
+		if (idx >= total) return;
+		y[idx] += b[idx % rows];
+	}
+
+	inline void cuda_layernorm_forward(
+		const float* x, const float* gamma, const float* beta,
+		float* y, float* xhat, float* inv_std, int dim, int N) {
+		const int threads = 128;
+		const int blocks = (N + threads - 1) / threads;
+		layernorm_forward_kernel<<<blocks, threads>>>(x, gamma, beta, y, xhat, inv_std, dim, N);
+		CudaErrorCheck(cudaGetLastError());
+	}
+
+	inline void cuda_layernorm_backward(
+		const float* dy, const float* gamma,
+		const float* xhat, const float* inv_std,
+		float* dx, int dim, int N) {
+		const int threads = 128;
+		const int blocks = (N + threads - 1) / threads;
+		layernorm_backward_kernel<<<blocks, threads>>>(dy, gamma, xhat, inv_std, dx, dim, N);
+		CudaErrorCheck(cudaGetLastError());
+	}
+
+	inline void cuda_add_bias(float* y, const float* b, int rows, size_t total) {
+		const int threads = 256;
+		const int blocks = (int)((total + threads - 1) / threads);
+		add_bias_kernel<<<blocks, threads>>>(y, b, rows, total);
+		CudaErrorCheck(cudaGetLastError());
+	}
 #endif
 
 	// Layer normalization over the feature dimension (rows) of each token/column.
@@ -2269,6 +2361,25 @@ namespace Juzhen
 		}
 
 		Matrix<D> forward(const Matrix<D>& x) {
+#ifdef CUDA
+			// Fused kernel (assumes plain column-major input, which is what
+			// TransformerLayer always passes); other backends use the
+			// generic matrix-op formulation below.
+			if constexpr (std::is_same_v<D, CUDAfloat>) {
+				if (!x.get_transpose()) {
+					Matrix<D> y("ln_y", dim, x.num_col());
+					cuda_layernorm_forward(
+						reinterpret_cast<const float*>(x.data()),
+						reinterpret_cast<const float*>(gamma.data()),
+						reinterpret_cast<const float*>(beta.data()),
+						const_cast<float*>(reinterpret_cast<const float*>(y.data())),
+						const_cast<float*>(reinterpret_cast<const float*>(cached_xhat.data())),
+						const_cast<float*>(reinterpret_cast<const float*>(cached_inv.data())),
+						dim, (int)x.num_col());
+					return y;
+				}
+			}
+#endif
 			const float invdim = 1.0f / (float)dim;
 			auto mu  = sum(x, 0) * invdim;                       // (1,N) column means
 			auto xc  = x - ones_d1 * mu;                         // (dim,N) centered
@@ -2281,17 +2392,34 @@ namespace Juzhen
 
 		// dy : (dim,N) upstream gradient.  Returns dL/dx; updates gamma,beta if `update`.
 		Matrix<D> backward(Matrix<D>&& dy, bool update) {
-			const float invdim = 1.0f / (float)dim;
-			auto dgamma = sum(hadmd(dy, cached_xhat), 1);        // (dim,1)
-			auto dbeta  = sum(dy, 1);                            // (dim,1)
-			auto dxhat  = hadmd(dy, gamma * ones_1N);            // (dim,N)
-			auto m1 = sum(dxhat, 0) * invdim;                    // (1,N)
-			auto m2 = sum(hadmd(dxhat, cached_xhat), 0) * invdim;// (1,N)
-			auto dx = hadmd(ones_d1 * cached_inv,
-				dxhat - ones_d1 * m1 - hadmd(cached_xhat, ones_d1 * m2));
+			Matrix<D> dx("ln_dx", dim, (int)dy.num_col());
+			bool fused = false;
+#ifdef CUDA
+			if constexpr (std::is_same_v<D, CUDAfloat>) {
+				if (!dy.get_transpose()) {
+					cuda_layernorm_backward(
+						reinterpret_cast<const float*>(dy.data()),
+						reinterpret_cast<const float*>(gamma.data()),
+						reinterpret_cast<const float*>(cached_xhat.data()),
+						reinterpret_cast<const float*>(cached_inv.data()),
+						const_cast<float*>(reinterpret_cast<const float*>(dx.data())),
+						dim, (int)dy.num_col());
+					fused = true;
+				}
+			}
+#endif
+			if (!fused) {
+				const float invdim = 1.0f / (float)dim;
+				auto dxhat = hadmd(dy, gamma * ones_1N);             // (dim,N)
+				auto m1 = sum(dxhat, 0) * invdim;                    // (1,N)
+				auto m2 = sum(hadmd(dxhat, cached_xhat), 0) * invdim;// (1,N)
+				dx = hadmd(ones_d1 * cached_inv,
+					dxhat - ones_d1 * m1 - hadmd(cached_xhat, ones_d1 * m2));
+			}
+			// Parameter gradients read gamma/xhat, so dx (above) comes first.
 			if (update) {
-				gamma -= adam_update(std::move(dgamma), adam_g);
-				beta  -= adam_update(std::move(dbeta), adam_b);
+				gamma -= adam_update(sum(hadmd(dy, cached_xhat), 1), adam_g);
+				beta  -= adam_update(sum(dy, 1), adam_b);
 			}
 			return dx;
 		}
@@ -2358,6 +2486,23 @@ namespace Juzhen
 
 		// Pre-norm LayerNorms: LN1 before attention, LN2 before FFN.
 		LayerNorm<D> ln1, ln2;
+
+		// y += b broadcast over columns. One kernel on CUDA; the generic
+		// backends keep the outer-product formulation.
+		void add_bias(Matrix<D>& y, const Matrix<D>& b) {
+#ifdef CUDA
+			if constexpr (std::is_same_v<D, CUDAfloat>) {
+				if (!y.get_transpose()) {
+					cuda_add_bias(
+						const_cast<float*>(reinterpret_cast<const float*>(y.data())),
+						reinterpret_cast<const float*>(b.data()),
+						(int)y.num_row(), y.num_row() * y.num_col());
+					return;
+				}
+			}
+#endif
+			y += b * ones_1N;
+		}
 
 	public:
 		/**
@@ -2516,14 +2661,17 @@ namespace Juzhen
 			}
 
 			// 3. Output projection + residual 1
-			auto O = Wo * cached_H + bo * ones_1N;
+			auto O = Wo * cached_H;
+			add_bias(O, bo);
 			cached_R = input + O;
 
 			// 4. LN2 then FFN: relu(W1*x2 + b1) then W2*...+b2
 			cached_x2 = ln2.forward(cached_R);
-			cached_F1 = W1 * cached_x2 + b1 * ones_1N;
+			cached_F1 = W1 * cached_x2;
+			add_bias(cached_F1, b1);
 			cached_F1_relu = relu(Matrix<D>(cached_F1));
-			auto F = W2 * cached_F1_relu + b2 * ones_1N;
+			auto F = W2 * cached_F1_relu;
+			add_bias(F, b2);
 
 			// 5. Residual 2
 			this->val = cached_R + F;
@@ -2538,11 +2686,10 @@ namespace Juzhen
 			auto dout = std::move(upstream_grad);         // (d_model, N)
 
 			// ── FFN backward ──────────────────────────────────────────────
-			// dF = dout  (from second residual)
-			auto dF = Matrix<D>(dout);
-			auto dW2 = dF * cached_F1_relu.T();           // (d_model, d_ff)
-			auto db2 = sum(dF, 1);                         // (d_model, 1)
-			auto dF1_relu = W2.T() * dF;                   // (d_ff, N)
+			// dout doubles as dF (from second residual); it is only read here.
+			auto dW2 = dout * cached_F1_relu.T();          // (d_model, d_ff)
+			auto db2 = sum(dout, 1);                        // (d_model, 1)
+			auto dF1_relu = W2.T() * dout;                  // (d_ff, N)
 			auto dF1 = hadmd(d_relu(Matrix<D>(cached_F1)), std::move(dF1_relu)); // (d_ff, N)
 			auto dW1 = dF1 * cached_x2.T();                // (d_ff, d_model)
 			auto db1 = sum(dF1, 1);                         // (d_ff, 1)
@@ -2551,18 +2698,16 @@ namespace Juzhen
 			auto dR = ln2.backward(std::move(dx2), this->need_update) + dout;
 
 			// ── Attention output projection backward ──────────────────────
-			// O = Wo * H + bo  →  dR flows into dO
-			auto dO = Matrix<D>(dR);                        // (d_model, N)
-			auto dWo = dO * cached_H.T();                   // (d_model, d_k)
-			auto dbo = sum(dO, 1);                           // (d_model, 1)
-			auto dH = Wo.T() * dO;                           // (d_k, N)
-			// dR also flows through residual to dx
-			auto dx = Matrix<D>(dR);                         // will accumulate
+			// O = Wo * H + bo  →  dR is dO (read-only here); it also flows
+			// through the residual into dx at the end of this function.
+			auto dWo = dR * cached_H.T();                   // (d_model, d_k)
+			auto dbo = sum(dR, 1);                           // (d_model, 1)
+			auto dH = Wo.T() * dR;                           // (d_k, N)
 
 			// ── Self-attention backward (per sequence) ────────────────────
-			Matrix<D> dQ = Matrix<D>::zeros(d_k, N);
-			Matrix<D> dK = Matrix<D>::zeros(d_k, N);
-			Matrix<D> dV = Matrix<D>::zeros(d_k, N);
+			// Written in full below (GEMM beta=0 on CUDA, per-slice
+			// assignment otherwise), so no zero-initialization is needed.
+			Matrix<D> dQ("dQ", d_k, N), dK("dK", d_k, N), dV("dV", d_k, N);
 			const float scale = 1.0f / sqrtf((float)d_h);
 
 #ifdef CUDA
@@ -2686,9 +2831,10 @@ namespace Juzhen
 			auto dWk = dK * cached_x1.T();
 			auto dWv = dV * cached_x1.T();
 
-			// Grad wrt LN1 output, then back through LN1 and add to residual path.
+			// Grad wrt LN1 output, back through LN1, plus the residual path
+			// (R = x + attention output, so dR flows straight into dx).
 			auto dx1 = Wq.T() * dQ + Wk.T() * dK + Wv.T() * dV;
-			dx += ln1.backward(std::move(dx1), this->need_update);
+			auto dx = ln1.backward(std::move(dx1), this->need_update) + dR;
 
 			// ── Parameter updates ─────────────────────────────────────────
 			if (this->need_update) {

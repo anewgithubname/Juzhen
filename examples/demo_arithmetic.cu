@@ -148,10 +148,12 @@ static string make_example(int a, int b, int n_digits, int ans_digits) {
 }
 
 int compute() {
+    // ARITH_SEED overrides the RNG seed (default 1) for variance studies.
+    const int seed = getenv("ARITH_SEED") ? atoi(getenv("ARITH_SEED")) : 1;
 #ifdef CUDA
-    GPUSampler sampler(1);
+    GPUSampler sampler(seed);
 #endif
-    global_rand_gen.seed(1);
+    global_rand_gen.seed(seed);
 
     // ── Problem definition ──────────────────────────────────────────────
     const int n_digits   = 5;                       // operands in [0, 99999]
