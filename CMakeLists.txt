@@ -249,3 +249,9 @@ add_test(test10 testRectifiedPathParity)
 add_test(test11 testTransformer)
 add_test(test12 testTransformerParity)
 add_test(test13 testTransformerRef)
+# PyTorch cross-check: test14 dumps weights/activations, test15 replays them
+# in PyTorch. test15 skips (code 77) when the python side lacks torch/numpy.
+add_test(test14 testTransformerTorchDump)
+add_test(test15 python3 ${CMAKE_SOURCE_DIR}/tests/testTransformerTorch.py)
+set_tests_properties(test14 PROPERTIES FIXTURES_SETUP torch_dump)
+set_tests_properties(test15 PROPERTIES FIXTURES_REQUIRED torch_dump SKIP_RETURN_CODE 77)

@@ -16,8 +16,12 @@ import os
 import struct
 import sys
 
-import numpy as np
-import torch
+try:
+    import numpy as np
+    import torch
+except ImportError as e:
+    print(f"SKIP: {e} (install torch/numpy to run this test)")
+    sys.exit(77)  # ctest SKIP_RETURN_CODE
 
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), "..", "examples"))
 from demo_transformer import TransformerBlock  # noqa: E402
