@@ -7,7 +7,7 @@
 #endif
 #endif
 
-int main() {
+int compute() {
 #ifndef ROCM_HIP
     LOG_INFO("ROCM_HIP is not enabled; skipping ROCm device proof test.");
     return 0;

@@ -7,21 +7,11 @@ add_definitions(-DPROJECT_DIR="${CMAKE_SOURCE_DIR}")
 # if you have a benchmark server running, you can specify it here
 add_definitions(-DBENCHMARKSERVER="DONOTKNOW")
 
-# do you need GPU support? 
+# do you need GPU support?
 option(NVIDIA_CUDA "Build with NVIDIA CUDA backend" ON)
+option(ROCM_HIP "Build with AMD ROCm/HIP backend (scaffold)" OFF)
 option(APPLE_SILICON "Build with Apple Silicon backend" OFF)
-
-if(CMAKE_SYSTEM_NAME STREQUAL "Linux" AND NOT DEFINED CACHE{NVIDIA_CUDA})
-    set(NVIDIA_CUDA ON CACHE BOOL "Build with NVIDIA CUDA backend" FORCE)
-endif()
-
-if(APPLE AND NOT DEFINED CACHE{APPLE_SILICON})
-    set(APPLE_SILICON ON CACHE BOOL "Build with Apple Silicon backend" FORCE)
-endif()
-
-if(NVIDIA_CUDA AND APPLE_SILICON)
-    message(FATAL_ERROR "NVIDIA_CUDA and APPLE_SILICON cannot both be enabled.")
-endif()
+set(ROCM_OFFLOAD_ARCH "" CACHE STRING "ROCm offload architecture, e.g. gfx1151")
 
 set(HAS_CONCEPTS ON)
 
@@ -49,6 +39,47 @@ if(NVIDIA_CUDA)
     find_package(CUDAToolkit REQUIRED)
 
     set(CMAKE_CUDA_STANDARD 20)
+
+elseif(ROCM_HIP)
+    message("BUILD WITH ROCM/HIP SUPPORT! (scaffold)")
+    add_definitions(-DROCM_HIP)
+    project(animated_octo_sniffle LANGUAGES CXX)
+
+    # Try to pick up ROCm math/runtime libraries when available.
+    find_package(hipblas CONFIG QUIET)
+    find_package(rocblas CONFIG QUIET)
+    find_package(rocrand CONFIG QUIET)
+    find_package(rocsolver CONFIG QUIET)
+    find_package(MIOpen CONFIG QUIET)
+
+    set(ROCM_BACKEND_LIBS "")
+    if(TARGET hip::hipblas)
+        list(APPEND ROCM_BACKEND_LIBS hip::hipblas)
+    endif()
+    if(NOT TARGET hip::hipblas)
+        find_library(HIPBLAS_LIBRARY
+            NAMES hipblas libhipblas
+            HINTS
+                ${ROCM_PATH}/lib
+                $ENV{ROCM_PATH}/lib
+                $ENV{HIP_PATH}/lib
+                "C:/Program Files/AMD/ROCm/7.1/lib")
+        if(HIPBLAS_LIBRARY)
+            list(APPEND ROCM_BACKEND_LIBS ${HIPBLAS_LIBRARY})
+        endif()
+    endif()
+    if(TARGET roc::rocblas)
+        list(APPEND ROCM_BACKEND_LIBS roc::rocblas)
+    endif()
+    if(TARGET roc::rocrand)
+        list(APPEND ROCM_BACKEND_LIBS roc::rocrand)
+    endif()
+    if(TARGET roc::rocsolver)
+        list(APPEND ROCM_BACKEND_LIBS roc::rocsolver)
+    endif()
+    if(TARGET MIOpen)
+        list(APPEND ROCM_BACKEND_LIBS MIOpen)
+    endif()
 
 elseif(APPLE_SILICON)
     message("BUILD WITH APPLE SILICON SUPPORT! ")
@@ -96,8 +127,10 @@ set(Boost_NO_SYSTEM_PATHS ON)
 
 find_package(Boost REQUIRED)
 
-if(NVIDIA_CUDA) # add relevant backend implementations for CUDA 
+if(NVIDIA_CUDA) # add relevant backend implementations for CUDA
     add_library(juzhen cpp/launcher.cu cpp/cumatrix.cu cpp/cukernels.cu)
+elseif(ROCM_HIP) # add relevant backend implementations for ROCm/HIP
+    add_library(juzhen cpp/launcher.cu cpp/hipmatrix.cpp cpp/hipkernels.cpp)
 elseif(APPLE_SILICON) # add relevant backend implementations for Apple Silicon
     add_library(juzhen cpp/launcher.cu cpp/metal/MPSWrapper.mm cpp/mpsmatrix.cpp)
     add_dependencies(juzhen compile_shaders)
@@ -149,6 +182,16 @@ if(NVIDIA_CUDA) # if we are on GPU, we need to include the cuda headers
     else()
         message(WARNING "cuDNN not found; ConvLayer/demo_cnn_mnist will be disabled.")
     endif()
+elseif(ROCM_HIP)
+    # Keep launcher.cu in C++ mode for ROCm scaffold builds.
+    set_source_files_properties(cpp/launcher.cu PROPERTIES LANGUAGE CXX)
+    set_target_properties(juzhen PROPERTIES LINKER_LANGUAGE CXX)
+    if(CMAKE_CXX_COMPILER_ID MATCHES "Clang" AND ROCM_OFFLOAD_ARCH)
+        target_compile_options(juzhen PRIVATE "--offload-arch=${ROCM_OFFLOAD_ARCH}")
+    endif()
+    if(ROCM_BACKEND_LIBS)
+        target_link_libraries(juzhen ${ROCM_BACKEND_LIBS})
+    endif()
 else()
     set_source_files_properties(cpp/launcher.cu PROPERTIES LANGUAGE CXX) # specify cuda files lanaugae to be CXX
     set_target_properties(juzhen PROPERTIES LINKER_LANGUAGE CXX)
@@ -174,6 +217,13 @@ macro(GENERATE_PROJ TARGETNAME FILE)
         target_compile_options(${TARGETNAME} PRIVATE
             $<$<COMPILE_LANGUAGE:CUDA>:--extended-lambda>
             $<$<COMPILE_LANGUAGE:CUDA>:--forward-unknown-to-host-compiler>)
+    elseif(ROCM_HIP)
+        target_link_libraries(${TARGETNAME} ftxui::screen ftxui::dom ftxui::component spdlog::spdlog ${BLAS_LIBRARIES} ${OpenBLAS_LIBRARIES} juzhen ${ROCM_BACKEND_LIBS})
+        set_source_files_properties(${FILE} PROPERTIES LANGUAGE CXX COMPILE_FLAGS "-x hip")
+        set_target_properties(${TARGETNAME} PROPERTIES LINKER_LANGUAGE CXX)
+        if(CMAKE_CXX_COMPILER_ID MATCHES "Clang" AND ROCM_OFFLOAD_ARCH)
+            target_compile_options(${TARGETNAME} PRIVATE "--offload-arch=${ROCM_OFFLOAD_ARCH}")
+        endif()
     elseif(APPLE_SILICON)
         target_link_libraries(${TARGETNAME} ftxui::screen ftxui::dom ftxui::component spdlog::spdlog ${BLAS_LIBRARIES} "-framework Metal" "-framework Foundation" "-framework MetalPerformanceShaders" juzhen)
         set_source_files_properties(${FILE} PROPERTIES LANGUAGE CXX)
@@ -205,8 +255,12 @@ GENERATE_PROJ(testUNet tests/testUNet.cu)
 GENERATE_PROJ(testUNetLearning tests/testUNetLearning.cu)
 GENERATE_PROJ(testDiffusionScore tests/testDiffusionScore.cu)
 GENERATE_PROJ(testMPSParity tests/testMPSParity.cu)
+GENERATE_PROJ(testMPSStackComputedParity tests/testMPSStackComputedParity.cu)
+GENERATE_PROJ(testMPSRandnStability tests/testMPSRandnStability.cu)
+GENERATE_PROJ(testMPSRandStability tests/testMPSRandStability.cu)
 GENERATE_PROJ(testConvBackendParity tests/testConvBackendParity.cu)
 GENERATE_PROJ(testRectifiedPathParity tests/testRectifiedPathParity.cu)
+GENERATE_PROJ(testRectifiedFlowTinyUNetParity tests/testRectifiedFlowTinyUNetParity.cu)
 GENERATE_PROJ(testDiffusionTrajectoryCompare tests/testDiffusionTrajectoryCompare.cu)
 GENERATE_PROJ(testCPUConv tests/testCPUConv.cu)
 GENERATE_PROJ(testUNetScoreCPU tests/testUNetScoreCPU.cu)
@@ -232,6 +286,9 @@ GENERATE_PROJ(demo_transformer examples/demo_transformer.cu)
 GENERATE_PROJ(demo_discretediffusion examples/demo_discretediffusion.cu)
 GENERATE_PROJ(demo_arithmetic examples/demo_arithmetic.cu)
 GENERATE_PROJ(testCNNTrainParity tests/testCNNTrainParity.cu)
+GENERATE_PROJ(testRocmDeviceProof tests/testRocmDeviceProof.cu)
+GENERATE_PROJ(testRocmOpsSmoke tests/testRocmOpsSmoke.cu)
+GENERATE_PROJ(testRocmCpuParity tests/testRocmCpuParity.cu)
 # GENERATE_PROJ(wintest examples/demo_gui.cu)
 
 enable_testing()
@@ -256,3 +313,10 @@ add_test(test14 testTransformerTorchDump)
 add_test(test15 python3 ${CMAKE_SOURCE_DIR}/tests/testTransformerTorch.py)
 set_tests_properties(test14 PROPERTIES FIXTURES_SETUP torch_dump)
 set_tests_properties(test15 PROPERTIES FIXTURES_REQUIRED torch_dump SKIP_RETURN_CODE 77)
+add_test(test16 testMPSStackComputedParity)
+add_test(test17 testMPSRandnStability)
+add_test(test18 testMPSRandStability)
+add_test(test19 testRectifiedFlowTinyUNetParity)
+add_test(test20 testRocmDeviceProof)
+add_test(test21 testRocmOpsSmoke)
+add_test(test22 testRocmCpuParity)

@@ -17,7 +17,7 @@ int CheckClose(const M& got, const M& expected, const char* name, float tol = 1e
 
 }  // namespace
 
-int main() {
+int compute() {
     int ret = 0;
 
     CM A(M("A", {{1, 2}, {3, 4}}));
@@ -94,7 +94,7 @@ int main() {
 
 #else
 
-int main() {
+int compute() {
     LOG_INFO("ROCM_HIP is not enabled; skipping ROCm ops smoke test.");
     return 0;
 }

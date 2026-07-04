@@ -52,7 +52,7 @@ int CheckFinite(const M& m, const char* name) {
 
 }  // namespace
 
-int main() {
+int compute() {
     int ret = 0;
 
     M A("A", {{1.25f, 2.50f, 3.75f},
@@ -234,7 +234,7 @@ int main() {
 
 #else
 
-int main() {
+int compute() {
     LOG_INFO("ROCM_HIP is not enabled; skipping ROCm CPU parity test.");
     return 0;
 }
