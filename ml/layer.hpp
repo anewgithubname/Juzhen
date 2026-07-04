@@ -2459,6 +2459,9 @@ namespace Juzhen
 	class TransformerLayer : public Layer<D> {
 		int d_model, d_k, d_ff, seq_len, batchN;
 		int num_heads, d_h;             // d_h = d_k / num_heads (per-head dim)
+		bool causal;                    // apply causal (autoregressive) attention
+		                                // mask when true; false = bidirectional
+		                                // attention (e.g. for masked diffusion).
 
 		// ── Attention weights ──
 		Matrix<D> Wq, Wk, Wv, Wo, bo;
@@ -2513,12 +2516,18 @@ namespace Juzhen
 		 * @param batch    Number of sequences in a mini-batch.
 		 * @param heads    Number of attention heads (must divide d_k). Each head
 		 *                 attends independently over d_k/heads dims; Wo mixes them.
+		 * @param causal   When true (default) apply the causal mask so each token
+		 *                 attends only to itself and earlier tokens (autoregressive
+		 *                 LM). When false, attention is bidirectional — every token
+		 *                 sees the whole sequence, as required by a masked-diffusion
+		 *                 denoiser.
 		 */
-		TransformerLayer(int d_model, int d_k, int d_ff, int seq_len, int batch, int heads = 1)
+		TransformerLayer(int d_model, int d_k, int d_ff, int seq_len, int batch, int heads = 1,
+		                 bool causal = true)
 			: Layer<D>(d_model, 1, seq_len * batch),
 			  d_model(d_model), d_k(d_k), d_ff(d_ff),
 			  seq_len(seq_len), batchN(batch),
-			  num_heads(heads), d_h(d_k / heads),
+			  num_heads(heads), d_h(d_k / heads), causal(causal),
 			  // Attention weights
 			  Wq(Matrix<D>::randn(d_k, d_model) * (1.0f / sqrtf((float)d_model))),
 			  Wk(Matrix<D>::randn(d_k, d_model) * (1.0f / sqrtf((float)d_model))),
@@ -2608,7 +2617,8 @@ namespace Juzhen
 						batchN));
 				}
 
-				cuda_apply_causal_mask(scores_ptr, seq_len, batchN * num_heads);
+				if (causal)
+					cuda_apply_causal_mask(scores_ptr, seq_len, batchN * num_heads);
 
 				cuda_softmax_rows_batched(scores_ptr,
 					const_cast<float*>(reinterpret_cast<const float*>(cached_A.data())),
@@ -2642,9 +2652,11 @@ namespace Juzhen
 						// scores : (seq_len, seq_len) = Qi^T * Ki * scale
 						auto scores = Qi.T() * Ki * scale;
 						// Causal masking: for query row, disallow future keys col > row.
-						for (int row = 0; row < seq_len; ++row) {
-							for (int col = row + 1; col < seq_len; ++col) {
-								scores.elem(row, col) = -1e9f;
+						if (causal) {
+							for (int row = 0; row < seq_len; ++row) {
+								for (int col = row + 1; col < seq_len; ++col) {
+									scores.elem(row, col) = -1e9f;
+								}
 							}
 						}
 						// A_i : (seq_len, seq_len) — softmax each row (over keys)
