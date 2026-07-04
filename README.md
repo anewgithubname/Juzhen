@@ -191,8 +191,16 @@ CNN_MNIST_EPOCHS=10 CNN_MNIST_SEED=43 ./build_cuda/demo_cnn_mnist
 | 10 | [demo_rectified_infer.cu](examples/demo_rectified_infer.cu) | Rectified flow inference demo |
 | 11 | [demo_cnn_mnist.cu](examples/demo_cnn_mnist.cu) | CNN on MNIST (all backends) |
 | 12 | [demo_cnn_rectified.cu](examples/demo_cnn_rectified.cu) | Rectified flow on CIFAR-10 (conv UNet) |
-| 13 | [demo_gui.cu](examples/demo_gui.cu) | GUI demo |
-| 14 | [compute_fid.py](examples/compute_fid.py) | Compute FID score from generated image folders |
+| 13 | [demo_transformer.cu](examples/demo_transformer.cu) | Character-level transformer LM on enwik8 |
+| 14 | [demo_arithmetic.cu](examples/demo_arithmetic.cu) | Transformer that learns integer addition, char by char |
+| 15 | [demo_discretediffusion.cu](examples/demo_discretediffusion.cu) | Masked discrete-diffusion char LM on enwik8 (D3PM/MDLM) |
+| 16 | [demo_gui.cu](examples/demo_gui.cu) | GUI demo (target commented out in CMakeLists.txt) |
+| 17 | [compute_fid.py](examples/compute_fid.py) | Compute FID score from generated image folders |
+
+`demo_transformer` and `demo_discretediffusion` train on `examples/enwik8` if present
+(download instructions in the file headers), falling back to `examples/corpus.txt`.
+The PyTorch mirror scripts used by the parity tests live in `tests/`
+(e.g. `tests/demo_transformer.py`, imported by `tests/testTransformerTorch.py`).
 
 ## Supported Platforms
 - Linux (CPU / NVIDIA GPU / AMD GPU via ROCm)
