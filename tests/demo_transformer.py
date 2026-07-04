@@ -15,6 +15,9 @@ driven by examples/demo_transformer.cu), at toy scale:
 The .cu demo trains a much larger stack of the same blocks on enwik8 with a
 warmup+cosine LR schedule, a train/val split, and early stopping; this script
 keeps the toy corpus and full-batch Adam so it runs in seconds anywhere.
+
+NOTE: tests/testTransformerTorch.py imports TransformerBlock from this file as
+the float64 PyTorch oracle for the C++ parity test — keep them in sync.
 """
 
 import copy

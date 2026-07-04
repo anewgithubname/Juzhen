@@ -2,7 +2,7 @@
 
 Reads the dump written by testTransformerTorchDump (weights, input x, upstream
 gradient g, forward output, input gradient dx), rebuilds the identical block
-with examples/demo_transformer.py's TransformerBlock (pre-LN, multi-head,
+with tests/demo_transformer.py's TransformerBlock (pre-LN, multi-head,
 causal, 1/sqrt(d_h) scaling), loads the same weights, and compares the forward
 output and dL/dx numerically. PyTorch runs in float64, so it acts as an exact
 oracle and the reported error is the C++ float32 rounding.
@@ -23,7 +23,7 @@ except ImportError as e:
     print(f"SKIP: {e} (install torch/numpy to run this test)")
     sys.exit(77)  # ctest SKIP_RETURN_CODE
 
-sys.path.insert(0, os.path.join(os.path.dirname(__file__), "..", "examples"))
+sys.path.insert(0, os.path.dirname(__file__))
 from demo_transformer import TransformerBlock  # noqa: E402
 
 FWD_TOL = 1e-4   # float32 forward pass vs float64 oracle
