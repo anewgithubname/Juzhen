@@ -54,6 +54,9 @@ dkms.conf
 
 data/*
 datasets/CIFAR10/
+# testDataLoader regenerates this zip on every run
+datasets/MNIST/images.zip
+datasets/MNIST/images/
 .vscode/*
 vs_proj/*
 vs_solution/*
