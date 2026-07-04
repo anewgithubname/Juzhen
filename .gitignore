@@ -53,6 +53,7 @@ dkms.conf
 .*.~*
 
 data/*
+datasets/CIFAR10/
 .vscode/*
 vs_proj/*
 vs_solution/*

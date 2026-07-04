@@ -11,7 +11,7 @@
  * distributed at https://www.cs.toronto.edu/~kriz/cifar.html.
  *
  * Environment variables:
- *   CIFAR10_DIR          path to extracted cifar-10-batches-bin/ (default: data/CIFAR10/cifar-10-batches-bin)
+ *   CIFAR10_DIR          path to extracted cifar-10-batches-bin/ (default: datasets/CIFAR10/cifar-10-batches-bin)
  *   RF_EPOCHS            number of training epochs           (default: 10)
  *   RF_BATCH_SIZE        mini-batch size                     (default: 128)
  *   RF_LR                Adam learning rate                  (default: 2e-4)
@@ -398,7 +398,7 @@ int compute() {
     const int fid_samples = env_int("RF_FID_SAMPLES", 1000);
     const int log_every   = 10;
     const std::string cifar_dir = env_str("CIFAR10_DIR",
-        std::string(PROJECT_DIR) + "/data/CIFAR10/cifar-10-batches-bin");
+        std::string(PROJECT_DIR) + "/datasets/CIFAR10/cifar-10-batches-bin");
     const std::string out_dir = std::string(PROJECT_DIR) + "/res/generated_cifar10";
 
 #ifdef CUDA

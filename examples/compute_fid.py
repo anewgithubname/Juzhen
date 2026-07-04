@@ -78,7 +78,7 @@ def main():
     parser = argparse.ArgumentParser(description="Compute FID for rectified flow CIFAR-10 samples")
     parser.add_argument("--samples-dir", default="res/generated_cifar10",
                         help="Directory containing epoch_*_samples.bin files")
-    parser.add_argument("--cifar-dir", default="data/CIFAR10/cifar-10-batches-bin",
+    parser.add_argument("--cifar-dir", default="datasets/CIFAR10/cifar-10-batches-bin",
                         help="Path to cifar-10-batches-bin")
     parser.add_argument("--real-images", type=int, default=10000,
                         help="Number of real images to use for reference statistics")
