@@ -68,6 +68,13 @@ int main()
         Memory<double> md64;
 #ifdef CUDA
         CuBLASErrorCheck(cublasCreate(&Matrix<CUDAfloat>::global_handle));
+        // opt-in TF32 tensor-core math for all cuBLAS GEMMs (fp32 storage,
+        // 10-bit mantissa multiplies). Enable with NVIDIA_TF32=1.
+        const char *tf32 = std::getenv("NVIDIA_TF32");
+        if (tf32 && *tf32 && std::string(tf32) != "0") {
+            CuBLASErrorCheck(cublasSetMathMode(Matrix<CUDAfloat>::global_handle, CUBLAS_TF32_TENSOR_OP_MATH));
+            std::cout << "TF32 tensor-core math: ON (NVIDIA_TF32=" << tf32 << ")" << std::endl;
+        }
         Memory<CUDAfloat> gpumd;
 #endif
 #ifdef ROCM_HIP
