@@ -11,8 +11,8 @@
  * (Austin et al. 2021; Sahoo et al. 2024) — essentially BERT-style masking made
  * into a proper generative model via a noise schedule and iterative decoding.
  *
- *   - corpus: prefers examples/text8 (the standard 27-symbol char-LM benchmark
- *     the discrete-diffusion literature reports on), else examples/enwik8 (205
+ *   - corpus: prefers datasets/text8 (the standard 27-symbol char-LM benchmark
+ *     the discrete-diffusion literature reports on), else datasets/enwik8 (205
  *     byte-level symbols), else corpus.txt, else an embedded passage (Alice)
  *   - vocabulary = the corpus charset PLUS one extra [MASK] token
  *   - forward (noising) process: sample a mask level t~U(eps,1), then replace
@@ -165,12 +165,12 @@ static string embedded_corpus() {
 }
 
 static string load_corpus(string& source) {
-    const string base = string(PROJECT_DIR) + "/examples/";
+    const string base = string(PROJECT_DIR) + "/datasets/";
     // Prefer text8 (the standard 27-symbol char-LM benchmark that the discrete-
     // diffusion literature reports, e.g. D3PM-absorbing ~1.45 BPC) when present,
-    // so our BPC is directly comparable. Fetch it once into examples/:
-    //     curl -L https://mattmahoney.net/dc/text8.zip -o examples/text8.zip
-    //     unzip -o examples/text8.zip -d examples/       # -> examples/text8
+    // so our BPC is directly comparable. Fetch it once into datasets/:
+    //     curl -L https://mattmahoney.net/dc/text8.zip -o datasets/text8.zip
+    //     unzip -o datasets/text8.zip -d datasets/       # -> datasets/text8
     // Falls back to raw enwik8 (205 byte-level symbols, a harder alphabet).
     for (const char* name : {"text8", "enwik8", "corpus.txt"}) {
         ifstream f(base + name, ios::binary);

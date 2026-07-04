@@ -100,9 +100,9 @@ build*/**
 *.log
 external/boost**
 
-# demo_transformer downloadable corpora (tiny-shakespeare / enwik8); fetch with curl
-examples/corpus.txt
-examples/enwik8
-examples/enwik8.zip
-examples/text8
-examples/text8.zip
+# downloadable text corpora (tiny-shakespeare / enwik8 / text8); fetch with curl
+datasets/corpus.txt
+datasets/enwik8
+datasets/enwik8.zip
+datasets/text8
+datasets/text8.zip

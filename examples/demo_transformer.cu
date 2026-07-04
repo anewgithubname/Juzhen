@@ -2,8 +2,8 @@
  * @file demo_transformer.cu
  * @brief Character language model trained on real-world text.
  *
- *   - corpus loaded from examples/enwik8 (100 MB Wikipedia) if present, else
- *     examples/corpus.txt, else an embedded public-domain passage (Alice)
+ *   - corpus loaded from datasets/enwik8 (100 MB Wikipedia) if present, else
+ *     datasets/corpus.txt, else an embedded public-domain passage (Alice)
  *   - byte/char-level: one-hot character input plus one-hot position features
  *   - embed -> two TransformerLayer blocks -> projection
  *   - MINI-BATCH next-character training with the framework LogisticLayer
@@ -69,12 +69,12 @@ static void copy_linear_weights(LinearLayer<FLOAT>& dst,
 }
 
 // The demo trains on enwik8 (the standard 100 MB char-LM benchmark: the first
-// 1e8 bytes of an English Wikipedia dump). Fetch it once into examples/:
+// 1e8 bytes of an English Wikipedia dump). Fetch it once into datasets/:
 //
-//     curl -L https://mattmahoney.net/dc/enwik8.zip -o examples/enwik8.zip
-//     unzip -o examples/enwik8.zip -d examples/        # -> examples/enwik8
+//     curl -L https://mattmahoney.net/dc/enwik8.zip -o datasets/enwik8.zip
+//     unzip -o datasets/enwik8.zip -d datasets/        # -> datasets/enwik8
 //
-// load_corpus() prefers examples/enwik8, then examples/corpus.txt (e.g.
+// load_corpus() prefers datasets/enwik8, then datasets/corpus.txt (e.g.
 // tiny-shakespeare), then this small embedded public-domain fallback (the
 // opening of Lewis Carroll's "Alice's Adventures in Wonderland", 1865).
 static string embedded_corpus() {
@@ -113,7 +113,7 @@ static string embedded_corpus() {
 }
 
 static string load_corpus(string& source) {
-    const string base = string(PROJECT_DIR) + "/examples/";
+    const string base = string(PROJECT_DIR) + "/datasets/";
     for (const char* name : {"enwik8", "corpus.txt"}) {
         ifstream f(base + name, ios::binary);
         if (f) {

@@ -138,8 +138,8 @@ ctest --test-dir build --output-on-failure
 | 15 | [demo_discretediffusion.cu](examples/demo_discretediffusion.cu) | Masked discrete-diffusion char LM on enwik8 (D3PM/MDLM) |
 | 16 | [compute_fid.py](examples/compute_fid.py) | Compute FID score from generated image folders |
 
-`demo_transformer` and `demo_discretediffusion` train on `examples/enwik8` if present
-(download instructions in the file headers), falling back to `examples/corpus.txt`.
+`demo_transformer` and `demo_discretediffusion` train on `datasets/enwik8` / `datasets/text8`
+if present (download instructions in the file headers), falling back to `datasets/corpus.txt`.
 The PyTorch mirror scripts used by the parity tests live in `tests/`
 (e.g. `tests/demo_transformer.py`, imported by `tests/testTransformerTorch.py`).
 
