@@ -13,8 +13,8 @@ using namespace std;
 
 #if defined(CUDA) || defined(APPLE_SILICON) || defined(ROCM_HIP)
 int compute() {
-    cout << "testDiffusionTrainIterCPU requires a CPU-only build." << endl;
-    return 0;
+    cout << "testDiffusionTrainIterCPU requires a CPU-only build; skipping." << endl;
+    return 77; // ctest SKIP_RETURN_CODE
 }
 #else
 

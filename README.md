@@ -130,13 +130,12 @@ ctest --test-dir build --output-on-failure
 | 7 | [demo_mnist.cu](examples/demo_mnist.cu) | 10-class logistic regression on MNIST |
 | 8 | [pagerank.cu](examples/pagerank.cu) | PageRank demo |
 | 9 | [demo_rectified.cu](examples/demo_rectified.cu) | Rectified flow (two Gaussians) |
-| 10 | [demo_rectified_infer.cu](examples/demo_rectified_infer.cu) | Rectified flow inference demo |
-| 11 | [demo_cnn_mnist.cu](examples/demo_cnn_mnist.cu) | CNN on MNIST (all backends) |
-| 12 | [demo_cnn_rectified.cu](examples/demo_cnn_rectified.cu) | Rectified flow on CIFAR-10 (conv UNet) |
-| 13 | [demo_transformer.cu](examples/demo_transformer.cu) | Character-level transformer LM on enwik8 |
-| 14 | [demo_arithmetic.cu](examples/demo_arithmetic.cu) | Transformer that learns integer addition, char by char |
-| 15 | [demo_discretediffusion.cu](examples/demo_discretediffusion.cu) | Masked discrete-diffusion char LM on enwik8 (D3PM/MDLM) |
-| 16 | [compute_fid.py](examples/compute_fid.py) | Compute FID score from generated image folders |
+| 10 | [demo_cnn_mnist.cu](examples/demo_cnn_mnist.cu) | CNN on MNIST (all backends) |
+| 11 | [demo_cnn_rectified.cu](examples/demo_cnn_rectified.cu) | Rectified flow on CIFAR-10 (conv UNet) |
+| 12 | [demo_transformer.cu](examples/demo_transformer.cu) | Character-level transformer LM on enwik8 |
+| 13 | [demo_arithmetic.cu](examples/demo_arithmetic.cu) | Transformer that learns integer addition, char by char |
+| 14 | [demo_discretediffusion.cu](examples/demo_discretediffusion.cu) | Masked discrete-diffusion char LM on enwik8 (D3PM/MDLM) |
+| 15 | [compute_fid.py](examples/compute_fid.py) | Compute FID score from generated image folders |
 
 `demo_transformer` and `demo_discretediffusion` train on `datasets/enwik8` / `datasets/text8`
 if present (download instructions in the file headers), falling back to `datasets/corpus.txt`.

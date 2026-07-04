@@ -12,6 +12,7 @@
 #include "../ml/layer.hpp"
 #include "../ml/dataloader.hpp"
 #include <cmath>
+#include <cstdlib>
 #include <fstream>
 #include <iomanip>
 #include <iostream>
@@ -103,7 +104,7 @@ int compute() {
             std::cout << "  iter " << std::setw(3) << i
                       << " loss=" << std::fixed << std::setprecision(6)
                       << gpu_losses[i] << "\n";
-        return 0;
+        return 77; // ctest SKIP_RETURN_CODE
     }
 
     std::vector<float> cpu_losses;
@@ -184,7 +185,7 @@ int compute() {
             std::cout << "  iter " << std::setw(3) << i
                       << " loss=" << std::fixed << std::setprecision(6)
                       << gpu_losses[i] << "\n";
-        return 0;
+        return 77; // ctest SKIP_RETURN_CODE
     }
 
     std::vector<float> cpu_losses;
@@ -222,7 +223,16 @@ int compute() {
 
 #else
 // ── CPU training path (generates reference) ──────────────────────────────────
+// Rewriting the checked-in reference is a side effect, so under ctest this
+// path skips (exit 77) unless JUZHEN_WRITE_CNN_REF=1 is set explicitly.
 int compute() {
+    const char* wr = std::getenv("JUZHEN_WRITE_CNN_REF");
+    if (!wr || !*wr || std::string(wr) == "0") {
+        std::cout << "testCNNTrainParity: CPU build regenerates " << REF_FILE << ".\n";
+        std::cout << "Set JUZHEN_WRITE_CNN_REF=1 to rewrite the reference; skipping.\n";
+        return 77; // ctest SKIP_RETURN_CODE
+    }
+
     global_rand_gen.seed(42);
 
     std::vector<Matrix<float>> Xs, Ys;

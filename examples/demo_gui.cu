@@ -30,7 +30,6 @@
 #include "../ml/layer.hpp"
 using namespace std;
 using namespace Juzhen;
-#include "../ml/plotting.hpp"
 #include <mutex>
 
 #ifdef CUDA

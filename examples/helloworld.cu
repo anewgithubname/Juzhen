@@ -27,7 +27,6 @@
 #include <thread>
 
 #include "../cpp/juzhen.hpp"
-#include "../ml/plotting.hpp"
 
 // overriding the default printing function for matrices
 std::ostream& operator<<(std::ostream& os, const M& M) {
