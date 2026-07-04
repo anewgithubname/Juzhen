@@ -117,6 +117,35 @@ Only one GPU backend may be enabled at a time.
 ctest --test-dir build --output-on-failure
 ```
 
+## Examples
+
+| # | Example | Description |
+|---|---------|-------------|
+| 1 | [helloworld.cu](examples/helloworld.cu) | Basic matrix operations |
+| 2 | [helloworld_nn.cu](examples/helloworld_nn.cu) | Regression with Neural Net API |
+| 3 | [demo.cu](examples/demo.cu) | Mixed matrix operation demo |
+| 4 | [demo_gemm.cu](examples/demo_gemm.cu) | GEMM benchmark/demo |
+| 5 | [demo_classification.cu](examples/demo_classification.cu) | Binary logistic regression |
+| 6 | [knn.cu](examples/knn.cu) | KNN classification on MNIST |
+| 7 | [demo_mnist.cu](examples/demo_mnist.cu) | 10-class logistic regression on MNIST |
+| 8 | [pagerank.cu](examples/pagerank.cu) | PageRank demo |
+| 9 | [demo_rectified.cu](examples/demo_rectified.cu) | Rectified flow (two Gaussians) |
+| 10 | [demo_rectified_infer.cu](examples/demo_rectified_infer.cu) | Rectified flow inference demo |
+| 11 | [demo_cnn_mnist.cu](examples/demo_cnn_mnist.cu) | CNN on MNIST (all backends) |
+| 12 | [demo_cnn_rectified.cu](examples/demo_cnn_rectified.cu) | Rectified flow on CIFAR-10 (conv UNet) |
+| 13 | [demo_transformer.cu](examples/demo_transformer.cu) | Character-level transformer LM on enwik8 |
+| 14 | [demo_arithmetic.cu](examples/demo_arithmetic.cu) | Transformer that learns integer addition, char by char |
+| 15 | [demo_discretediffusion.cu](examples/demo_discretediffusion.cu) | Masked discrete-diffusion char LM on enwik8 (D3PM/MDLM) |
+| 16 | [demo_gui.cu](examples/demo_gui.cu) | GUI demo (target commented out in CMakeLists.txt) |
+| 17 | [compute_fid.py](examples/compute_fid.py) | Compute FID score from generated image folders |
+
+`demo_transformer` and `demo_discretediffusion` train on `examples/enwik8` if present
+(download instructions in the file headers), falling back to `examples/corpus.txt`.
+The PyTorch mirror scripts used by the parity tests live in `tests/`
+(e.g. `tests/demo_transformer.py`, imported by `tests/testTransformerTorch.py`).
+
+### Environment variables
+
 Environment variables for `demo_cnn_rectified`:
 
 | Variable | Default | Description |
@@ -146,33 +175,6 @@ Example:
 ```bash
 CNN_MNIST_EPOCHS=10 CNN_MNIST_SEED=43 ./build_cuda/demo_cnn_mnist
 ```
-
-## Examples
-
-| # | Example | Description |
-|---|---------|-------------|
-| 1 | [helloworld.cu](examples/helloworld.cu) | Basic matrix operations |
-| 2 | [helloworld_nn.cu](examples/helloworld_nn.cu) | Regression with Neural Net API |
-| 3 | [demo.cu](examples/demo.cu) | Mixed matrix operation demo |
-| 4 | [demo_gemm.cu](examples/demo_gemm.cu) | GEMM benchmark/demo |
-| 5 | [demo_classification.cu](examples/demo_classification.cu) | Binary logistic regression |
-| 6 | [knn.cu](examples/knn.cu) | KNN classification on MNIST |
-| 7 | [demo_mnist.cu](examples/demo_mnist.cu) | 10-class logistic regression on MNIST |
-| 8 | [pagerank.cu](examples/pagerank.cu) | PageRank demo |
-| 9 | [demo_rectified.cu](examples/demo_rectified.cu) | Rectified flow (two Gaussians) |
-| 10 | [demo_rectified_infer.cu](examples/demo_rectified_infer.cu) | Rectified flow inference demo |
-| 11 | [demo_cnn_mnist.cu](examples/demo_cnn_mnist.cu) | CNN on MNIST (all backends) |
-| 12 | [demo_cnn_rectified.cu](examples/demo_cnn_rectified.cu) | Rectified flow on CIFAR-10 (conv UNet) |
-| 13 | [demo_transformer.cu](examples/demo_transformer.cu) | Character-level transformer LM on enwik8 |
-| 14 | [demo_arithmetic.cu](examples/demo_arithmetic.cu) | Transformer that learns integer addition, char by char |
-| 15 | [demo_discretediffusion.cu](examples/demo_discretediffusion.cu) | Masked discrete-diffusion char LM on enwik8 (D3PM/MDLM) |
-| 16 | [demo_gui.cu](examples/demo_gui.cu) | GUI demo (target commented out in CMakeLists.txt) |
-| 17 | [compute_fid.py](examples/compute_fid.py) | Compute FID score from generated image folders |
-
-`demo_transformer` and `demo_discretediffusion` train on `examples/enwik8` if present
-(download instructions in the file headers), falling back to `examples/corpus.txt`.
-The PyTorch mirror scripts used by the parity tests live in `tests/`
-(e.g. `tests/demo_transformer.py`, imported by `tests/testTransformerTorch.py`).
 
 ## Supported Platforms
 - Linux (CPU / NVIDIA GPU / AMD GPU via ROCm)
