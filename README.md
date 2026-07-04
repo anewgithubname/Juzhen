@@ -117,34 +117,6 @@ Only one GPU backend may be enabled at a time.
 ctest --test-dir build --output-on-failure
 ```
 
-### TF32 tensor-core math (NVIDIA GPUs)
-
-On Ampere or newer NVIDIA GPUs (RTX 30 series+), setting `NVIDIA_TF32=1` routes all
-cuBLAS GEMMs through TF32 tensor cores: fp32 storage is unchanged, but multiplies
-round the mantissa to 10 bits (accumulation stays full fp32).
-
-```bash
-NVIDIA_TF32=1 ./build_cuda/demo_gemm
-NVIDIA_TF32=1 ./build_cuda/demo_transformer
-```
-
-Measured on an RTX 4090:
-
-| Workload | Speedup |
-|---|---|
-| `demo_gemm` (5000x5000) | +31% |
-| `demo_transformer` (enwik8 char-LM) | +31% |
-| `demo_mnist` / `demo_cnn_mnist` (small ops) | none (launch-overhead bound) |
-
-Caveats:
-- Off by default. Results deviate from fp32 at the ~1e-3 relative level, which is
-  harmless for ML training (loss curves match point-for-point) but fails strict
-  numerical-parity tests — run `ctest` without `NVIDIA_TF32` set.
-- Convolutions go through cuDNN, which already permits TF32 by default on Ampere+;
-  this switch only affects cuBLAS GEMMs.
-- CUDA backend only. The ROCm analogue (XF32) exists on Instinct MI200/MI300 but is
-  not wired up; Apple Silicon has no TF32 equivalent.
-
 Environment variables for `demo_cnn_rectified`:
 
 | Variable | Default | Description |
@@ -290,3 +262,31 @@ Benchmark using MNIST example, time collected by the built-in profiling tool.
 See: http://statslearning.com:8080/
 
 ![](benchmark.png)
+
+## TF32 tensor-core math (NVIDIA GPUs)
+
+On Ampere or newer NVIDIA GPUs (RTX 30 series+), setting `NVIDIA_TF32=1` routes all
+cuBLAS GEMMs through TF32 tensor cores: fp32 storage is unchanged, but multiplies
+round the mantissa to 10 bits (accumulation stays full fp32).
+
+```bash
+NVIDIA_TF32=1 ./build_cuda/demo_gemm
+NVIDIA_TF32=1 ./build_cuda/demo_transformer
+```
+
+Measured on an RTX 4090:
+
+| Workload | Speedup |
+|---|---|
+| `demo_gemm` (5000x5000) | +31% |
+| `demo_transformer` (enwik8 char-LM) | +31% |
+| `demo_mnist` / `demo_cnn_mnist` (small ops) | none (launch-overhead bound) |
+
+Caveats:
+- Off by default. Results deviate from fp32 at the ~1e-3 relative level, which is
+  harmless for ML training (loss curves match point-for-point) but fails strict
+  numerical-parity tests — run `ctest` without `NVIDIA_TF32` set.
+- Convolutions go through cuDNN, which already permits TF32 by default on Ampere+;
+  this switch only affects cuBLAS GEMMs.
+- CUDA backend only. The ROCm analogue (XF32) exists on Instinct MI200/MI300 but is
+  not wired up; Apple Silicon has no TF32 equivalent.
