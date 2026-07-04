@@ -54,6 +54,10 @@
             auto A1 = Matrix<MPSfloat>::randn(DIM, DIM);
             auto A2 = Matrix<MPSfloat>::randn(DIM, DIM);
             Matrix<MPSfloat> A3 = Matrix<MPSfloat>::zeros(DIM, DIM);
+            // Untimed warmup: load the GEMM kernel and ramp GPU clocks so the
+            // first timed iteration is not penalised (to_host forces sync).
+            for (int i = 0; i < 3; i++) A3 += A1 * A2 / DIM;
+            A3.to_host().slice(0, 5, 0, 5);
              std::chrono::high_resolution_clock::time_point t1 = std::chrono::high_resolution_clock::now();
              for (int i = 0; i < 10; i++)
              {
@@ -74,6 +78,10 @@
             auto A1 = Matrix<CUDAfloat>::randn(DIM, DIM);
             auto A2 = Matrix<CUDAfloat>::randn(DIM, DIM);
             Matrix<CUDAfloat> A3 = Matrix<CUDAfloat>::zeros(DIM, DIM);
+            // Untimed warmup: load the GEMM kernel and ramp GPU clocks so the
+            // first timed iteration is not penalised (to_host forces sync).
+            for (int i = 0; i < 3; i++) A3 += A1 * A2 / DIM;
+            A3.slice(0, 5, 0, 5).to_host();
              std::chrono::high_resolution_clock::time_point t1 = std::chrono::high_resolution_clock::now();
              for (int i = 0; i < 10; i++)
              {
@@ -95,6 +103,10 @@
             auto A1 = CM::randn(DIM, DIM);
             auto A2 = CM::randn(DIM, DIM);
             CM A3 = CM::zeros(DIM, DIM);
+            // Untimed warmup: load the GEMM kernel and ramp GPU clocks so the
+            // first timed iteration is not penalised (to_host forces sync).
+            for (int i = 0; i < 3; i++) A3 += A1 * A2 / DIM;
+            A3.slice(0, 5, 0, 5).to_host();
              std::chrono::high_resolution_clock::time_point t1 = std::chrono::high_resolution_clock::now();
              for (int i = 0; i < 10; i++)
              {
@@ -115,6 +127,10 @@
              auto A1C = Matrix<float>::randn(DIM, DIM);
              auto A2C = Matrix<float>::randn(DIM, DIM);
              Matrix<float> A3 = Matrix<float>::zeros(DIM, DIM);
+             // Untimed warmup: prime the memory pool (temporaries) and caches
+             // so the first timed iteration is not penalised.
+             for (int i = 0; i < 3; i++) A3 += A1C * A2C / DIM;
+             A3.slice(0, 5, 0, 5);
              std::chrono::high_resolution_clock::time_point t1 = std::chrono::high_resolution_clock::now();
              for (int i = 0; i < 10; i++)
              {
