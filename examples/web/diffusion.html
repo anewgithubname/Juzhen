@@ -1,0 +1,184 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Juzhen Diffusion Demo</title>
+<style>
+  :root { color-scheme: light dark; }
+  body {
+    font-family: system-ui, sans-serif;
+    max-width: 860px; margin: 2rem auto; padding: 0 1rem;
+  }
+  h1 { font-size: 1.4rem; }
+  textarea {
+    width: 100%; box-sizing: border-box; height: 4.5rem;
+    font-family: monospace; font-size: 0.95rem; padding: 0.5rem;
+    border-radius: 6px; border: 1px solid #888;
+  }
+  .hint { font-size: 0.85rem; opacity: 0.7; margin-top: 0.2rem; }
+  .controls {
+    display: flex; flex-wrap: wrap; gap: 1.2rem; align-items: center;
+    margin: 0.8rem 0;
+  }
+  .controls label { font-size: 0.85rem; display: flex; align-items: center; gap: 0.4rem; }
+  .controls output { font-family: monospace; min-width: 2.2rem; }
+  button {
+    font-size: 1rem; padding: 0.4rem 1.4rem;
+    border-radius: 6px; border: 1px solid #888; cursor: pointer;
+  }
+  button:disabled { opacity: 0.5; cursor: wait; }
+  #board {
+    font-family: monospace; font-size: 1.05rem; line-height: 1.7;
+    border: 1px solid #888; border-radius: 6px;
+    padding: 0.8rem; margin-top: 0.5rem; letter-spacing: 0.05em;
+    word-break: break-all; white-space: pre-wrap; min-height: 5rem;
+  }
+  #board span.blank  { color: #2e9e4f; font-weight: bold; }
+  #board span.pad    { opacity: 0.45; }
+  #board span.masked {
+    color: transparent; border-bottom: 2px solid #888;
+    animation: pulse 1.2s ease-in-out infinite;
+  }
+  @keyframes pulse { 50% { border-color: #ccc3; } }
+  #status { font-size: 0.85rem; opacity: 0.7; min-height: 1.2rem; margin-top: 0.4rem; }
+  footer { margin-top: 2rem; font-size: 0.85rem; opacity: 0.7; }
+</style>
+</head>
+<body>
+<h1>Juzhen Diffusion — the machine does your fill-in-the-blanks</h1>
+<p>A masked <b>discrete diffusion</b> model (bidirectional transformer trained with
+<a href="https://github.com/anewgithubname/Juzhen">Juzhen</a>) fills the blanks by
+iterative denoising: every blank starts as a [MASK] token and the most confident
+positions are revealed round by round — watch it happen. <span id="modelinfo"></span></p>
+
+<textarea id="prompt">the largest city in france is _____ and it is famous for the ______ tower which was built in the nineteenth century by the engineer</textarea>
+<div class="hint">Use <b>_</b> for each blank character. The model window is 128
+characters; anything after your text is also treated as blanks (shown dimmed).</div>
+
+<div class="controls">
+  <label>denoise rounds
+    <input type="range" id="steps" min="4" max="128" step="4" value="64">
+    <output id="stepsv">64</output>
+  </label>
+  <label>temperature
+    <input type="range" id="temp" min="0.1" max="2" step="0.1" value="0.7">
+    <output id="tempv">0.7</output>
+  </label>
+  <label>order noise
+    <input type="range" id="noise" min="0" max="3" step="0.5" value="1">
+    <output id="noisev">1</output>
+  </label>
+  <button id="go">Fill blanks</button>
+</div>
+
+<div id="board"><span style="opacity:0.5">Result appears here.</span></div>
+<div id="status"></div>
+
+<footer>Absorbing-state discrete diffusion (D3PM / MDLM recipe) with MaskGIT-style
+progressive decoding. Unlike an autoregressive model, it conditions on context
+on <i>both sides</i> of each blank. Trained at the character level — expect
+plausible pseudo-English, not facts.</footer>
+
+<script>
+const promptEl = document.getElementById('prompt');
+const board = document.getElementById('board');
+const status_ = document.getElementById('status');
+const go = document.getElementById('go');
+const SEQ = 128;
+
+for (const [id, ov] of [['steps','stepsv'],['temp','tempv'],['noise','noisev']]) {
+  const inp = document.getElementById(id), o = document.getElementById(ov);
+  inp.addEventListener('input', () => o.textContent = inp.value);
+}
+
+// role per position: 'fixed' (user char), 'blank' (user _), 'pad' (beyond text)
+let roles = [];
+
+function render(text, done) {
+  board.innerHTML = '';
+  for (let i = 0; i < text.length; i++) {
+    const span = document.createElement('span');
+    const stillMasked = text[i] === '?' && roles[i] !== 'fixed';
+    span.textContent = stillMasked ? ' ' : text[i];
+    if (stillMasked) span.className = 'masked';
+    else if (roles[i] === 'blank') span.className = 'blank';
+    else if (roles[i] === 'pad') span.className = 'pad';
+    board.appendChild(span);
+  }
+  if (done) board.querySelectorAll('.masked').forEach(s => s.classList.remove('masked'));
+}
+
+async function fill() {
+  const raw = promptEl.value.replace(/\n/g, ' ').slice(0, SEQ);
+  roles = [];
+  for (let i = 0; i < SEQ; i++)
+    roles.push(i >= raw.length ? 'pad' : (raw[i] === '_' ? 'blank' : 'fixed'));
+  if (!roles.includes('blank') && !roles.includes('pad')) {
+    status_.textContent = 'Nothing to fill: add some _ blanks.';
+    return;
+  }
+
+  const steps = document.getElementById('steps').value;
+  const temp = document.getElementById('temp').value;
+  const noise = document.getElementById('noise').value;
+
+  go.disabled = true;
+  status_.textContent = 'denoising...';
+
+  // Frames are queued and drawn on a timer so fast GPU rounds still animate.
+  const frames = [];
+  let streamDone = false;
+  const drawer = setInterval(() => {
+    if (frames.length) {
+      const f = frames.shift();
+      render(f.text, !!f.done);
+      status_.textContent = f.done
+        ? 'done.'
+        : `denoising... round ${f.round}/${steps}`;
+    } else if (streamDone) {
+      clearInterval(drawer);
+      go.disabled = false;
+    }
+  }, 60);
+
+  try {
+    const res = await fetch(`/fill?steps=${steps}&temperature=${temp}&noise=${noise}`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'text/plain; charset=utf-8' },
+      body: raw,
+    });
+    const reader = res.body.getReader();
+    const decoder = new TextDecoder();
+    let buf = '';
+    while (true) {
+      const { done, value } = await reader.read();
+      if (done) break;
+      buf += decoder.decode(value, { stream: true });
+      let nl;
+      while ((nl = buf.indexOf('\n')) >= 0) {
+        const line = buf.slice(0, nl).trim();
+        buf = buf.slice(nl + 1);
+        if (line) frames.push(JSON.parse(line));
+      }
+    }
+  } catch (err) {
+    status_.textContent = 'connection error';
+    console.error(err);
+  } finally {
+    streamDone = true;
+  }
+}
+
+go.addEventListener('click', fill);
+
+fetch('/info').then(r => r.json()).then(info => {
+  const parts = [];
+  parts.push(`${info.num_blocks}&times;Transformer(d=${info.d_model}, ${info.num_heads} heads, bidirectional), window ${info.seq_len} chars`);
+  if (info.val_acc >= 0)
+    parts.push(`held-out ${info.val_bpc.toFixed(2)} bits/char, masked-token accuracy ${info.val_acc.toFixed(1)}%`);
+  document.getElementById('modelinfo').innerHTML = 'Model: ' + parts.join('; ') + '.';
+}).catch(() => {});
+</script>
+</body>
+</html>

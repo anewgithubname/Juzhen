@@ -1,0 +1,114 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Juzhen TinyStories</title>
+<style>
+  :root { color-scheme: light dark; }
+  body { font-family: system-ui, sans-serif; max-width: 720px; margin: 2rem auto; padding: 0 1rem; }
+  h1 { font-size: 1.4rem; }
+  textarea {
+    width: 100%; box-sizing: border-box; height: 4rem; font-size: 1rem;
+    padding: 0.6rem; border-radius: 6px; border: 1px solid #888; font-family: inherit;
+  }
+  .controls { display: flex; flex-wrap: wrap; gap: 1.2rem; align-items: center; margin: 0.8rem 0; }
+  .controls label { font-size: 0.85rem; display: flex; align-items: center; gap: 0.4rem; }
+  .controls output { font-family: monospace; min-width: 2.5rem; }
+  button { font-size: 1rem; padding: 0.4rem 1.4rem; border-radius: 6px; border: 1px solid #888; cursor: pointer; }
+  button:disabled { opacity: 0.5; cursor: wait; }
+  #story {
+    font-size: 1.08rem; line-height: 1.7; border: 1px solid #888; border-radius: 8px;
+    padding: 1rem 1.2rem; min-height: 8rem; margin-top: 0.6rem; white-space: pre-wrap; word-break: break-word;
+  }
+  #story .seed { font-weight: 600; }
+  #story .cursor { display: inline-block; width: 0.5em; height: 1.05em; background: currentColor; vertical-align: text-bottom; animation: blink 1s steps(1) infinite; }
+  @keyframes blink { 50% { opacity: 0; } }
+  .examples { font-size: 0.85rem; opacity: 0.8; margin-top: 0.3rem; }
+  .examples a { cursor: pointer; text-decoration: underline; }
+  footer { margin-top: 2rem; font-size: 0.85rem; opacity: 0.7; }
+</style>
+</head>
+<body>
+<h1>Juzhen TinyStories — a small model that tells stories</h1>
+<p>A ~30M-parameter Transformer trained from scratch with
+<a href="https://github.com/anewgithubname/Juzhen">Juzhen</a> on the
+<a href="https://arxiv.org/abs/2305.07759">TinyStories</a> corpus (BPE tokens).
+Start a story and it writes the rest. <span id="modelinfo"></span></p>
+
+<textarea id="seed">Once upon a time, there was a little robot who</textarea>
+<div class="examples">try:
+  <a data-t="One day, a curious cat found a mysterious box in the garden.">a curious cat</a> ·
+  <a data-t="Tom and Lily wanted to build the tallest tower in the world.">a tall tower</a> ·
+  <a data-t="The little boat sailed across the big blue sea to find">a little boat</a>
+</div>
+
+<div class="controls">
+  <label>length <input type="range" id="length" min="50" max="600" step="50" value="250"><output id="lengthv">250</output></label>
+  <label>temperature <input type="range" id="temp" min="0.1" max="1.5" step="0.1" value="0.8"><output id="tempv">0.8</output></label>
+  <label>top-k <input type="range" id="topk" min="1" max="100" step="1" value="40"><output id="topkv">40</output></label>
+  <button id="go">Write the story</button>
+</div>
+
+<div id="story"><span style="opacity:0.5">The story appears here.</span></div>
+
+<footer>Character-simple, coherent English by design — TinyStories models learn
+grammar, characters and simple plots, not facts. Backend: Juzhen (C++/CUDA),
+BPE-4096 tokenizer, streamed over HTTP.</footer>
+
+<script>
+const seedEl = document.getElementById('seed');
+const story = document.getElementById('story');
+const go = document.getElementById('go');
+for (const [id, ov] of [['length','lengthv'],['temp','tempv'],['topk','topkv']]) {
+  const inp = document.getElementById(id), o = document.getElementById(ov);
+  inp.addEventListener('input', () => o.textContent = inp.value);
+}
+document.querySelectorAll('.examples a').forEach(a =>
+  a.addEventListener('click', () => { seedEl.value = a.dataset.t; }));
+
+let aborter = null;
+async function generate() {
+  if (aborter) { aborter.abort(); return; }
+  const seed = seedEl.value;
+  const length = document.getElementById('length').value;
+  const temp = document.getElementById('temp').value;
+  const topk = document.getElementById('topk').value;
+
+  story.innerHTML = '';
+  const seedSpan = document.createElement('span');
+  seedSpan.className = 'seed'; seedSpan.textContent = seed;
+  const genSpan = document.createElement('span');
+  const cursor = document.createElement('span'); cursor.className = 'cursor';
+  story.append(seedSpan, genSpan, cursor);
+
+  aborter = new AbortController();
+  go.textContent = 'Stop';
+  try {
+    const res = await fetch(`/generate?length=${length}&temperature=${temp}&topk=${topk}`, {
+      method: 'POST', headers: { 'Content-Type': 'text/plain; charset=utf-8' },
+      body: seed, signal: aborter.signal,
+    });
+    const reader = res.body.getReader();
+    const dec = new TextDecoder();
+    while (true) {
+      const { done, value } = await reader.read();
+      if (done) break;
+      genSpan.textContent += dec.decode(value, { stream: true });
+    }
+  } catch (err) {
+    if (err.name !== 'AbortError') { genSpan.textContent += ' [connection error]'; console.error(err); }
+  } finally {
+    cursor.remove(); aborter = null; go.textContent = 'Write the story';
+  }
+}
+go.addEventListener('click', generate);
+
+fetch('/info').then(r => r.json()).then(info => {
+  const acc = info.val_acc >= 0 ? `, next-token accuracy ${info.val_acc.toFixed(1)}%` : '';
+  document.getElementById('modelinfo').textContent =
+    `Model: ${info.num_blocks}×Transformer(d=${info.d_model}, ${info.num_heads} heads), ${info.seq_len}-token context, vocab ${info.vocab}${acc}.`;
+}).catch(() => {});
+</script>
+</body>
+</html>

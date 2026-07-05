@@ -106,3 +106,9 @@ datasets/enwik8
 datasets/enwik8.zip
 datasets/text8
 datasets/text8.zip
+# model weight caches (build artifacts, not source)
+*.weights
+# Claude Code local tooling config
+.claude/
+# Python bytecode cache
+__pycache__/

@@ -1,0 +1,189 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Juzhen MNIST Demo</title>
+<style>
+  :root { color-scheme: light dark; }
+  body {
+    font-family: system-ui, sans-serif;
+    max-width: 720px; margin: 2rem auto; padding: 0 1rem;
+  }
+  h1 { font-size: 1.4rem; }
+  .row { display: flex; flex-wrap: wrap; gap: 2rem; align-items: flex-start; }
+  #pad {
+    border: 2px solid #888; border-radius: 8px;
+    background: black; touch-action: none; cursor: crosshair;
+  }
+  #preview { border: 1px solid #888; image-rendering: pixelated; background: black; }
+  button {
+    font-size: 1rem; padding: 0.4rem 1.2rem; margin-right: 0.5rem;
+    border-radius: 6px; border: 1px solid #888; cursor: pointer;
+  }
+  #verdict { font-size: 3rem; font-weight: bold; min-height: 4rem; }
+  .bar { display: flex; align-items: center; gap: 0.5rem; margin: 2px 0; }
+  .bar .digit { width: 1.2rem; text-align: right; font-family: monospace; }
+  .bar .track { flex: 1; background: rgba(128,128,128,0.2); border-radius: 4px; height: 14px; }
+  .bar .fill { height: 100%; background: #4a90d9; border-radius: 4px; width: 0; transition: width 0.15s; }
+  .bar .pct { width: 3.5rem; font-family: monospace; font-size: 0.85rem; }
+  footer { margin-top: 2rem; font-size: 0.85rem; opacity: 0.7; }
+</style>
+</head>
+<body>
+<h1>Juzhen MNIST — handwritten digit recognition</h1>
+<p>Draw a digit (0–9) in the box below. A 784–1024–128–10 MLP trained with
+<a href="https://github.com/anewgithubname/Juzhen">Juzhen</a> will guess what it is.
+<span id="modelinfo"></span></p>
+
+<div class="row">
+  <div>
+    <canvas id="pad" width="280" height="280"></canvas>
+    <div style="margin-top: 0.5rem;">
+      <button id="clear">Clear</button>
+      <span style="opacity:0.6; font-size:0.85rem;">model input:</span>
+      <canvas id="preview" width="28" height="28" style="width:56px;height:56px;vertical-align:middle;"></canvas>
+    </div>
+  </div>
+  <div style="flex:1; min-width: 220px;">
+    <div id="verdict"></div>
+    <div id="bars"></div>
+  </div>
+</div>
+
+<footer>Backend: Juzhen matrix library (C++). Frontend preprocessing mimics MNIST:
+crop, scale to 20&times;20, center by center of mass in a 28&times;28 frame.</footer>
+
+<script>
+const pad = document.getElementById('pad');
+const ctx = pad.getContext('2d');
+const preview = document.getElementById('preview');
+const pctx = preview.getContext('2d');
+const verdict = document.getElementById('verdict');
+const barsDiv = document.getElementById('bars');
+
+// probability bars for digits 0..9
+const fills = [], pcts = [];
+for (let i = 0; i < 10; i++) {
+  const row = document.createElement('div'); row.className = 'bar';
+  row.innerHTML = `<span class="digit">${i}</span><div class="track"><div class="fill"></div></div><span class="pct"></span>`;
+  barsDiv.appendChild(row);
+  fills.push(row.querySelector('.fill'));
+  pcts.push(row.querySelector('.pct'));
+}
+
+function clearPad() {
+  ctx.fillStyle = 'black';
+  ctx.fillRect(0, 0, pad.width, pad.height);
+  pctx.fillStyle = 'black';
+  pctx.fillRect(0, 0, 28, 28);
+  verdict.textContent = '';
+  fills.forEach(f => f.style.width = '0');
+  pcts.forEach(p => p.textContent = '');
+}
+clearPad();
+
+// --- drawing ---
+let drawing = false, last = null;
+function pos(e) {
+  const r = pad.getBoundingClientRect();
+  const t = e.touches ? e.touches[0] : e;
+  return { x: (t.clientX - r.left) * pad.width / r.width,
+           y: (t.clientY - r.top) * pad.height / r.height };
+}
+function start(e) { drawing = true; last = pos(e); stroke(e); e.preventDefault(); }
+function stroke(e) {
+  if (!drawing) return;
+  const p = pos(e);
+  ctx.strokeStyle = 'white';
+  ctx.lineWidth = 22;
+  ctx.lineCap = ctx.lineJoin = 'round';
+  ctx.beginPath();
+  ctx.moveTo(last.x, last.y);
+  ctx.lineTo(p.x, p.y);
+  ctx.stroke();
+  last = p;
+  e.preventDefault();
+}
+function end() { if (drawing) { drawing = false; predict(); } }
+pad.addEventListener('mousedown', start);
+pad.addEventListener('mousemove', stroke);
+window.addEventListener('mouseup', end);
+pad.addEventListener('touchstart', start, { passive: false });
+pad.addEventListener('touchmove', stroke, { passive: false });
+pad.addEventListener('touchend', end);
+document.getElementById('clear').addEventListener('click', clearPad);
+
+// --- MNIST-style preprocessing: crop, scale to 20x20, center of mass in 28x28 ---
+function preprocess() {
+  const W = pad.width, H = pad.height;
+  const data = ctx.getImageData(0, 0, W, H).data;
+  let minX = W, minY = H, maxX = -1, maxY = -1;
+  for (let y = 0; y < H; y++)
+    for (let x = 0; x < W; x++)
+      if (data[(y * W + x) * 4] > 10) {
+        if (x < minX) minX = x; if (x > maxX) maxX = x;
+        if (y < minY) minY = y; if (y > maxY) maxY = y;
+      }
+  if (maxX < 0) return null; // empty canvas
+
+  const bw = maxX - minX + 1, bh = maxY - minY + 1;
+  const scale = 20 / Math.max(bw, bh);
+  const w2 = Math.max(1, Math.round(bw * scale));
+  const h2 = Math.max(1, Math.round(bh * scale));
+
+  const tmp = document.createElement('canvas');
+  tmp.width = w2; tmp.height = h2;
+  const tctx = tmp.getContext('2d');
+  tctx.drawImage(pad, minX, minY, bw, bh, 0, 0, w2, h2);
+
+  // center of mass of the scaled crop
+  const td = tctx.getImageData(0, 0, w2, h2).data;
+  let m = 0, mx = 0, my = 0;
+  for (let y = 0; y < h2; y++)
+    for (let x = 0; x < w2; x++) {
+      const v = td[(y * w2 + x) * 4];
+      m += v; mx += v * x; my += v * y;
+    }
+  const cx = mx / m, cy = my / m;
+
+  pctx.fillStyle = 'black';
+  pctx.fillRect(0, 0, 28, 28);
+  pctx.drawImage(tmp, Math.round(14 - cx), Math.round(14 - cy));
+
+  const fd = pctx.getImageData(0, 0, 28, 28).data;
+  const pixels = new Array(784);
+  for (let i = 0; i < 784; i++) pixels[i] = +(fd[i * 4] / 255).toFixed(4);
+  return pixels;
+}
+
+async function predict() {
+  const pixels = preprocess();
+  if (!pixels) return;
+  try {
+    const res = await fetch('/predict', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify(pixels),
+    });
+    const out = await res.json();
+    if (out.error) { verdict.textContent = '?'; return; }
+    verdict.textContent = out.prediction;
+    out.probabilities.forEach((p, i) => {
+      fills[i].style.width = (p * 100).toFixed(1) + '%';
+      pcts[i].textContent = (p * 100).toFixed(1) + '%';
+    });
+  } catch (err) {
+    verdict.textContent = '⚠';
+    console.error(err);
+  }
+}
+
+fetch('/info').then(r => r.json()).then(info => {
+  if (info.testerror !== undefined)
+    document.getElementById('modelinfo').textContent =
+      `Test-set accuracy: ${(100 * (1 - info.testerror)).toFixed(2)}%.`;
+}).catch(() => {});
+</script>
+</body>
+</html>

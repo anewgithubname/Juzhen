@@ -1,0 +1,269 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Zero-Flow Demo</title>
+<style>
+  :root { color-scheme: light dark; }
+  body {
+    font-family: system-ui, sans-serif;
+    max-width: 900px; margin: 2rem auto; padding: 0 1rem;
+  }
+  h1 { font-size: 1.4rem; }
+  .row { display: flex; flex-wrap: wrap; gap: 1.5rem; align-items: flex-start; }
+  .controls { display: flex; flex-direction: column; gap: 0.9rem; min-width: 230px; }
+  .controls label { font-size: 0.9rem; display: flex; flex-direction: column; gap: 0.25rem; }
+  select, button {
+    font-size: 1rem; padding: 0.4rem 0.6rem;
+    border-radius: 6px; border: 1px solid #888;
+  }
+  button { cursor: pointer; }
+  button:disabled { opacity: 0.5; cursor: wait; }
+  .stage { position: relative; }
+  canvas { border: 1px solid #888; border-radius: 8px; background: #101418; }
+  #badge {
+    position: absolute; top: 12px; left: 50%; transform: translateX(-50%);
+    padding: 0.4rem 1rem; border-radius: 8px; font-weight: bold;
+    background: rgba(0,0,0,0.65); color: #fff; white-space: nowrap;
+    display: none; text-align: center; font-family: monospace;
+  }
+  #badge .zero { color: #4da3ff; font-size: 1.3rem; letter-spacing: 0.1em; }
+  #badge .nonzero { color: #ff9c4d; font-size: 1.1rem; }
+  #tbar { margin-top: 0.4rem; display: flex; align-items: center; gap: 0.7rem; font-family: monospace; }
+  #tbar input[type=range] { flex: 1; }
+  #status { font-size: 0.85rem; opacity: 0.75; min-height: 1.2rem; margin-top: 0.4rem; }
+  .legend { font-size: 0.8rem; opacity: 0.8; margin-top: 0.6rem; }
+  .swatch { display: inline-block; width: 0.8em; height: 0.8em; border-radius: 50%; vertical-align: -0.05em; }
+  footer { margin-top: 2rem; font-size: 0.85rem; opacity: 0.7; }
+</style>
+</head>
+<body>
+<h1>Zero-Flow: v<sub>t=0.5</sub> ≡ 0 ⟺ p<sub>source</sub> = p<sub>target</sub></h1>
+<p>A rectified flow is trained with <b>independent coupling</b> between the two
+distributions you choose, then particles are transported from t=0 to t=1 along the
+learned field. Theorem 3.1 of <a href="https://arxiv.org/abs/2602.00797">Zero-Flow
+Encoders</a> (Wang, Wang, Liu &amp; Suzuki, ICML 2026): the velocity field vanishes
+everywhere at <b>t&nbsp;=&nbsp;0.5</b> <i>if and only if</i> source = target. Pick the
+<b>same</b> dataset twice and watch everything freeze blue at the midpoint.</p>
+
+<div class="row">
+  <div class="controls">
+    <label>source distribution
+      <select id="src">
+        <option value="mixture">gaussian mixture</option>
+        <option value="gaussian">gaussian</option>
+        <option value="moons">two moons</option>
+        <option value="ring">ring</option>
+        <option value="spiral">spiral</option>
+      </select>
+    </label>
+    <label>target distribution
+      <select id="tgt">
+        <option value="mixture">gaussian mixture</option>
+        <option value="gaussian">gaussian</option>
+        <option value="moons">two moons</option>
+        <option value="ring">ring</option>
+        <option value="spiral">spiral</option>
+      </select>
+    </label>
+    <label>training iterations
+      <select id="iters">
+        <option value="2000">2000 (fast)</option>
+        <option value="4000" selected>4000</option>
+        <option value="8000">8000 (better field)</option>
+      </select>
+    </label>
+    <button id="go">Start: train &amp; play</button>
+    <button id="replay" disabled>Replay animation</button>
+    <div class="legend">
+      particle speed:
+      <span class="swatch" style="background:#4da3ff"></span> 0 (still)
+      →
+      <span class="swatch" style="background:#ffd24d"></span>
+      →
+      <span class="swatch" style="background:#ff4d4d"></span> fast<br>
+      red arrows: learned velocity field v<sub>t</sub>
+    </div>
+    <div id="status"></div>
+  </div>
+
+  <div class="stage">
+    <canvas id="cv" width="560" height="560"></canvas>
+    <div id="badge"></div>
+    <div id="tbar">
+      <span id="tlabel">t = 0.00</span>
+      <input type="range" id="scrub" min="0" max="50" value="0" disabled>
+      <span id="vlabel"></span>
+    </div>
+  </div>
+</div>
+
+<footer>Backend: Juzhen (C++/CUDA) trains v(x,t) = argmin E‖X′ − X − u(X<sub>t</sub>, t)‖²
+with X<sub>t</sub> = tX′ + (1−t)X, X ⟂ X′, then integrates dX = v dt. Antisymmetry
+(Thm 3.2): with identical distributions the field reverses around t = 0.5 —
+particles drift, stop dead at the midpoint, then flow back out.</footer>
+
+<script>
+const cv = document.getElementById('cv'), ctx = cv.getContext('2d');
+const badge = document.getElementById('badge');
+const status_ = document.getElementById('status');
+const go = document.getElementById('go'), replayBtn = document.getElementById('replay');
+const scrub = document.getElementById('scrub');
+const tlabel = document.getElementById('tlabel'), vlabel = document.getElementById('vlabel');
+const LO = -3.5, HI = 3.5;
+
+let grid = null, frames = [], smax = 1, playing = false, timer = null;
+
+const px = x => (x - LO) / (HI - LO) * cv.width;
+const py = y => cv.height - (y - LO) / (HI - LO) * cv.height;
+
+function speedColor(s) {
+  const r = Math.min(1, s / smax);          // 0 = blue, 1 = red (via yellow)
+  const hue = 212 * (1 - r);                 // 212° blue -> 0° red
+  return `hsl(${hue}, 90%, ${55 + 10 * (1 - r)}%)`;
+}
+
+function draw(k) {
+  const f = frames[k];
+  if (!f) return;
+  ctx.clearRect(0, 0, cv.width, cv.height);
+
+  if (grid) {                                // velocity field arrows
+    ctx.strokeStyle = 'rgba(255, 80, 80, 0.55)';
+    ctx.lineWidth = 1;
+    const SC = 22;                           // arrow scale in px per unit speed
+    for (let j = 0; j < grid.x.length; j++) {
+      const u = f.vec[2 * j], v = f.vec[2 * j + 1];
+      const m = Math.hypot(u, v);
+      if (m < 0.02) continue;
+      const x0 = px(grid.x[j]), y0 = py(grid.y[j]);
+      const x1 = x0 + u * SC, y1 = y0 - v * SC;
+      ctx.beginPath(); ctx.moveTo(x0, y0); ctx.lineTo(x1, y1); ctx.stroke();
+      const a = Math.atan2(y1 - y0, x1 - x0);
+      ctx.beginPath();
+      ctx.moveTo(x1, y1);
+      ctx.lineTo(x1 - 4 * Math.cos(a - 0.4), y1 - 4 * Math.sin(a - 0.4));
+      ctx.moveTo(x1, y1);
+      ctx.lineTo(x1 - 4 * Math.cos(a + 0.4), y1 - 4 * Math.sin(a + 0.4));
+      ctx.stroke();
+    }
+  }
+
+  for (let j = 0; j < f.pts.length; j += 3) {  // particles coloured by speed
+    ctx.fillStyle = speedColor(f.pts[j + 2]);
+    ctx.beginPath();
+    ctx.arc(px(f.pts[j]), py(f.pts[j + 1]), 3.2, 0, 6.2832);
+    ctx.fill();
+  }
+
+  tlabel.textContent = 't = ' + f.t.toFixed(2);
+  vlabel.textContent = 'mean ‖v‖ = ' + f.mean_v.toFixed(3);
+  scrub.value = k;
+}
+
+function showMidBadge(f) {
+  const isZero = f.mean_v < 0.12 * smax;
+  badge.innerHTML = `t = 0.50 &nbsp; mean ‖v‖ = ${f.mean_v.toFixed(3)}<br>` +
+    (isZero ? '<span class="zero">ZERO VELOCITY</span>'
+            : '<span class="nonzero">v ≠ 0 → p<sub>source</sub> ≠ p<sub>target</sub></span>');
+  badge.style.display = 'block';
+}
+
+function play() {
+  if (!frames.length) return;
+  playing = true;
+  replayBtn.disabled = true;
+  badge.style.display = 'none';
+  const mid = Math.round((frames.length - 1) / 2);
+  let k = 0;
+  clearInterval(timer);
+  timer = setInterval(() => {
+    draw(k);
+    if (k === mid) {                         // deliberate pause at t = 0.5
+      clearInterval(timer);
+      showMidBadge(frames[mid]);
+      setTimeout(() => {
+        badge.style.display = 'none';
+        timer = setInterval(step, 90);
+      }, 2200);
+    }
+    k++;
+    if (k >= frames.length) finish();
+    function step() {
+      draw(k);
+      k++;
+      if (k >= frames.length) finish();
+    }
+  }, 90);
+  function finish() {
+    clearInterval(timer);
+    playing = false;
+    replayBtn.disabled = false;
+    status_.textContent = 'done — scrub the timeline or replay.';
+    scrub.disabled = false;
+  }
+}
+
+scrub.addEventListener('input', () => {
+  if (playing) return;
+  badge.style.display = 'none';
+  const k = +scrub.value;
+  draw(k);
+  if (frames[k] && Math.abs(frames[k].t - 0.5) < 1e-6) showMidBadge(frames[k]);
+});
+
+replayBtn.addEventListener('click', play);
+
+document.getElementById('go').addEventListener('click', async () => {
+  const src = document.getElementById('src').value;
+  const tgt = document.getElementById('tgt').value;
+  const iters = document.getElementById('iters').value;
+  go.disabled = true; replayBtn.disabled = true; scrub.disabled = true;
+  badge.style.display = 'none';
+  frames = []; grid = null;
+  status_.textContent = 'training velocity field...';
+
+  try {
+    const res = await fetch(`/train?source=${src}&target=${tgt}&iters=${iters}`, { method: 'POST' });
+    const reader = res.body.getReader();
+    const decoder = new TextDecoder();
+    let buf = '';
+    while (true) {
+      const { done, value } = await reader.read();
+      if (done) break;
+      buf += decoder.decode(value, { stream: true });
+      let nl;
+      while ((nl = buf.indexOf('\n')) >= 0) {
+        const line = buf.slice(0, nl).trim();
+        buf = buf.slice(nl + 1);
+        if (!line) continue;
+        const msg = JSON.parse(line);
+        if (msg.phase === 'train') {
+          status_.textContent = `training... iter ${msg.iter}/${msg.total}, loss ${msg.loss.toFixed(3)}`;
+        } else if (msg.phase === 'grid') {
+          grid = msg;
+        } else if (msg.phase === 'frame') {
+          frames.push(msg);
+        }
+      }
+    }
+    // normalise the colour scale by the 95th-percentile particle speed
+    const speeds = [];
+    for (const f of frames)
+      for (let j = 2; j < f.pts.length; j += 3) speeds.push(f.pts[j]);
+    speeds.sort((a, b) => a - b);
+    smax = Math.max(0.3, speeds[Math.floor(speeds.length * 0.95)] || 1);
+    scrub.max = frames.length - 1;
+    status_.textContent = 'playing...';
+    play();
+  } catch (err) {
+    status_.textContent = 'connection error';
+    console.error(err);
+  } finally {
+    go.disabled = false;
+  }
+});
+</script>
+</body>
+</html>

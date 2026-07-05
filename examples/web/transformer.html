@@ -1,0 +1,145 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Juzhen Transformer Demo</title>
+<style>
+  :root { color-scheme: light dark; }
+  body {
+    font-family: system-ui, sans-serif;
+    max-width: 760px; margin: 2rem auto; padding: 0 1rem;
+  }
+  h1 { font-size: 1.4rem; }
+  textarea {
+    width: 100%; box-sizing: border-box; height: 5rem;
+    font-family: monospace; font-size: 0.95rem; padding: 0.5rem;
+    border-radius: 6px; border: 1px solid #888;
+  }
+  .controls {
+    display: flex; flex-wrap: wrap; gap: 1.2rem; align-items: center;
+    margin: 0.8rem 0;
+  }
+  .controls label { font-size: 0.85rem; display: flex; align-items: center; gap: 0.4rem; }
+  .controls output { font-family: monospace; min-width: 2.5rem; }
+  button {
+    font-size: 1rem; padding: 0.4rem 1.4rem;
+    border-radius: 6px; border: 1px solid #888; cursor: pointer;
+  }
+  button:disabled { opacity: 0.5; cursor: wait; }
+  #out {
+    white-space: pre-wrap; word-break: break-word;
+    font-family: monospace; font-size: 0.95rem; line-height: 1.5;
+    border: 1px solid #888; border-radius: 6px;
+    padding: 0.8rem; min-height: 8rem; margin-top: 0.5rem;
+  }
+  #out .seed { opacity: 0.55; }
+  #out .cursor {
+    display: inline-block; width: 0.55em; height: 1.1em;
+    background: currentColor; vertical-align: text-bottom;
+    animation: blink 1s steps(1) infinite;
+  }
+  @keyframes blink { 50% { opacity: 0; } }
+  footer { margin-top: 2rem; font-size: 0.85rem; opacity: 0.7; }
+</style>
+</head>
+<body>
+<h1>Juzhen Transformer — character-level language model</h1>
+<p>A small Transformer (char-level, trained on English Wikipedia text with
+<a href="https://github.com/anewgithubname/Juzhen">Juzhen</a>) continues whatever
+you type, one character at a time. <span id="modelinfo"></span></p>
+
+<textarea id="seed" placeholder="Type the beginning of a sentence...">The history of science shows that </textarea>
+
+<div class="controls">
+  <label>length
+    <input type="range" id="length" min="50" max="1000" step="50" value="300">
+    <output id="lengthv">300</output>
+  </label>
+  <label>temperature
+    <input type="range" id="temp" min="0.1" max="2" step="0.1" value="0.8">
+    <output id="tempv">0.8</output>
+  </label>
+  <label>top-k
+    <input type="range" id="topk" min="1" max="20" step="1" value="5">
+    <output id="topkv">5</output>
+  </label>
+  <button id="go">Generate</button>
+</div>
+
+<div id="out"><span style="opacity:0.5">Output appears here.</span></div>
+
+<footer>Character-level model: it learns spelling, words and short-range grammar
+from scratch — expect plausible-looking pseudo-English, not ChatGPT.
+Backend: Juzhen matrix library (C++/CUDA), streaming over HTTP chunked transfer.</footer>
+
+<script>
+const seedEl = document.getElementById('seed');
+const out = document.getElementById('out');
+const go = document.getElementById('go');
+
+for (const [id, ov] of [['length','lengthv'],['temp','tempv'],['topk','topkv']]) {
+  const inp = document.getElementById(id), o = document.getElementById(ov);
+  inp.addEventListener('input', () => o.textContent = inp.value);
+}
+
+let aborter = null;
+
+async function generate() {
+  if (aborter) { aborter.abort(); return; }
+
+  const seed = seedEl.value;
+  const length = document.getElementById('length').value;
+  const temp = document.getElementById('temp').value;
+  const topk = document.getElementById('topk').value;
+
+  out.innerHTML = '';
+  const seedSpan = document.createElement('span');
+  seedSpan.className = 'seed';
+  seedSpan.textContent = seed;
+  const genSpan = document.createElement('span');
+  const cursor = document.createElement('span');
+  cursor.className = 'cursor';
+  out.append(seedSpan, genSpan, cursor);
+
+  aborter = new AbortController();
+  go.textContent = 'Stop';
+
+  try {
+    const res = await fetch(`/generate?length=${length}&temperature=${temp}&topk=${topk}`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'text/plain; charset=utf-8' },
+      body: seed,
+      signal: aborter.signal,
+    });
+    const reader = res.body.getReader();
+    const decoder = new TextDecoder();
+    while (true) {
+      const { done, value } = await reader.read();
+      if (done) break;
+      genSpan.textContent += decoder.decode(value, { stream: true });
+    }
+  } catch (err) {
+    if (err.name !== 'AbortError') {
+      genSpan.textContent += '\n[connection error]';
+      console.error(err);
+    }
+  } finally {
+    cursor.remove();
+    aborter = null;
+    go.textContent = 'Generate';
+  }
+}
+
+go.addEventListener('click', generate);
+
+fetch('/info').then(r => r.json()).then(info => {
+  const parts = [];
+  parts.push(`${info.num_blocks}&times;Transformer(d=${info.d_model}, ${info.num_heads} heads), context ${info.seq_len} chars, vocab ${info.vocab}`);
+  if (info.val_acc >= 0)
+    parts.push(`held-out next-char accuracy ${info.val_acc.toFixed(1)}%`);
+  document.getElementById('modelinfo').innerHTML = 'Model: ' + parts.join('; ') + '.';
+}).catch(() => {});
+</script>
+</body>
+</html>
