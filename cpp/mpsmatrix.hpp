@@ -105,6 +105,12 @@ public:
     void eleminv(double l);
     Matrix<MPSfloat> eleminv(double l) const;
     Matrix<MPSfloat> rows(size_t start, size_t end) const;
+    // 2D submatrix (host-side; unified memory). Read form returns the block;
+    // write form copies M into the [rstart,rend) x [cstart,cend) region.
+    Matrix<MPSfloat> slice(size_t rstart, size_t rend, size_t cstart,
+                           size_t cend) const;
+    void slice(size_t rstart, size_t rend, size_t cstart, size_t cend,
+               const Matrix<MPSfloat>& M);
     const Matrix<MPSfloat> T() const;
 
     friend Matrix<MPSfloat> hadmd(const Matrix<MPSfloat>& M1,
@@ -153,5 +159,24 @@ Matrix<MPSfloat> d_relu(Matrix<MPSfloat>&& M);
 Matrix<MPSfloat> hstack(std::vector<MatrixView<MPSfloat>> matrices);
 
 Matrix<MPSfloat> vstack(std::vector<MatrixView<MPSfloat>> matrices);
+
+// ── host-fallback generic ops ───────────────────────────────────────────────
+// reduce/elemwise take an arbitrary C++ lambda, which cannot be JIT-compiled
+// into a Metal kernel. On Apple Silicon's unified memory we round-trip through
+// the host and reuse the CPU implementations (Matrix<float>). These overloads
+// are more specialized than the generic Matrix<D> templates, so they win
+// overload resolution for Matrix<MPSfloat>. Heavy GEMMs stay on the GPU.
+template <class Function>
+Matrix<MPSfloat> reduce(Function func, const Matrix<MPSfloat>& M, int dim, int k) {
+    return Matrix<MPSfloat>(reduce(func, M.to_host(), dim, k));
+}
+template <class Function>
+Matrix<MPSfloat> elemwise(Function func, const Matrix<MPSfloat>& M) {
+    return Matrix<MPSfloat>(elemwise(func, M.to_host()));
+}
+template <class Function>
+Matrix<MPSfloat> elemwise(Function func, Matrix<MPSfloat>&& M) {
+    return Matrix<MPSfloat>(elemwise(func, M.to_host()));
+}
 
 #endif

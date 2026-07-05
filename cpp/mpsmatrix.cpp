@@ -494,6 +494,24 @@ Matrix<float> topk(const Matrix<MPSfloat>& M, int k, int dim){
 
 }
 
+Matrix<MPSfloat> Matrix<MPSfloat>::slice(size_t rstart, size_t rend,
+                                         size_t cstart, size_t cend) const {
+    Matrix<MPSfloat> out("submatrix", rend - rstart, cend - cstart);
+    mpsSynchronize();   // *this may be an in-flight GPU result; wait before host reads
+    for (size_t j = cstart; j < cend; j++)
+        for (size_t i = rstart; i < rend; i++)
+            out.elem(i - rstart, j - cstart) = elem(i, j);
+    return out;
+}
+
+void Matrix<MPSfloat>::slice(size_t rstart, size_t rend, size_t cstart,
+                             size_t cend, const Matrix<MPSfloat>& M) {
+    mpsSynchronize();   // wait for pending GPU work on *this and M before host copy
+    for (size_t j = cstart; j < cend; j++)
+        for (size_t i = rstart; i < rend; i++)
+            elem(i, j) = M.elem(i - rstart, j - cstart);
+}
+
 std::ostream& operator <<(std::ostream& os, const Matrix<MPSfloat>& M) {
     using namespace std;
     Matrix<float> hostM = M.to_host();

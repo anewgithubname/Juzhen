@@ -305,7 +305,7 @@ int compute() {
             X.elem((int)ids_h.elem(0, j), j) = 1.0f;
             X.elem(V + (j % seq_len), j) = 1.0f;
         }
-        return X;
+        return Matrix<FLOAT>(X);   // host->device (no-op copy when FLOAT==float)
 #endif
     };
     auto make_Y = [&](const Matrix<float>& ids_h) {
@@ -324,7 +324,7 @@ int compute() {
         Matrix<float> Y("Y", V, n);
         Y.zeros();
         for (size_t j = 0; j < n; ++j) Y.elem((int)ids_h.elem(0, j), j) = 1.0f;
-        return Y;
+        return Matrix<FLOAT>(Y);   // host->device (no-op copy when FLOAT==float)
 #endif
     };
 

@@ -2653,6 +2653,13 @@ namespace Juzhen
 						auto scores = Qi.T() * Ki * scale;
 						// Causal masking: for query row, disallow future keys col > row.
 						if (causal) {
+#ifdef APPLE_SILICON
+							// `scores` is an async GPU (Metal) matmul result. The
+							// mask below writes it via host elem(); without first
+							// waiting for the GEMM, the in-flight kernel overwrites
+							// those host writes and the mask is lost.
+							mpsSynchronize();
+#endif
 							for (int row = 0; row < seq_len; ++row) {
 								for (int col = row + 1; col < seq_len; ++col) {
 									scores.elem(row, col) = -1e9f;

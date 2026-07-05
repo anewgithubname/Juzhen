@@ -276,7 +276,7 @@ int compute() {
             X.elem((int)ids_h.elem(0, j), j) = 1.0f;
             X.elem(V + (j % seq_len), j) = 1.0f;
         }
-        return X;
+        return Matrix<FLOAT>(X);   // host->device (no-op copy when FLOAT==float)
 #endif
     };
 
