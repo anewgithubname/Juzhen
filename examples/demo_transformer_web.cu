@@ -309,7 +309,9 @@ int compute() {
     const ModelConfig cfg = {/*seq_len*/ 128, /*d_model*/ 512, /*d_k*/ 512,
                              /*d_ff*/ 2048, /*num_heads*/ 8, /*num_blocks*/ 12};
     const int seq_len = cfg.seq_len;
-    const string cachepath = string(PROJECT_DIR) + "/transformer_web.weights";
+    const char* wenv = getenv("TRANSFORMER_WEIGHTS");
+    const string cachepath = wenv ? string(wenv)
+                                  : string(PROJECT_DIR) + "/transformer_web.weights";
 
     // Vocabulary: from the weight cache if present (it must match the trained
     // embedding), otherwise derived from the corpus.
