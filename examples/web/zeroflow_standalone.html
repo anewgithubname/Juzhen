@@ -1,287 +1,0 @@
-<!DOCTYPE html>
-<html lang="en">
-<head>
-<meta charset="utf-8">
-<meta name="viewport" content="width=device-width, initial-scale=1">
-<title>Zero-Flow Demo (offline)</title>
-<style>
-  :root { color-scheme: light dark; }
-  body {
-    font-family: system-ui, sans-serif;
-    max-width: 900px; margin: 2rem auto; padding: 0 1rem;
-  }
-  h1 { font-size: 1.4rem; }
-  .row { display: flex; flex-wrap: wrap; gap: 1.5rem; align-items: flex-start; }
-  .controls { display: flex; flex-direction: column; gap: 0.9rem; min-width: 230px; }
-  .controls label { font-size: 0.9rem; display: flex; flex-direction: column; gap: 0.25rem; }
-  select, button {
-    font-size: 1rem; padding: 0.4rem 0.6rem;
-    border-radius: 6px; border: 1px solid #888;
-  }
-  button { cursor: pointer; }
-  button:disabled { opacity: 0.5; cursor: wait; }
-  .stage { position: relative; }
-  canvas { border: 1px solid #888; border-radius: 8px; background: #101418; }
-  #badge {
-    position: absolute; top: 12px; left: 50%; transform: translateX(-50%);
-    padding: 0.4rem 1rem; border-radius: 8px; font-weight: bold;
-    background: rgba(0,0,0,0.65); color: #fff; white-space: nowrap;
-    display: none; text-align: center; font-family: monospace;
-  }
-  #badge .zero { color: #4da3ff; font-size: 1.3rem; letter-spacing: 0.1em; }
-  #badge .nonzero { color: #ff9c4d; font-size: 1.1rem; }
-  #tbar { margin-top: 0.4rem; display: flex; align-items: center; gap: 0.7rem; font-family: monospace; }
-  #tbar input[type=range] { flex: 1; }
-  #status { font-size: 0.85rem; opacity: 0.75; min-height: 1.2rem; margin-top: 0.4rem; }
-  .legend { font-size: 0.8rem; opacity: 0.8; margin-top: 0.6rem; }
-  .swatch { display: inline-block; width: 0.8em; height: 0.8em; border-radius: 50%; vertical-align: -0.05em; }
-  footer { margin-top: 2rem; font-size: 0.85rem; opacity: 0.7; }
-</style>
-</head>
-<body>
-<h1>Zero-Flow: v<sub>t=0.5</sub> ≡ 0 ⟺ p<sub>source</sub> = p<sub>target</sub></h1>
-<p>A rectified flow is trained (right here in your browser, via WebAssembly — no
-server, works offline) with <b>independent coupling</b> between the two
-distributions you choose; particles are then transported from t=0 to t=1 along
-the learned field. Theorem 3.1 of <a href="https://arxiv.org/abs/2602.00797">Zero-Flow
-Encoders</a> (Wang, Wang, Liu &amp; Suzuki, ICML 2026): the velocity field vanishes
-everywhere at <b>t&nbsp;=&nbsp;0.5</b> <i>if and only if</i> source = target. Pick the
-<b>same</b> dataset twice and watch everything freeze blue at the midpoint.</p>
-
-<div class="row">
-  <div class="controls">
-    <label>source distribution
-      <select id="src">
-        <option value="1">gaussian mixture</option>
-        <option value="0">gaussian</option>
-        <option value="2">two moons</option>
-        <option value="3">ring</option>
-        <option value="4">spiral</option>
-      </select>
-    </label>
-    <label>target distribution
-      <select id="tgt">
-        <option value="1">gaussian mixture</option>
-        <option value="0">gaussian</option>
-        <option value="2">two moons</option>
-        <option value="3">ring</option>
-        <option value="4">spiral</option>
-      </select>
-    </label>
-    <label>training iterations
-      <select id="iters">
-        <option value="1500">1500 (fast)</option>
-        <option value="3000" selected>3000</option>
-        <option value="6000">6000 (better field)</option>
-      </select>
-    </label>
-    <button id="go">Start: train &amp; play</button>
-    <button id="replay" disabled>Replay animation</button>
-    <div class="legend">
-      particle speed:
-      <span class="swatch" style="background:#4da3ff"></span> 0 (still)
-      →
-      <span class="swatch" style="background:#ffd24d"></span>
-      →
-      <span class="swatch" style="background:#ff4d4d"></span> fast<br>
-      red arrows: learned velocity field v<sub>t</sub>
-    </div>
-    <div id="status">loading WebAssembly module...</div>
-  </div>
-
-  <div class="stage">
-    <canvas id="cv" width="560" height="560"></canvas>
-    <div id="badge"></div>
-    <div id="tbar">
-      <span id="tlabel">t = 0.00</span>
-      <input type="range" id="scrub" min="0" max="50" value="0" disabled>
-      <span id="vlabel"></span>
-    </div>
-  </div>
-</div>
-
-<footer>Everything runs locally: a 3-layer MLP v(x,t) is trained with Adam on
-E‖X′ − X − u(X<sub>t</sub>, t)‖², X<sub>t</sub> = tX′ + (1−t)X, X ⟂ X′, then
-dX = v dt is integrated. Antisymmetry (Thm 3.2): with identical distributions the
-field reverses around t = 0.5 — particles drift, stop dead at the midpoint, then
-flow back out. Single-file demo built with Emscripten.</footer>
-
-<script>
-var createZF=(()=>{var _scriptName=globalThis.document?.currentScript?.src;return async function(moduleArg={}){var Module=moduleArg;var ENVIRONMENT_IS_WEB=!!globalThis.window;var ENVIRONMENT_IS_WORKER=!!globalThis.WorkerGlobalScope;var ENVIRONMENT_IS_NODE=globalThis.process?.versions?.node&&globalThis.process?.type!="renderer";var programArgs=[];var thisProgram="./this.program";var quit_=(status,toThrow)=>{throw toThrow};if(typeof __filename!="undefined"){_scriptName=__filename}else if(ENVIRONMENT_IS_WORKER){_scriptName=self.location.href}var scriptDirectory="";var readAsync,readBinary;if(ENVIRONMENT_IS_NODE){var fs=require("node:fs");scriptDirectory=__dirname+"/";readBinary=filename=>{filename=isFileURI(filename)?new URL(filename):filename;var ret=fs.readFileSync(filename);return ret};readAsync=async(filename,binary=true)=>{filename=isFileURI(filename)?new URL(filename):filename;var ret=fs.readFileSync(filename,binary?undefined:"utf8");return ret};if(process.argv.length>1){thisProgram=process.argv[1].replace(/\\/g,"/")}programArgs=process.argv.slice(2);quit_=(status,toThrow)=>{process.exitCode=status;throw toThrow}}else if(ENVIRONMENT_IS_WEB||ENVIRONMENT_IS_WORKER){try{scriptDirectory=new URL(".",_scriptName).href}catch{}{if(ENVIRONMENT_IS_WORKER){readBinary=url=>{var xhr=new XMLHttpRequest;xhr.open("GET",url,false);xhr.responseType="arraybuffer";xhr.send(null);return new Uint8Array(xhr.response)}}readAsync=async url=>{if(isFileURI(url)){return new Promise((resolve,reject)=>{var xhr=new XMLHttpRequest;xhr.open("GET",url,true);xhr.responseType="arraybuffer";xhr.onload=()=>{if(xhr.status==200||xhr.status==0&&xhr.response){resolve(xhr.response);return}reject(xhr.status)};xhr.onerror=reject;xhr.send(null)})}var response=await fetch(url,{credentials:"same-origin"});if(response.ok){return response.arrayBuffer()}throw new Error(response.status+" : "+response.url)}}}else{}var out=console.log.bind(console);var err=console.error.bind(console);var wasmBinary;var ABORT=false;var isFileURI=filename=>filename.startsWith("file://");class EmscriptenEH{}class EmscriptenSjLj extends EmscriptenEH{}function binaryDecode(bin){for(var i=0,l=bin.length,o=new Uint8Array(l),c;i<l;++i){c=bin.charCodeAt(i);o[i]=~c>>8&c}return o}var runtimeInitialized=false;function getMemoryBuffer(){try{var b=wasmMemory.toResizableBuffer();return b}catch{}return wasmMemory.buffer}function updateMemoryViews(){if(HEAP8?.buffer?.resizable)return;var b=getMemoryBuffer();HEAP8=new Int8Array(b);HEAP16=new Int16Array(b);HEAPU8=new Uint8Array(b);HEAPU16=new Uint16Array(b);HEAP32=new Int32Array(b);HEAPU32=new Uint32Array(b);Module["HEAPF32"]=HEAPF32=new Float32Array(b);HEAPF64=new Float64Array(b);HEAP64=new BigInt64Array(b);HEAPU64=new BigUint64Array(b)}function preRun(){var preRun=Module["preRun"];if(preRun){if(typeof preRun=="function")preRun=[preRun];onPreRuns.push(...preRun)}callRuntimeCallbacks(onPreRuns)}function initRuntime(){runtimeInitialized=true;wasmExports["e"]()}function postRun(){var postRun=Module["postRun"];if(postRun){if(typeof postRun=="function")postRun=[postRun];onPostRuns.push(...postRun)}callRuntimeCallbacks(onPostRuns)}function abort(what){Module["onAbort"]?.(what);what=`Aborted(${what})`;err(what);ABORT=true;what+=". Build with -sASSERTIONS for more info.";var e=new WebAssembly.RuntimeError(what);throw e}var wasmBinaryFile;function findWasmBinary(){return binaryDecode(' asm   M` `  `` `}}`|}`}`||` `} ` `}` `}aa ab ac 	\n\r       p((AÐÃ1d e f g h i j k l m n o \n¼Å<A    AM!@@ " \r AÌÃ ( "E\r     E@   K|      ¢"¢"  ¢¢ D§F;ÍÆ>¢DtçÊâù *¿ ¢  D²ûn?¢Dw¬ËTUUÅ¿ ¢    ¶O|    ¢"     ¢"¢  DiPîàBù>¢D\'èÀV¿ ¢ DB:áSU¥?¢  D^ýÿÿß¿¢D      ð?   ¶æ{}|}  - E@AÌ:( "AtA\'j( !@ AtA\'j AjAðpAtA\'j( Aßá¢ÈyA  AjAðp"AtA\'j"( "Aqs Aþÿÿÿq AxqrAvs"6   A´Aôx AãIj( Aßá¢ÈyA AA{ AïI j"AtA\'j( "Aqs Aþÿÿÿq ( AxqrAvs"6  ý ý"Aý­ ýQ"Aý«ýV,V,V,V,ýN ýQ"Aý«ý  Æï  Æï  Æï  ÆïýN ýQ"Aý­ ýQýûý   0   0   0   0ýæý  ¿  ¿  ¿  ¿ýä" ýæ"ý  ý"	C  ?^\r  	C    [\r AÌ: 6   A:   }C     	"¼" AüF\r @  AükAÿÿÿxM@  At"E@# Ak" C  ¿8  *C      AüF\r AxI  A NqE@  "  C   K¼AÜ k! Að#+     AÌùk" A|qk¾»  AvAðq"+è!¢D      ð¿ "\n \n¢"¢Aø#+  \n¢A$+    ¢  Au·Aè#+ ¢ +ð!  \n  ¶! C   À 	" ý 8  ý  A :   *! *  * Ä	}{  ("  ( "kAu O@@  (" k"Au"   K"E\r  * !@ AI@ ! ! Aq!  A|q"	Atj! ý!\r@  \nAtj \rý  \nAj"\n 	G\r   	F\r@  8  Aj! Ak"\r   K@   kAtj! * !@@ At kAk"AI@ !  AvAj"Aüÿÿÿq"Atj! ý!\rA !@  Atj \rý  Aj" G\r   F\r@  8  Aj" G\r    6    Atj6 @   6   A 6  B 7 A !@ AO\r Aÿÿÿÿ Au"   I AüÿÿÿO"AO\r    At""6     j6  At"j! * !@@ Ak"AI@ !  AvAj"Aüÿÿÿq"Atj! ý!\r@  Atj \rý  Aj" G\r   F\r@  8  Aj" G\r    6AØ AÐ j"A&6 A!A A-  E\r @@@ Aj"AqE\r -  \r @ " Aj!A  ( "k rAxqAxF\r @  "Aj!  -  \r  Ak"A\rj" A 6   6   6   Aj! Aj" @ A  ü\n    6 A¼&6  AÈ&A T~@A\'( "­  ­B|Bøÿÿÿ|"BÿÿÿÿX@ §" ? AtM\r  \rAØ?A06 AA\'  6  ¨ @ AN@  D      à¢!  AÿI@ Aÿk!  D      à¢! Aý  AýOAþk! AxJ\r   D      `¢!  A¸pK@ AÉj!  D      `¢! Aðh  AðhMAj!   Aÿj­B4¿¢ù	}{  (!\n@ E\r  \nAt"E\r A !  kAI@@  At"j* C    ^E@  jA 6   ArAt"j* C    ^E@  jA 6  Aj" G\r  @  At"jý  ý                ýE"ý Aq@  jA 6  ýAq@  jA 6 ýAq@  jA 6 ýAq@  jA 6 Aj" G\r  \nAþÿÿÿq! \nAq!  ( "Aq! Aüÿÿÿq!  At"j!  j!  \nlAt! AI!@  l!  \n lAtj!  lAt!	@ \nA L"\r   (,! A L@A !A ! \nAG@@  At"j* "C    \\@  j" *  8   ArAt"j* "C    \\@  j" *  8  Aj! Aj" G\r  E\r  At"j* "C    [\r  j" *  8   	j!\rA !  ( "  jI  j  jIq A Hr r!@  At"j* "C    \\@   lAtj!A !@ E@ ý!@  At"j" ý    \rjý   ýæýäý  Aj" G\r  " F\r Ar! @  At"j" *   \rj*  8  !  F\r @  At"j" *   \rj*  8   Aj"j" *   \rj*  8  Aj" G\r   j" *  8  Aj" \nG\r @ E\r  A L\r   j! @ A  ü  \r   	j!A !   ("\r jI \r  jIq A Hr!@@  Atj* "C    [\r  \r  lAtj!A !  rE@ ý!@  At"j"	 	ý    jý   ýæýäý  Aj" G\r  " F\r Ar! @  At"j"	 	*   j*  8  !  F\r @  At"j"	 	*   j*  8   Aj"j"	 	*   j*  8  Aj" G\r  Aj" \nG\r  Aj"AG\r Ñ# Ak"$    6   6  A 6   Aj  l   (! A 6   Aj    (!  (! A 6   A j  kAu   (! A 6   A,j    (!  (! A 6   A8j  kAu   (!  (! A 6   AÄ j  kAu   (! A 6   AÐ j    (! A 6   AÜ j   A :   8 A 6   ("  (" G@@   8  Aj"  G\r  Aj$ |# Ak"$ @  ¼"Aÿÿÿÿq"AÚ¤úM@ AÌI\r  »!  AÑ§íM@  »! AãÛM@ A H@ D-DTû!ù? !  D-DTû!ù¿ ! D-DTû!	ÀD-DTû!	@ A N  !  AÕãM@ AßÛ¿M@  »! A H@ DÒ!3|Ù@ !  DÒ!3|ÙÀ ! D-DTû!@D-DTû!À A H  » !  AüO@    !    Aj! +!@@@@ AqAk  !  !  !  !  Aj$   æ|# Ak"$ }  ¼"Aÿÿÿÿq"AÚ¤úM@C  ? AÌI\r  » AÑ§íM@ AäÛO@D-DTû!	@D-DTû!	À A H  »   »! A H@ D-DTû!ù? D-DTû!ù? ¡ AÕãM@ AàÛ¿O@D-DTû!@D-DTû!À A H  »  A H@DÒ!3|ÙÀ  »¡  »DÒ!3|ÙÀ      AüO\r    Aj! +!@@@@ AqAk      Aj$ }{Að=( !@AÔ:( "A L\r Aä:( !AÐ:( "A J@AØ:( !\n Aüÿÿÿq!	 AI!@   lAtj!\r    lAtj!A !@ \n  lAtj!  At"j* !A !@ E@ý                 ý  !@  At"jý    jý  ýæ ýä! Aj" 	G\r    ý\r \r ýä"  ý\r	\n   ýäý ! 	" F\r@  At"j*   j*  ! Aj" G\r  \r jC      C    ]8  Aj" G\r  Aj" G\r  Aq!\n Aüÿÿÿq!	 At!  k!\r AI!@   lAtj!A ! @@ \r  \r  ljAI\r @   At"j  jý  "ý                ýF ýNý   Aj"  	G\r  	"  F\rA !  ! \n@@  At"jC      j* " C    ]8  Aj! Aj" \nG\r    kA|K\r @  At"jC      j* " C    ]8   Aj" jC       j* " C    ]8   Aj" jC       j* " C    ]8   Aj" jC       j* " C    ]8  Aj" G\r  Aj" G\r Aü=( !@A¼;( "A L\r AÌ;( !A¸;( "A J@AÀ;( ! Aüÿÿÿq! A ! AI!\r@   lAtj!   lAtj!A !@   lAtj!\n  At"j* !A !@ \rE@ý                 ý  !@  At"	jý   	 \njý  ýæ ýä! Aj"  G\r    ý\r \r ýä"  ý\r	\n   ýäý !  " F\r@  At"	j*  	 \nj*  ! Aj" G\r   jC      C    ]8  Aj" G\r  Aj" G\r  Aq!\n Aüÿÿÿq!	 At!  k!\rA ! AI!@   lAtj!A ! @@ \r  \r  ljAI\r @   At"j  jý  "ý                ýF ýNý   Aj"  	G\r  	"  F\rA !  ! \n@@  At"jC      j* " C    ]8  Aj! Aj" \nG\r    kA|K\r @  At"jC      j* " C    ]8   Aj" jC       j* " C    ]8   Aj" jC       j* " C    ]8   Aj" jC       j* " C    ]8  Aj" G\r  Aj" G\r A>( !@A¤<( "A L\r A´<( !A <( "A J@A¨<( ! Aüÿÿÿq! A ! AI!\r@   lAtj!   lAtj!A !@   lAtj!\n  At"j* !A !@ \rE@ý                 ý  !@  At"	jý   	 \njý  ýæ ýä! Aj"  G\r    ý\r \r ýä"  ý\r	\n   ýäý !  " F\r@  At"	j*  	 \nj*  ! Aj" G\r   jC      C    ]8  Aj" G\r  Aj" G\r  Aq!\n Aüÿÿÿq!	 At!  k!\rA ! AI!@   lAtj!A ! @@ \r  \r  ljAI\r @   At"j  jý  "ý                ýF ýNý   Aj"  	G\r  	"  F\rA !  ! \n@@  At"jC      j* " C    ]8  Aj! Aj" \nG\r    kA|K\r @  At"jC      j* " C    ]8   Aj" jC       j* " C    ]8   Aj" jC       j* " C    ]8   Aj" jC       j* " C    ]8  Aj" G\r  Aj" G\r @A=( "A L\r A=( !A>( !A=( "A J@A=( ! Aüÿÿÿq! A ! AI!\r@   lAtj!   lAtj!A !@   lAtj!\n  At"j* !A !@ \rE@ý                 ý  !@  At"	jý   	 \njý  ýæ ýä! Aj"  G\r    ý\r \r ýä"  ý\r	\n   ýäý !  " F\r@  At"	j*  	 \nj*  ! Aj" G\r   j 8  Aj" G\r  Aj" G\r  Aq!\n Aüÿÿÿq!	 At!  k!\rA ! AI!@   lAtj!A ! @@ \r  \r  ljAI\r @   At"j  jý  ý   Aj"  	G\r  	"  F\rA !  ! \n@@  At"j  j* 8  Aj! Aj" \nG\r    kA|K\r @  At"j  j* 8   Aj" j   j* 8   Aj" j   j* 8   Aj" j   j* 8  Aj" G\r  Aj" G\r »\n}{# Ak"$  A :  BÀ?7 @@@@@@  Ak @AÌ:( " At"  AjAðpAt(\'Aßá¢ÈyA   AjAðp"At(\'" Aqs  Aþÿÿÿq (\'AxqrAvs" 6\'AÌ: 6   !  Atj"Cffæ¿Cffæ?  Av  s" AtA­±éyq  s" AtAþ~q  s" Av  s³C  /C   ?]"	  C   ?8  	 C   ?8  Aj" G\r @AÌ:( " At"  AjAðpAt(\'Aßá¢ÈyA   AjAðp" AtA\'j"( "Aqs Aþÿÿÿq (\'AxqrAvs"6\'  A´Aôx  AãIj( Aßá¢ÈyA AA{  AïI  j"At(\'" Aqs  Aþÿÿÿq ( AxqrAvs" 6 AÌ: 6  Av s"AtA­±éyq s"AtAþ~q s"Av s³CÛI0"\r!	 !  Atj  ý  ý ý>>>>ýæ 	ý ý " ýä"ý  ¿¿        ýäý  ??         ýå  Av  s" AtA­±éyq  s" AtAþ~q  s" Av  s³C  /C   ?]ýAý«Aý¬ýRýäý[   Aj" G\r @AÌ:( " At"  AjAðpAt(\'Aßá¢ÈyA   AjAðp"At(\'" Aqs  Aþÿÿÿq (\'AxqrAvs" 6\'AÌ: 6   !  Atj"  Av  s" AtA­±éyq  s" AtAþ~q  s" Av  s³CÛÉ0"	 C>CÍÌ@"8  	\r 8  Aj" G\r @AÌ:( " At"  AjAðpAt(\'Aßá¢ÈyA   AjAðp"At(\'" Aqs  Aþÿÿÿq (\'AxqrAvs" 6\'AÌ: 6   Av  s" AtA­±éyq  s" AtAþ~q  s" Av  s³"CÛI1"	!\n  !  Atj"  \n Cff&0CÍÌÌ>"  CÍÌÌ=8    	\r CÍÌÌ=8  Aj" G\r @  !  !	  Atj"  CÍÌL?8    	CÍÌL?8 Aj" G\r  Aj$ õ\'# Ak"\n$ @@@@@@@@@@  AôM@AÜ?( "A  AjAøq  AI"Av" v"Aq@@ AsAq  j"At"AÀ j"  (@"("F@AÜ? A~ wq6    6   6 Aj!   Ar6  j" (Ar6 Aä?( "M\r @@A  t"A  kr   tqh"At"AÀ j" (@" ("F@AÜ? A~ wq"6   6  6   Ar6   j"  k"Ar6   j 6  @ AxqAÀ j!Að?( ! A Avt"qE@AÜ?  r6   (!  6  6  6  6  Aj! Að? 6 Aä? 6 Aà?( "E\r hAt(B"(Axq k! !@@ (" E@ (" E\r  (Axq k"   I"!    !  ! (!	  (" G@ ("  6   6\n (" Aj ("E\r Aj!@ ! " Aj!  ("\r   Aj!  ("\r  A 6 	A!  A¿K\r   Aj"Axq!Aà?( "E\r A!A  k!  AôÿÿM@ A& Avg" kvAq  AtkA>j!@@@ At(B"E@A ! A !  A AvkA  AGt!@@ (Axq k" O\r  ! "\r A ! !    ("   AvAqj("F   !  At! \r    rE@A !A t" A   kr q" E\r  hAt(B!   E\r@  (Axq k" I!   !    !  ("   (" \r  E\r  Aä?(  kO\r  (!  (" G@ ("  6   6 (" Aj ("E\r Aj!@ ! " Aj!  ("\r   Aj!  ("\r  A 6  Aä?( "M@Að?( ! @  k"AO@   j" Ar6   j 6    Ar6   Ar6   j" (Ar6A !A !Aä? 6 Að? 6   Aj! 	 Aè?( "I@Aè?  k"6 Aô?Aô?( "  j"6   Ar6   Ar6  Aj! 	A !  A/j"A´Ã ( @A¼Ã ( AÀÃ B7 A¸Ã B 7 A´Ã  \nAjApqAØªÕªs6 AÈÃ A 6 AÃ A 6 A "j"A  k"q" M\rAÃ ( "@AÃ ( " j"	 M\r	  	I\r	@AÃ -  AqE@@@@@Aô?( "@AÃ ! @  ( " M@    (jI\r  (" \r A "AF\r !A¸Ã ( " Ak" q@  k  jA   kqj!  M\rAÃ ( " @AÃ ( " j" M\r   I\r "  G\r  k q""  (   (jF\r !   AF\r A0j M@  !A¼Ã ( "  kjA  kq"AF\r  j!  ! AG\rAÃ AÃ ( Ar6  !A !  AF\r  AF\r   M\r   k" A(jM\rAÃ AÃ (  j" 6 AÃ (   I@AÃ   6 @Aô?( "@AÃ ! @   ( "  ("jF\r  (" \r Aì?( " A    ME@Aì? 6 A ! A Ã  6 AÃ  6 Aü?A6 AÀ A´Ã ( 6 A¨Ã A 6 @  At" AÀ j"6@  6@  Aj" A G\r Aè? A(k" Ax kAq"k"6 Aô?  j"6   Ar6   jA(6Aø?AÄÃ ( 6   M\r  K\r  (Aq\r    j6Aô? Ax kAq" j"6 Aè?Aè?(  j"  k" 6    Ar6  jA(6Aø?AÄÃ ( 6 A ! A ! Aì?(  K@Aì? 6   j!AÃ ! @@   ( "G@  (" \r  - AqE\rAÃ ! @@  ( " M@    (j"I\r  (! Aè? A(k" Ax kAq"k"6 Aô?  j"6   Ar6   jA(6Aø?AÄÃ ( 6   A\' kAqjA/k"    AjI"A6 A¤Ã ) 7 AÃ ) 7A¤Ã  Aj6 A Ã  6 AÃ  6 A¨Ã A 6  Aj! @  A6  Aj  Aj!  I\r   F\r   (A~q6   k"Ar6  6  AÿM@ AøqAÀ j! AÜ?( "A Avt"qE@AÜ?  r6     (!   6  6A!AA!  AÿÿÿM@ A& Avg" kvAq  AtrA>s!    6 B 7  AtAÂ j!@@Aà?( "A  t"qE@Aà?  r6   6  A  AvkA   AGt!  ( !@ "(Axq F\r  Av!  At!   Aqj"("\r   6  6A! "! A ("  6  6   6A ! A!A j 6   j  6 Aè?( "  M\r Aè?   k"6 Aô?Aô?( "  j"6   Ar6   Ar6  Aj! AØ?A06 A !    6     ( j6 Ax kAqj" Ar6 Ax kAqj"  j"k!@Aô?(  F@Aô? 6 Aè?Aè?(  j" 6    Ar6Að?(  F@Að? 6 Aä?Aä?(  j" 6    Ar6   j  6  (" AqAF@  Axq!	 (!@  AÿM@ (" F@AÜ?AÜ?( A~  Avwq6   6  6 (!@  G@ ("  6   6@ ("  Aj (" E\r Aj!@ !  "Aj!  (" \r  Aj! (" \r  A 6 A ! E\r @ (" At"(B F@ AÂ j 6  \rAà?Aà?( A~  wq6 @  (F@  6  6 E\r  6 (" @   6   6 (" E\r    6   6  	j!  	j"(!    A~q6  Ar6  j 6  AÿM@ AøqAÀ j! AÜ?( "A Avt"qE@AÜ?  r6     (!   6  6   6  6A! AÿÿÿM@ A& Avg" kvAq  AtrA>s!  6 B 7 AtAÂ j! @@Aà?( "A t"qE@Aà?  r6    6  A AvkA  AGt!  ( !@ " (Axq F\r Av! At!   Aqj"("\r   6   6  6  6  (" 6   6 A 6   6  6 Aj! @ E\r @ ("At"(B F@ AÂ j  6   \rAà? A~ wq"6 @  (F@   6   6  E\r   6 ("@   6   6 ("E\r    6   6@ AM@   j" Ar6   j"   (Ar6  Ar6  j" Ar6  j 6  AÿM@ AøqAÀ j! AÜ?( "A Avt"qE@AÜ?  r6     (!   6  6   6  6A!  AÿÿÿM@ A& Avg" kvAq  AtrA>s!    6 B 7  AtAÂ j!@@ A  t"qE@Aà?  r6   6   6 A  AvkA   AGt!  ( !@ "(Axq F\r  Av!  At!   Aqj"("\r   6  6  6  6 ("  6  6 A 6  6   6 Aj! @ 	E\r @ ("At"(B F@ AÂ j  6   \rAà? A~ wq6 @  	(F@ 	  6 	  6  E\r   	6 ("@   6   6 ("E\r    6   6@ AM@   j" Ar6   j"   (Ar6  Ar6  j" Ar6  j 6  @ AxqAÀ j! Að?( !A Avt" qE@AÜ?  r6     (!   6  6   6  6Að? 6 Aä? 6  Aj!  \nAj$   ä|~}@  ¼AvAÿq"A°I\r C      C  ÿ[\r AøO@      C    ^@# Ak"C   p8 *C   p  C  Ã_E\r # Ak"C   8 *C   A¨!+   »" A !+ " " ¡¡"¢A°!+    ¢¢A¸!+  ¢D      ð?   ½"B/ §AqAt) |¿¢¶¼|# Ak"$ @  ¼"Aÿÿÿÿq"AÚ¤îM@   »" DÈÉm0_ä?¢D      8C D      8Ã "D   Pû!ù¿¢  Dcba´Q¾¢ "9  ü! D   `û!é¿c@   D      ð¿ "D   Pû!ù¿¢  Dcba´Q¾¢ 9  Ak! D   `û!é?dE\r   D      ð? "D   Pû!ù¿¢  Dcba´Q¾¢ 9  Aj! AüO@     »9 A !   AvAk"Atk¾»9 Aj!\n# A°k"$   AkAm"A  A J"Ahlj!	A	( "A N@ Aj! !@ AÀj Atj A H|D         At(	·9  Aj! Aj" G\r  	Ak!A ! A  A J!@A !D        !@ \n Atj+  AÀj  kAtj+ ¢  ! Aj"AG\r   Atj 9   F Aj!E\r A/ 	k!A0 	k! AtA	j! !@@  Atj+ !A ! ! A J@@ Aàj Atj D      p>¢ü·"D      pÁ¢  ü6   AtjAk+   ! Ak! Aj" G\r   	" D      À?¢D       À¢ " ü"·¡!@@@ A L"E@ At j" (Ü"  u" tk"6Ü  j!  u \r At j(ÜAu"\rA L\rA!\r D      à?f\r A !\rA !A !A! A J@@ Aàj Atj"( !@  Aÿÿÿ E\rA k6 A!A A !A! Aj" G\r @ \r Aÿÿÿ!@@ Ak Aÿÿÿ! At j" (Ü q6Ü Aj! \rAG\r D      ð? ¡!A!\r \r  D      ð? 	¡! D        a@A ! !@  L\r @ Aàj Ak"Atj(  r!  J\r  E\r @ Ak! Aàj Ak"Atj( E\r A!@ "Aj! Aàj  kAtj( E\r   j!@ AÀj Aj"Atj  Atj( ·9 A !D        !@ \n Atj+  AÀj  kAtj+ ¢  ! Aj"AG\r   Atj 9   H\r  !@ A 	k	"D      pAf@ Aàj Atj D      p>¢ü"·D      pÁ¢  ü6  Aj! 	! ü! Aàj Atj 6 D      ð? 	! A N@ !@  "Atj  Aàj Atj( ·¢9  Ak! D      p>¢! \r  !@@   k"  J"A H@D        !  Atj!	A !D        !@ At"\n+à 	 \nj+ ¢  !  G Aj!\r  A j Atj 9  A J Ak!\r D        ! A N@@ "Ak!  A j Atj+  ! \r     \r9  A°j$  Aq! + ! A H@  9 A  k!  9  Aj$     è@  E\r   Ak"  Ak( " Axq"j!@  Aq\r   AqE\r  ( " k"Aì?( I\r   j!@@@Að?(  G@ (!  AÿM@  ("G\rAÜ?AÜ?( A~  Avwq6  (!  G@ ("  6   6 ("  Aj (" E\r Aj!@ !  "Aj! (" \r  Aj! (" \r  A 6  (" AqAG\rAä? 6    A~q6  Ar6  6   6  6A ! E\r @ (" At"(B F@ AÂ j 6  \rAà?Aà?( A~  wq6 @  (F@  6  6 E\r  6 (" @   6   6 (" E\r    6   6  O\r  (" AqE\r @@@@  AqE@Aô?(  F@Aô? 6 Aè?Aè?(  j" 6    Ar6 Að?( G\rAä?A 6 Að?A 6 Að?( " F@Að? 6 Aä?Aä?(  j" 6    Ar6   j  6   Axq j! (!  AÿM@ (" F@AÜ?AÜ?( A~  Avwq6   6  6 (!  G@ ("  6   6 ("  Aj (" E\r Aj!@ !  "Aj! (" \r  Aj! (" \r  A 6    A~q6  Ar6  j 6 A ! E\r @ (" At"(B F@ AÂ j 6  \rAà?Aà?( A~  wq6 @  (F@  6  6 E\r  6 (" @   6   6 (" E\r    6   6  Ar6  j 6   G\r Aä? 6  AÿM@ AøqAÀ j! AÜ?( "A Avt"qE@AÜ?  r6     (!   6  6   6  6A! AÿÿÿM@ A& Avg" kvAq  AtrA>s!  6 B 7 AtAÂ j!@Aà?( " A t"qE@Aà?   r6   6 A!A A AvkA  AGt! ( !@ " (Axq F\r Av! At!   Aqj"("\r   6A!  !A! "   (" 6   6A!A!A !  j 6    6  j 6 Aü?Aü?( Ak" A  6 ¡\r{}A\'( A¼?( A¬@ A	l!\n Al! ³C\n×£<!Aô>( !A¼?( !A ! @   Alj"   Atj"* 8  *!  8  8   Ar"Alj"  Atj"* 8  *!  8  8  Aj" A¬G\r  A¬A ! A¼?( !A>( ! A¬l!	C    !@@AÈ?( " A?( "j"Aj"I  Aàj"Iq\r   I  Aàj"Iq\r   I  Aàj"Iq\r   I  Iq\r   I  Iq\r  	ý!ý                !ý             !@   At"j"	ý  !\r  j" 	ý "ý  \rý   j"	ý !   ý®ý            ýµ"ý j" 	ý  "ý 8   ýj"	 ý8   ýj" ý 8   ýj" ý8   ý8 	 ý8  ý8  ý8  \r \rýæ"  ýæ"\rý\r\r  \rý\r 	\nýäýã"ý 8 	 ý8  ý8  ý8  ýä! ý            ý®!  Aj" A¬G\r    ý\r \r ýä"  ý\r	\n   ýäý !@   At"j  j* "8   Ar"j  j* "8     	jAlj"  j* 8   j* !     "8  8  !  Aj" A¬G\r A !A¤?(  Atj CtZ;8 Aô>( !A°?( !@  Alj"   Atj"* 8  *À!   8   8   *8 *Ä!   8   8   *8 *È!   8    8 Aj"AG\r  AA !  Al!@A?( " \nj"A>( "A	jI  A	jIqE@@   Atj"ý  !    jAtj" ý ý  ý    Ar"Atj"ý  !   jAtj" ý ý  ý   Aj" AG\r  @    jAtj"   Atj"* 8   *8   Ar" jAtj"  Atj"* 8   *8  Aj" AG\r  A2G@A ! @A¼?( "AÈ?( "AàjI  AàjIqE@@   At"j" ý    jý  ý\n×£<\n×£<\n×£<\n×£<ýæýäý   Ar"j" ý    jý  ý\n×£<\n×£<\n×£<\n×£<ýæýäý   Aj" AØG\r  @   At"j" *   j* C\n×£<8   Aj"j" *   j* C\n×£<8   Aj"j" *   j* C\n×£<8   Aj" AØG\r  Aj!¤}{# Ak"$   A L}C    @A\'( AÐ>( AA\'( AÜ>( AAÌ:( !A?( !\rAô>( !AÜ>( !AÐ>( !Aè>( !	A !@ At" AjAðpAt(\'Aßá¢ÈyA  AjAðp"At(\'"Aqs Aþÿÿÿq (\'AxqrAvs"6\' 	 Atj Av s"AtA­±éyq s"AtAþ~q s"Av s³C  /"8   Alj"\nC  ? "  At"j"*    j"* 8   Ar"j"* !  j"* ! \n 8 \n    8  \rj *  * 8  \r j *  * 8  Aj"AG\r A !AÌ: 6  AA?( !C    !@@AÄ>( "	A>( "AjI  	Aj"Iq\r  	 AjI  Kq\r ý                !@ 	 At"j"  j"ý    j"ý  ýå" ý  ý ýå"ý\r 	\ný   <   <   <   <ýæ"  ý\r\rý   <   <   <   <ýæ"ý\r	\n\rý   ý\r ý   ýæ"  ýæ"ý\r\r  ý\r 	\n ýäýä! Aj"AG\r    ý\r \r ýä"  ý\r	\n   ýäý !@ 	 At"j  j*   j* "C   <8  	 Ar"j  j*   j* "C   <8      ! Aj"AG\r A !A=A>(   	A¸>( A \nA <Aü=( A>( A¸>( A¬>( A\nA¸;Að=( Aü=( A¬>( A >( A\nAÐ:Aô>( Að=( A >( A A\nAÔ?AÔ?( Aj"6  A=6 A <6 A¸;6 AÐ:6 C  ? ²"Cµ¦¾"ý!C  ?C  ? Ci0½º"ý!@@  j( "(" ("F\r  (D! (8! ( !\nA !@  k"Au"	AI\r    j"I   j"Iq\r   K  Kq\r   \nK   \nj"Iq\r   K  Kq\r   K  \nKq\r   K  \nKq\r  	A|q!A !\r@  \rAt"j"  \nj"ý  ýÐÌÌ=ÐÌÌ=ÐÌÌ=ÐÌÌ=ýæ ý  ýfff?fff?fff?fff?ýæýäý   j" ý  " ýæý : : : :ýæ ý  ýw¾?w¾?w¾?w¾?ýæýä"ý   j" ý   ý  ýoºoºoºoºýæ  ýæýãýwÌ+2wÌ+2wÌ+2wÌ+2ýä ýæýçýäý  ý                ý  \rAj"\r G\r   	F\r@  At"j"  \nj"* CÐÌÌ= * Cfff?8   j" * " C : * Cw¾?"8   j" *  * Coº  CwÌ+2 8  A 6  Aj" 	G\r @ (" ("F\r  (\\! (P! (,!\nA !@  k"Au"	AI\r    j"I   j"Iq\r   K  Kq\r   \nK   \nj"Iq\r   K  Kq\r   K  \nKq\r   K  \nKq\r  	A|q!A !\r@  \rAt"j"  \nj"ý  ýÐÌÌ=ÐÌÌ=ÐÌÌ=ÐÌÌ=ýæ ý  ýfff?fff?fff?fff?ýæýäý   j" ý  " ýæý : : : :ýæ ý  ýw¾?w¾?w¾?w¾?ýæýä"ý   j" ý   ý  ýoºoºoºoºýæ  ýæýãýwÌ+2wÌ+2wÌ+2wÌ+2ýä ýæýçýäý  ý                ý  \rAj"\r G\r   	F\r@  At"j"  \nj"* CÐÌÌ= * Cfff?8   j" * " C : * Cw¾?"8   j" *  * Coº  CwÌ+2 8  A 6  Aj" 	G\r  Aj"AG\r  Aj"  G\r  C  ; Aj$  A\' 6 A\'  6 A\' 6 A!@ AtA\'j Av sAåàl j" 6  Aj"AtA\'j  Av  sAåàl j" 6  Aj"AtA\'j  Av  sAåàl j" 6  Aj"AðFE@ AtA\'j  Av  sAåàl j"6  Aj!AÔ?A 6 AÌ:A 6 AÐ:AACìQ?A¸;AAC   >A <AAC   >A=AACóµ=A°?( " ýUUMÀUUMÀUUMÀUUMÀý   ýUUMÀUUMÀUUMÀUUMÀý  ýUUMÀUUMÀUUMÀUUMÀý   ý  (À  (À  (À  (ÀýP  ý  (À  (À  (À  (Àý@  ý  (À  (À  (À  (Àý0  ýªªÀªªÀªªÀªªÀý  ýªªÀªªÀªªÀªªÀýp  ýªªÀªªÀªªÀªªÀý`  ý©ªº¿©ªº¿©ªº¿©ªº¿ý°  ý©ªº¿©ªº¿©ªº¿©ªº¿ý   ý©ªº¿©ªº¿©ªº¿©ªº¿ý  ýüÿ_¿üÿ_¿üÿ_¿üÿ_¿ýà  ýüÿ_¿üÿ_¿üÿ_¿üÿ_¿ýÐ  ýüÿ_¿üÿ_¿üÿ_¿üÿ_¿ýÀ  ýüÿ_¿HU¾`U> `?ýÐ  ýUUMÀ  (ÀªªÀ©ªº¿ýÀ  ýüÿ_¿HU¾`U> `?ý  ýUUMÀ  (ÀªªÀ©ªº¿ýð  ý®ªº?­ª@ (@WUM@ýà  ýüÿ_¿HU¾`U> `?ý°  ýUUMÀ  (ÀªªÀ©ªº¿ý   ý®ªº?­ª@ (@WUM@ý  ýüÿ_¿HU¾`U> `?ýà  ýUUMÀ  (ÀªªÀ©ªº¿ýÐ  ý®ªº?­ª@ (@WUM@ýÀ  ýüÿ_¿HU¾`U> `?ý  ýUUMÀ  (ÀªªÀ©ªº¿ý  ý®ªº?­ª@ (@WUM@ýð  ýüÿ_¿HU¾`U> `?ýÀ  ýUUMÀ  (ÀªªÀ©ªº¿ý°  ý®ªº?­ª@ (@WUM@ý   ýHU¾HU¾HU¾HU¾ý  ýHU¾HU¾HU¾HU¾ý  ýHU¾HU¾HU¾HU¾ýð  ýüÿ_¿HU¾`U> `?ýð  ýUUMÀ  (ÀªªÀ©ªº¿ýà  ý®ªº?­ª@ (@WUM@ýÐ  ý®ªº?­ª@ (@WUM@ý  ýUUMÀ  (ÀªªÀ©ªº¿ý  ýüÿ_¿HU¾`U> `?ý   ý`U>`U>`U>`U>ý   ý`U>`U>`U>`U>ý°  ý`U>`U>`U>`U>ýÀ  ý®ªº?­ª@ (@WUM@ý°  ýUUMÀ  (ÀªªÀ©ªº¿ýÀ  ýüÿ_¿HU¾`U> `?ýÐ  ý `? `? `? `?ýÐ  ý `? `? `? `?ýà  ý `? `? `? `?ýð  ý®ªº?®ªº?®ªº?®ªº?ý   ý®ªº?®ªº?®ªº?®ªº?ý  ý®ªº?®ªº?®ªº?®ªº?ý  ýüÿ_¿HU¾`U> `?ý  ýUUMÀ  (ÀªªÀ©ªº¿ýð  ý®ªº?­ª@ (@WUM@ýà  ýüÿ_¿HU¾`U> `?ý°  ýUUMÀ  (ÀªªÀ©ªº¿ý   ý®ªº?­ª@ (@WUM@ý  ý­ª@­ª@­ª@­ª@ý°  ý­ª@­ª@­ª@­ª@ýÀ  ý­ª@­ª@­ª@­ª@ýÐ  ýüÿ_¿HU¾`U> `?ýà  ýUUMÀ  (ÀªªÀ©ªº¿ýÐ  ý®ªº?­ª@ (@WUM@ýÀ  ý (@ (@ (@ (@ýà  ý (@ (@ (@ (@ýð  ý (@ (@ (@ (@ý  ýWUM@WUM@WUM@WUM@ý°  ýWUM@WUM@WUM@WUM@ý   ýWUM@WUM@WUM@WUM@ý  ý®ªº?­ª@ (@WUM@ýð A°?(  A¤?(  A?(  A?(  A A2 A¬A!A\'A6 A! @  AtA\'j Av sAåàl  j"6   Aj"AtA\'j Av sAåàl j"6   Aj"AtA\'j Av sAåàl j"6   Aj"AðG@ AtA\'j Av sAåàl j"6   Aj! AÌ:A 6 AØ:A Aà ü AÀ;A Aà ü A¨<A Aà ü A=A Aà ü Aø=A 6 Að=A 6 Að=A°	" 6 Aø=  A°	j"6   A A°	ü Aô= 6 A>A 6 Aü=A 6 Aü=A°	" 6 A>  A°	j"6   A A°	ü A> 6 A>A 6 A>A 6 A>A°	" 6 A>  A°	j"6   A A°	ü A> 6 A>A 6 A>A 6 A>Aà" 6 A>  Aàj"6   A Aàü A> 6 A¨>A 6 A >A 6 A >A°	" 6 A¨>  A°	j"6   A A°	ü A¤> 6 A´>A 6 A¬>A 6 A¬>A°	" 6 A´>  A°	j"6   A A°	ü A°> 6 AÀ>A 6 A¸>A 6 A¸>A°	" 6 AÀ>  A°	j"6   A A°	ü A¼> 6 AÌ>A 6 AÄ>A 6 AÄ>Aà" 6 AÌ>  Aàj"6   A Aàü AÈ> 6 AØ>A 6 AÐ>A 6 AÐ>A" 6 AØ>  Aj"6   A Aü AÔ> 6 Aä>A 6 AÜ>A 6 AÜ>A" 6 Aä>  Aj"6   A Aü Aà> 6 Að>A 6 Aè>A 6 Aè>A" 6 Að>  Aj"6   A Aü Aì> 6 Aü>A 6 Aô>A 6 Aô>A" 6 Aü>  Aj"6   A Aü Aø> 6 A?A 6 A?A 6 A?A" 6 A?  Aj"6   A Aü A? 6 A?A 6 A?A 6 A?A°" 6 A?  A°j"6   A A°ü A? 6 A ?A 6 A?A 6 A?AË" 6 A ?  AËj"6   A AËü A? 6 A¬?A 6 A¤?A 6 A¤?AÌ" 6 A¬?  AÌj"6   A AÌü A¨? 6 A¸?A 6 A°?A 6 A°?A	" 6 A¸?  A	j"6   A A	ü A´? 6 AÄ?A 6 A¼?A 6 A¼?Aà" 6 AÄ?  Aàj"6   A Aàü AÀ? 6 AÐ?A 6 AÈ?A 6 AÈ?Aà" 6 AÐ?  Aàj"6   A Aàü AÌ? 6  At%s:%d: %s vector /emsdk/emscripten/system/lib/libcxxabi/src/private_typeinfo.cpp catching a class without an object? A	×            ù¢ DNn ü) ÑW\' Ý4õ bÛÀ < AC cQþ »Þ« ·aÅ :n$ ÒMB Ià 	ê. Ñ ëþ )± è>§ õ5 D». é ´&p A~_ Ö9 S9 ô9 _ (ù½ ø; Þÿ  /ï \nZ mm Ï~6 	Ë\' FO· f? -ê_ º\'u åëÇ ={ñ ÷9 R ûkê ±_ ] 0V {üF ð«k  ¼Ï 6ô ã© ^a æ e  _ @h Øÿ \'sM 1 ÊV É¨s {â` kÀ ÄG ÍgÃ 	èÜ Y* vÄ ¦ D¯Ý WÑ ¥> ÿ 3~? Â2è OÞ »}2 &=Ã kï ø^ 5: òÊ ñ |! j$| Õnú 0-w ;C µÆ Ã ­ÄÂ ,MA  ] }F ãq- Æ 3b  ´Ò| ´§ 7UÕ ×>ö £ Mvü d* p×« c|ø z°W ç ÀIV ;ÖÙ §8 $#Ë Öw ZT#  ¹ ñ\n Îß 1ÿ fj Wa ¬ûG ~Ø "e· 2è æ¿` ïÄÍ l6	 ]?Ô Þ× X;Þ Þ Ò"( (è âXM ÆÊ2 ã à}Ë ÀP ó§ à[ .4 b H õ[ ­° éò HJC gÓ ªÝØ ®_B jaÎ \n(¤ Ó´ ¦ò \\w £Â a< sx ¯Z o×½ -¦c ô¿Ë ï &Ág UÊE ÊÙ6 (¨Ò Âa Éw & F ÄYÄ ÈÅD M²  ó ÔC­ )Iå ýÕ  ¾ü Ì pÎî >õ ìñ ³çÃ Çø(  Áq> .	³ Eó  « { .µ GÂ {2/ Um r§ kç 1Ë yJ Ayâ ôß è âæ 1 ík __6 »ý H´ g¤l qrB ]2 ¸ ¼å	 1% ÷t9 0 \r Kh ,îX Gª tç ½Ö$ ÷}¦ nHr ï ¦ ´ö ÑSQ Ï\nò  3 õK~ ²ch Ý>_ @]  UR) 7dÀ mØ 2H2 [Lu NqÔ ETn 	Á *õi fÕ \' ]P ´;Û êvÅ ù Ik} \'º i) ÆÌ¬ ­T âj Ù ,rP ¤¾ w ó0p  ü\' êq¨ fÂI dà= Ý £? Cý \r 1AÞ 9 Ýp ·ç ß; 7+ \\  Z  èØ l¯ ÛÿK 8 Yv b¥ aË» Ç¹ @½ Òò Iu\' ë¶ö Û"» \nª &/ dv 	;3  Q:ª £Â ¯í® \\& mÂM -z ÀV ? 	ðö +@ m1 9´   ØÃ[ õÄ Æ­K NÊ¥ §7Í æ©6 « ÝBh cÞ vï hR üÛ7 ®¡« ß1  ®¡ ûÚ dMf í· )e0 WV¿ Gÿ: jù¹ u¾ó (ß «0 fö Ë ú" Ùä =³¤ W 6Í	 NBé ¾¤ 3#µ ðª Oe¨ ÒÁ¥ ? [xÍ #ùv { r Æ¦S onâ ïë  JX ÄÚ· ªfº vÏÏ Ñ ±ñ- Á Ã­w HÚ ÷]  Æô ¬ð/ Ýì ?\\¼ ÐÞm Ç *Û¶ £%:  ¯ ­S ¶W )-´ K~ Ú§ vª {Y¡ * Ü·- úåý Ûþ ¾ý ävl ©ü >p n ýÿ (> ag3 * M½ê ³ç¯ mn g9 1¿[ ×H 0ß Ç-C %a5 ÉpÎ 0Ë¸ ¿lý ¤ ¢ lä ZÝ  !oG bÒ ¹\\ paI kVà R PU7 Õ· 3ñÄ n_ ]0ä .© ²Ã ¡26 ·¤ ê±Ô ÷! iä \'ÿw  @- OÍ   ¥ ³¢Ó /]\n ´ùB ÚË }¾Ð ÛÁ «½ Ê¢ j\\ .U \' U ð á d A ¾Þ Úý* k%¶ {4 óþ ¹¿ hjO J*¨ OÄZ -ø¼ ×Z ôÇ \rM  :¦ ¤W_ ?± 8 Ì  qÝ ÉÞ¶ ¿`õ Me k °¬ ²ÀÐ QUH û rÃ £; À@5 Ü{ àEÌ N)ú ÖÊÈ èóA |dÞ dØ Ù¾1 ¤Ã wXÔ iãÅ ðÚ º:< FF Uu_ Ò½õ nÆ ¬.] Dí >B aÄ )ýé çÖó "|Ê o5 àÅ ÿ× njâ °ýÆ Á |]t k­² Ín >r{ Æj ÷Ï© )sß µÉº · Q â²\r tº$ å}` tØ \r,  ~f ) zv ýý¾ VEï Ù~6 ìÙ º¹ Äü 1¨\' ñnÃ Å6 Ø¨V ´¨µ ÏÌ - oW4 ,V Îã Ö ¹ k^ª >* _Ì ýJ áôû ;m â, éÔ ü´© ïîÑ .5É /9a 8!D ÙÈ ü\n ûJj /Ø S´ N T"Ì *UÜ ÀÆÖ  p¸ id &Z` ?Rî  ôµ üËõ 4¼- 4¼î è]Ì Ý^` g 3ï É¸ aX áW¼ QÆ Ø> ÝqH -Ý ¯¡ !,F Yó× Ùz TÀ Oú Vü åy® "6 8­" gÜ Uèª &8 Êç Q\r¤ 3± ©× iH e²ð § L ùÑ6 !³ {J Ï! @Ü ÜGU át: gëB þß ^Ô_ {g¤ º¬z Uö¢ +# AºU Yn !* 9G ãæ åÔ Iû@ ÿVé Ê ÅY ú+ ÓÁÅ ÅÏ ÛZ® GÅ Cb !; ,y a *L{ , C¿ & x< ¨Ää åÛ{ Ä:Â &ôê ÷g \r¿ e£+ =± ½| ¤QÜ \'Ýc iáÝ  ¨) hÎ( 	í´ D  NÊ pc ~|# ¹2 §õ Vç !ñ µ* o~M ¥Q µù« ßÖ Ýa 6 Ä: ¢¡ rím 9z ¸© k2\\ F\'[  4í Ò w üôU YM àq Aã@û!ù?    -Dt>   Fø<   `QÌx;   ð9   @ %z8   "ã6    ói5      ð?tÓ°Ùï?ùlXµï?Q[Ðï?{Q}<¸rï?ª¹h1Tï?8bunz8ï?áÞõï?·1\nþï?Ë©:7§ñî?"4L¦Þî?-a`Îî?\'*6ÕÚ¿î?OV+´î?)THÝ«î?U:°~¤î?Í;f î?t_ìèuî?ës¡î?ÎL¥î?Û *Bå¬î?åÅÍ°7·î?ð£Äî?]%>²Õî?­ÓZèî?G^ûòvÿî?RÝï?iïÜ 7ï?¤ûÜXï?_{3|ï?Ú¤¢¯¤ï?@En[vÐï?      èB#Køj¬?óÄúPÎ¿Î?ÖRÿB.æ?      8Cþ+eGG@#Køj¼>óÄúPÎ¿.?ÖRÿB.?¾óøyìaö?Þª÷{Õ¿=¯Jíqõ?ÛmÀ§ð¾Ò¿°ðð9ô?g:Q®Ð¿¸°Éó?é$¦Ø1Ë¿¥d\ró?XwÀ\nOWÆ¿ {"^ò? Ç+ªÁ¿?4JJ»ñ?^ÎvNº¿ºåðX#ñ?ÌaZ<±¿§ A?ð?á8ôR¢¿      ð?        ¬Gý`î?Yò]ª¥ª? j³¤ì?´.6ªS^¼?æüjW6 ë?Û wå&Å?-ª¡cÑÂé?pG"\rÂË?íAxæè?á~ ÈÑ?bHSõÜgç?	î¶W0Ô?ï9úþB.æ?4¸H£Ð¿jà[WÕ?#A\nòþÿß¿    h  N10__cxxabiv116__shim_type_infoE      D    N10__cxxabiv117__class_type_infoE       8                               ¸     !            "   #   $     Ä  8  N10__cxxabiv120__si_class_type_infoE    p  ô  St9exception             %   &     $  ì  St11logic_error     H     \'   &     T    St12length_error    p  p  St9type_info A\'      Ð!')}function getBinarySync(file){return file}async function getWasmBinary(binaryFile){return getBinarySync(binaryFile)}async function instantiateArrayBuffer(binaryFile,imports){try{var binary=await getWasmBinary(binaryFile);var instance=await WebAssembly.instantiate(binary,imports);return instance}catch(reason){err(`failed to asynchronously prepare wasm: ${reason}`);abort(reason)}}async function instantiateAsync(binary,binaryFile,imports){return instantiateArrayBuffer(binaryFile,imports)}function getWasmImports(){var imports={a:wasmImports};return imports}async function createWasm(){function receiveInstance(instance){wasmExports=instance.exports;assignWasmExports(wasmExports);updateMemoryViews();return wasmExports}function receiveInstantiationResult(result){return receiveInstance(result["instance"])}var info=getWasmImports();var instantiateWasm=Module["instantiateWasm"];if(instantiateWasm){return new Promise(resolve=>{instantiateWasm(info,inst=>resolve(receiveInstance(inst)))})}wasmBinaryFile??=findWasmBinary();var result=await instantiateAsync(wasmBinary,wasmBinaryFile,info);var exports=receiveInstantiationResult(result);return exports}class ExitStatus{name="ExitStatus";constructor(status){this.message=`Program terminated with exit(${status})`;this.status=status}}var HEAP16;var HEAP32;var HEAP64;var HEAP8;var HEAPF32;var HEAPF64;var HEAPU16;var HEAPU32;var HEAPU64;var HEAPU8;var callRuntimeCallbacks=callbacks=>{while(callbacks.length>0){callbacks.shift()(Module)}};var onPostRuns=[];var onPreRuns=[];var noExitRuntime=true;class ExceptionInfo{constructor(excPtr){this.excPtr=excPtr;this.ptr=excPtr-24}set_type(type){HEAPU32[this.ptr+4>>2]=type}get_type(){return HEAPU32[this.ptr+4>>2]}set_destructor(destructor){HEAPU32[this.ptr+8>>2]=destructor}get_destructor(){return HEAPU32[this.ptr+8>>2]}set_caught(caught){caught=caught?1:0;HEAP8[this.ptr+12]=caught}get_caught(){return HEAP8[this.ptr+12]!=0}set_rethrown(rethrown){rethrown=rethrown?1:0;HEAP8[this.ptr+13]=rethrown}get_rethrown(){return HEAP8[this.ptr+13]!=0}init(type,destructor){this.set_adjusted_ptr(0);this.set_type(type);this.set_destructor(destructor)}set_adjusted_ptr(adjustedPtr){HEAPU32[this.ptr+16>>2]=adjustedPtr}get_adjusted_ptr(){return HEAPU32[this.ptr+16>>2]}}var uncaughtExceptionCount=0;var ___cxa_throw=(ptr,type,destructor)=>{var info=new ExceptionInfo(ptr);info.init(type,destructor);uncaughtExceptionCount++;abort()};var __abort_js=()=>abort("");var getHeapMax=()=>2147483648;var alignMemory=(size,alignment)=>Math.ceil(size/alignment)*alignment;var growMemory=size=>{var oldHeapSize=wasmMemory.buffer.byteLength;var pages=(size-oldHeapSize+65535)/65536|0;try{wasmMemory.grow(pages);updateMemoryViews();return 1}catch(e){}};var _emscripten_resize_heap=requestedSize=>{var oldSize=HEAPU8.length;requestedSize>>>=0;var maxHeapSize=getHeapMax();if(requestedSize>maxHeapSize){return false}for(var cutDown=1;cutDown<=4;cutDown*=2){var overGrownHeapSize=oldSize*(1+.2/cutDown);overGrownHeapSize=Math.min(overGrownHeapSize,requestedSize+100663296);var newSize=Math.min(maxHeapSize,alignMemory(Math.max(requestedSize,overGrownHeapSize),65536));var replacement=growMemory(newSize);if(replacement){return true}}return false};{if(Module["noExitRuntime"])noExitRuntime=Module["noExitRuntime"];if(Module["print"])out=Module["print"];if(Module["printErr"])err=Module["printErr"];if(Module["arguments"])programArgs=Module["arguments"];if(Module["thisProgram"])thisProgram=Module["thisProgram"];var preInit=Module["preInit"];if(preInit){if(typeof preInit=="function")Module["preInit"]=preInit=[preInit];while(preInit.length>0){preInit.shift()()}}}var _zf_M,_zf_K,_zf_G,_zf_pts,_zf_vec,_zf_meanv,_zf_grid,_zf_init,_zf_train,_zf_animate,memory,__indirect_function_table,wasmMemory;function assignWasmExports(wasmExports){_zf_M=Module["_zf_M"]=wasmExports["f"];_zf_K=Module["_zf_K"]=wasmExports["g"];_zf_G=Module["_zf_G"]=wasmExports["h"];_zf_pts=Module["_zf_pts"]=wasmExports["i"];_zf_vec=Module["_zf_vec"]=wasmExports["j"];_zf_meanv=Module["_zf_meanv"]=wasmExports["k"];_zf_grid=Module["_zf_grid"]=wasmExports["l"];_zf_init=Module["_zf_init"]=wasmExports["m"];_zf_train=Module["_zf_train"]=wasmExports["n"];_zf_animate=Module["_zf_animate"]=wasmExports["o"];memory=wasmMemory=wasmExports["d"];__indirect_function_table=wasmExports["__indirect_function_table"]}var wasmImports={c:___cxa_throw,a:__abort_js,b:_emscripten_resize_heap};async function run(){preRun();var setStatus=Module["setStatus"];if(setStatus){setStatus("Running...");await new Promise(resolve=>setTimeout(resolve,1));setTimeout(setStatus,1,"")}if(ABORT)return;initRuntime();Module["onRuntimeInitialized"]?.();postRun()}var wasmExports;wasmExports=await createWasm();await run();
-;return Module}})();if(typeof exports==="object"&&typeof module==="object"){module.exports=createZF;module.exports.default=createZF}else if(typeof define==="function"&&define["amd"])define([],()=>createZF);
-
-</script>
-
-<script>
-const cv = document.getElementById('cv'), ctx = cv.getContext('2d');
-const badge = document.getElementById('badge');
-const status_ = document.getElementById('status');
-const go = document.getElementById('go'), replayBtn = document.getElementById('replay');
-const scrub = document.getElementById('scrub');
-const tlabel = document.getElementById('tlabel'), vlabel = document.getElementById('vlabel');
-const LO = -3.5, HI = 3.5;
-
-let Module = null;
-let grid = null, frames = [], smax = 1, playing = false, timer = null;
-
-const px = x => (x - LO) / (HI - LO) * cv.width;
-const py = y => cv.height - (y - LO) / (HI - LO) * cv.height;
-
-function speedColor(s) {
-  const r = Math.min(1, s / smax);
-  const hue = 212 * (1 - r);
-  return `hsl(${hue}, 90%, ${55 + 10 * (1 - r)}%)`;
-}
-
-function draw(k) {
-  const f = frames[k];
-  if (!f) return;
-  ctx.clearRect(0, 0, cv.width, cv.height);
-
-  if (grid) {
-    ctx.strokeStyle = 'rgba(255, 80, 80, 0.55)';
-    ctx.lineWidth = 1;
-    const SC = 22;
-    for (let j = 0; j < grid.x.length; j++) {
-      const u = f.vec[2 * j], v = f.vec[2 * j + 1];
-      if (Math.hypot(u, v) < 0.02) continue;
-      const x0 = px(grid.x[j]), y0 = py(grid.y[j]);
-      const x1 = x0 + u * SC, y1 = y0 - v * SC;
-      ctx.beginPath(); ctx.moveTo(x0, y0); ctx.lineTo(x1, y1); ctx.stroke();
-      const a = Math.atan2(y1 - y0, x1 - x0);
-      ctx.beginPath();
-      ctx.moveTo(x1, y1);
-      ctx.lineTo(x1 - 4 * Math.cos(a - 0.4), y1 - 4 * Math.sin(a - 0.4));
-      ctx.moveTo(x1, y1);
-      ctx.lineTo(x1 - 4 * Math.cos(a + 0.4), y1 - 4 * Math.sin(a + 0.4));
-      ctx.stroke();
-    }
-  }
-
-  for (let j = 0; j < f.pts.length; j += 3) {
-    ctx.fillStyle = speedColor(f.pts[j + 2]);
-    ctx.beginPath();
-    ctx.arc(px(f.pts[j]), py(f.pts[j + 1]), 3.2, 0, 6.2832);
-    ctx.fill();
-  }
-
-  tlabel.textContent = 't = ' + f.t.toFixed(2);
-  vlabel.textContent = 'mean ‖v‖ = ' + f.mean_v.toFixed(3);
-  scrub.value = k;
-}
-
-function showMidBadge(f) {
-  const isZero = f.mean_v < 0.12 * smax;
-  badge.innerHTML = `t = 0.50 &nbsp; mean ‖v‖ = ${f.mean_v.toFixed(3)}<br>` +
-    (isZero ? '<span class="zero">ZERO VELOCITY</span>'
-            : '<span class="nonzero">v ≠ 0 → p<sub>source</sub> ≠ p<sub>target</sub></span>');
-  badge.style.display = 'block';
-}
-
-function play() {
-  if (!frames.length) return;
-  playing = true;
-  replayBtn.disabled = true;
-  badge.style.display = 'none';
-  const mid = Math.round((frames.length - 1) / 2);
-  let k = 0;
-  clearInterval(timer);
-  timer = setInterval(() => {
-    draw(k);
-    if (k === mid) {
-      clearInterval(timer);
-      showMidBadge(frames[mid]);
-      setTimeout(() => {
-        badge.style.display = 'none';
-        timer = setInterval(step, 90);
-      }, 2200);
-    }
-    k++;
-    if (k >= frames.length) finish();
-    function step() {
-      draw(k);
-      k++;
-      if (k >= frames.length) finish();
-    }
-  }, 90);
-  function finish() {
-    clearInterval(timer);
-    playing = false;
-    replayBtn.disabled = false;
-    status_.textContent = 'done — scrub the timeline or replay.';
-    scrub.disabled = false;
-  }
-}
-
-scrub.addEventListener('input', () => {
-  if (playing) return;
-  badge.style.display = 'none';
-  const k = +scrub.value;
-  draw(k);
-  if (frames[k] && Math.abs(frames[k].t - 0.5) < 1e-6) showMidBadge(frames[k]);
-});
-
-replayBtn.addEventListener('click', play);
-
-const raf = () => new Promise(r => requestAnimationFrame(r));
-
-document.getElementById('go').addEventListener('click', async () => {
-  if (!Module) return;
-  const src = +document.getElementById('src').value;
-  const tgt = +document.getElementById('tgt').value;
-  const total = +document.getElementById('iters').value;
-  go.disabled = true; replayBtn.disabled = true; scrub.disabled = true;
-  badge.style.display = 'none';
-  frames = []; grid = null;
-
-  Module._zf_init(src, tgt, (Math.random() * 1e9) | 0);
-  let done = 0;
-  const chunk = 50;
-  while (done < total) {
-    const loss = Module._zf_train(chunk);
-    done += chunk;
-    status_.textContent = `training in browser... iter ${done}/${total}, loss ${loss.toFixed(3)}`;
-    await raf();
-  }
-
-  status_.textContent = 'integrating particles...';
-  await raf();
-  Module._zf_animate();
-
-  const M = Module._zf_M(), K = Module._zf_K(), G = Module._zf_G();
-  const heap = Module.HEAPF32;
-  const gptr = Module._zf_grid() >> 2;
-  grid = { x: heap.slice(gptr, gptr + G * G), y: heap.slice(gptr + G * G, gptr + 2 * G * G) };
-  const pptr = Module._zf_pts() >> 2;
-  const vptr = Module._zf_vec() >> 2;
-  const mptr = Module._zf_meanv() >> 2;
-  for (let k = 0; k <= K; k++) {
-    frames.push({
-      t: k / K,
-      mean_v: heap[mptr + k],
-      pts: heap.slice(pptr + k * M * 3, pptr + (k + 1) * M * 3),
-      vec: heap.slice(vptr + k * G * G * 2, vptr + (k + 1) * G * G * 2),
-    });
-  }
-  const speeds = [];
-  for (const f of frames)
-    for (let j = 2; j < f.pts.length; j += 3) speeds.push(f.pts[j]);
-  speeds.sort((a, b) => a - b);
-  smax = Math.max(0.3, speeds[Math.floor(speeds.length * 0.95)] || 1);
-  scrub.max = frames.length - 1;
-  status_.textContent = 'playing...';
-  play();
-  go.disabled = false;
-});
-
-if (typeof createZF === 'undefined') {
-  status_.textContent = 'This is the build TEMPLATE (shell.html) — open zeroflow_standalone.html instead, or run build.sh.';
-} else {
-  createZF().then(m => {
-    Module = m;
-    status_.textContent = 'ready — pick distributions and press Start.';
-  }).catch(e => { status_.textContent = 'WebAssembly failed to load: ' + e; });
-}
-</script>
-</body>
-</html>

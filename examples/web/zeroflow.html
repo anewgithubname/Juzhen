@@ -3,49 +3,79 @@
 <head>
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
-<title>Zero-Flow Demo</title>
+<title>The Zero-Flow Phenomenon</title>
+<link rel="stylesheet" href="https://cdn.jsdelivr.net/npm/katex@0.16.21/dist/katex.min.css">
+<script defer src="https://cdn.jsdelivr.net/npm/katex@0.16.21/dist/katex.min.js"></script>
+<script defer src="https://cdn.jsdelivr.net/npm/katex@0.16.21/dist/contrib/auto-render.min.js"
+  onload="renderMathInElement(document.body, {delimiters: [
+    {left: '$$', right: '$$', display: true},
+    {left: '\\(', right: '\\)', display: false}]});"></script>
 <style>
-  :root { color-scheme: light dark; }
+  :root { color-scheme: light; }
   body {
-    font-family: system-ui, sans-serif;
-    max-width: 900px; margin: 2rem auto; padding: 0 1rem;
+    font-family: "Charter", "Bitstream Charter", "Source Serif 4", Georgia, "Times New Roman", serif;
+    max-width: 860px; margin: 2.5rem auto 3rem; padding: 0 1.2rem;
+    color: #1c1c1c; background: #fffdf8; line-height: 1.55;
   }
-  h1 { font-size: 1.4rem; }
-  .row { display: flex; flex-wrap: wrap; gap: 1.5rem; align-items: flex-start; }
-  .controls { display: flex; flex-direction: column; gap: 0.9rem; min-width: 230px; }
-  .controls label { font-size: 0.9rem; display: flex; flex-direction: column; gap: 0.25rem; }
+  header { text-align: center; margin-bottom: 1.4rem; }
+  h1 { font-size: 1.6rem; font-weight: 600; margin: 0 0 0.4rem; }
+  .byline { font-style: italic; font-size: 0.95rem; color: #57534a; margin: 0; }
+  a { color: #7b1e1e; text-decoration: none; }
+  a:hover { text-decoration: underline; }
+  .abstract { text-align: justify; hyphens: auto; margin: 0 0 1.8rem; }
+  .row { display: flex; flex-wrap: wrap; gap: 1.8rem; align-items: flex-start; }
+  .controls { display: flex; flex-direction: column; gap: 0.9rem; flex: 0 0 230px; }
+  #status { overflow-wrap: break-word; }
+  .controls label {
+    font-size: 0.9rem; font-style: italic; color: #57534a;
+    display: flex; flex-direction: column; gap: 0.3rem;
+  }
   select, button {
-    font-size: 1rem; padding: 0.4rem 0.6rem;
-    border-radius: 6px; border: 1px solid #888;
+    font-family: inherit; font-style: normal; font-size: 0.95rem; color: #1c1c1c;
+    padding: 0.35rem 0.6rem; border: 1px solid #b9b2a4; border-radius: 2px; background: #fff;
   }
-  button { cursor: pointer; }
+  button { cursor: pointer; background: #f5f1e8; }
+  button:hover:enabled { background: #ece5d6; }
   button:disabled { opacity: 0.5; cursor: wait; }
   .stage { position: relative; }
-  canvas { border: 1px solid #888; border-radius: 8px; background: #101418; }
+  canvas { border: 1px solid #8f8a7e; background: #101418; display: block; }
   #badge {
     position: absolute; top: 12px; left: 50%; transform: translateX(-50%);
-    padding: 0.4rem 1rem; border-radius: 8px; font-weight: bold;
+    padding: 0.4rem 1rem; border-radius: 2px; font-weight: bold;
     background: rgba(0,0,0,0.65); color: #fff; white-space: nowrap;
     display: none; text-align: center; font-family: monospace;
   }
   #badge .zero { color: #4da3ff; font-size: 1.3rem; letter-spacing: 0.1em; }
   #badge .nonzero { color: #ff9c4d; font-size: 1.1rem; }
-  #tbar { margin-top: 0.4rem; display: flex; align-items: center; gap: 0.7rem; font-family: monospace; }
-  #tbar input[type=range] { flex: 1; }
-  #status { font-size: 0.85rem; opacity: 0.75; min-height: 1.2rem; margin-top: 0.4rem; }
-  .legend { font-size: 0.8rem; opacity: 0.8; margin-top: 0.6rem; }
+  #tbar {
+    margin-top: 0.5rem; display: flex; align-items: center; gap: 0.7rem;
+    font-family: "SF Mono", Menlo, Consolas, monospace; font-size: 0.85rem; color: #444;
+  }
+  #tbar input[type=range] { flex: 1; accent-color: #7b1e1e; }
+  #status { font-size: 0.85rem; color: #6b6558; min-height: 1.2rem; margin-top: 0.4rem; }
+  #pbar { width: 100%; height: 5px; display: none; accent-color: #7b1e1e; }
+  .legend { font-size: 0.82rem; color: #57534a; margin-top: 0.6rem; line-height: 1.6; }
   .swatch { display: inline-block; width: 0.8em; height: 0.8em; border-radius: 50%; vertical-align: -0.05em; }
-  footer { margin-top: 2rem; font-size: 0.85rem; opacity: 0.7; }
+  footer {
+    margin-top: 2.4rem; padding-top: 1rem; border-top: 1px solid #d8d2c4;
+    font-size: 0.88rem; color: #45413a; text-align: justify; hyphens: auto;
+  }
 </style>
 </head>
 <body>
-<h1>Zero-Flow: v<sub>t=0.5</sub> ≡ 0 ⟺ p<sub>source</sub> = p<sub>target</sub></h1>
-<p>A rectified flow is trained with <b>independent coupling</b> between the two
-distributions you choose, then particles are transported from t=0 to t=1 along the
-learned field. Theorem 3.1 of <a href="https://arxiv.org/abs/2602.00797">Zero-Flow
-Encoders</a> (Wang, Wang, Liu &amp; Suzuki, ICML 2026): the velocity field vanishes
-everywhere at <b>t&nbsp;=&nbsp;0.5</b> <i>if and only if</i> source = target. Pick the
-<b>same</b> dataset twice and watch everything freeze blue at the midpoint.</p>
+<header>
+<h1>The Zero-Flow Phenomenon</h1>
+<p class="byline">\(v_{1/2} \equiv 0 \;\Longleftrightarrow\; p_{\mathrm{source}} = p_{\mathrm{target}}\)
+&mdash; Theorem 3.1 of <a href="https://arxiv.org/abs/2602.00797">Zero-Flow Encoders</a>,
+Wang, Wang, Liu &amp; Suzuki, ICML 2026</p>
+</header>
+
+<p class="abstract">A rectified flow is trained with <b>independent coupling</b>
+between the two distributions you choose; particles are then transported from
+\(t = 0\) to \(t = 1\) along the learned velocity field. The field vanishes
+everywhere at \(t = \tfrac{1}{2}\) <i>if and only if</i> the source and target
+distributions coincide. Pick the <b>same</b> dataset twice and watch everything
+freeze blue at the midpoint.</p>
 
 <div class="row">
   <div class="controls">
@@ -76,6 +106,7 @@ everywhere at <b>t&nbsp;=&nbsp;0.5</b> <i>if and only if</i> source = target. Pi
     </label>
     <button id="go">Start: train &amp; play</button>
     <button id="replay" disabled>Replay animation</button>
+    <progress id="pbar" max="1" value="0"></progress>
     <div class="legend">
       particle speed:
       <span class="swatch" style="background:#4da3ff"></span> 0 (still)
@@ -83,7 +114,7 @@ everywhere at <b>t&nbsp;=&nbsp;0.5</b> <i>if and only if</i> source = target. Pi
       <span class="swatch" style="background:#ffd24d"></span>
       →
       <span class="swatch" style="background:#ff4d4d"></span> fast<br>
-      red arrows: learned velocity field v<sub>t</sub>
+      red arrows: learned velocity field \(v_t\)
     </div>
     <div id="status"></div>
   </div>
@@ -99,15 +130,20 @@ everywhere at <b>t&nbsp;=&nbsp;0.5</b> <i>if and only if</i> source = target. Pi
   </div>
 </div>
 
-<footer>Backend: Juzhen (C++/CUDA) trains v(x,t) = argmin E‖X′ − X − u(X<sub>t</sub>, t)‖²
-with X<sub>t</sub> = tX′ + (1−t)X, X ⟂ X′, then integrates dX = v dt. Antisymmetry
-(Thm 3.2): with identical distributions the field reverses around t = 0.5 —
-particles drift, stop dead at the midpoint, then flow back out.</footer>
+<footer><b>Implementation.</b> The Juzhen (C++/CUDA) backend trains a velocity-field
+MLP \(u(x, t)\) with Adam on
+$$\min_{u}\;\mathbb{E}\,\bigl\|\,X' - X - u(X_t,\, t)\,\bigr\|^{2},
+\qquad X_t = t\,X' + (1 - t)\,X,\quad X \perp X',$$
+then integrates \(\mathrm{d}X = u\,\mathrm{d}t\) from \(t = 0\) to \(1\) and streams
+the animation to this page. Antisymmetry (Theorem 3.2): with identical distributions
+the field satisfies \(v_t = -v_{1-t}\) &mdash; particles drift, stop dead at the
+midpoint, then flow back out.</footer>
 
 <script>
 const cv = document.getElementById('cv'), ctx = cv.getContext('2d');
 const badge = document.getElementById('badge');
 const status_ = document.getElementById('status');
+const pbar = document.getElementById('pbar');
 const go = document.getElementById('go'), replayBtn = document.getElementById('replay');
 const scrub = document.getElementById('scrub');
 const tlabel = document.getElementById('tlabel'), vlabel = document.getElementById('vlabel');
@@ -223,6 +259,9 @@ document.getElementById('go').addEventListener('click', async () => {
   badge.style.display = 'none';
   frames = []; grid = null;
   status_.textContent = 'training velocity field...';
+  pbar.max = +iters;
+  pbar.value = 0;
+  pbar.style.display = 'block';
 
   try {
     const res = await fetch(`/train?source=${src}&target=${tgt}&iters=${iters}`, { method: 'POST' });
@@ -240,8 +279,10 @@ document.getElementById('go').addEventListener('click', async () => {
         if (!line) continue;
         const msg = JSON.parse(line);
         if (msg.phase === 'train') {
+          pbar.value = msg.iter + 1;
           status_.textContent = `training... iter ${msg.iter}/${msg.total}, loss ${msg.loss.toFixed(3)}`;
         } else if (msg.phase === 'grid') {
+          pbar.style.display = 'none';
           grid = msg;
         } else if (msg.phase === 'frame') {
           frames.push(msg);
@@ -261,6 +302,7 @@ document.getElementById('go').addEventListener('click', async () => {
     status_.textContent = 'connection error';
     console.error(err);
   } finally {
+    pbar.style.display = 'none';
     go.disabled = false;
   }
 });

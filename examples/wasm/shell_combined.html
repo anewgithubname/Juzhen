@@ -1,0 +1,483 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>The Zero-Flow Phenomena</title>
+<link rel="stylesheet" href="https://cdn.jsdelivr.net/npm/katex@0.16.21/dist/katex.min.css">
+<script defer src="https://cdn.jsdelivr.net/npm/katex@0.16.21/dist/katex.min.js"></script>
+<script defer src="https://cdn.jsdelivr.net/npm/katex@0.16.21/dist/contrib/auto-render.min.js"
+  onload="renderMathInElement(document.body, {delimiters: [
+    {left: '$$', right: '$$', display: true},
+    {left: '\\(', right: '\\)', display: false}]});"></script>
+<style>
+  :root {
+    color-scheme: light;
+    --bg: #fffdf8; --fg: #1c1c1c; --muted: #57534a; --accent: #7b1e1e;
+    --border: #b9b2a4; --hairline: #d8d2c4; --btn: #f5f1e8; --btn-h: #ece5d6;
+    --field: #fff;
+  }
+  :root[data-theme="dark"] {
+    color-scheme: dark;
+    --bg: #16181d; --fg: #e6e2d8; --muted: #a39d8f; --accent: #c97b6f;
+    --border: #4a463e; --hairline: #363329; --btn: #23262d; --btn-h: #2c3038;
+    --field: #1c1f25;
+  }
+  body {
+    font-family: "Charter", "Bitstream Charter", "Source Serif 4", Georgia, "Times New Roman", serif;
+    max-width: 860px; margin: 2.5rem auto 3rem; padding: 0 1.2rem;
+    color: var(--fg); background: var(--bg); line-height: 1.55;
+  }
+  header { text-align: center; margin-bottom: 1.2rem; }
+  h1 { font-size: 1.6rem; font-weight: 600; margin: 0 0 0.4rem; }
+  .byline { font-style: italic; font-size: 0.95rem; color: var(--muted); margin: 0; }
+  a { color: var(--accent); text-decoration: none; }
+  a:hover { text-decoration: underline; }
+  #themeToggle {
+    position: fixed; top: 1rem; right: 1rem; z-index: 10;
+    font-size: 0.85rem; padding: 0.25rem 0.7rem;
+  }
+  .tabs { display: flex; gap: 0; border-bottom: 1px solid var(--hairline); margin: 1.4rem 0 1.5rem; }
+  .tab {
+    font-family: inherit; font-size: 0.95rem; color: var(--muted); background: none;
+    border: none; border-bottom: 2px solid transparent; border-radius: 0;
+    padding: 0.45rem 1rem; cursor: pointer; margin-bottom: -1px;
+  }
+  .tab:hover { color: var(--fg); }
+  .tab.active { color: var(--fg); border-bottom-color: var(--accent); font-weight: 600; }
+  .theorem { text-align: justify; hyphens: auto; margin: 0 0 1rem; }
+  .theorem i { color: var(--fg); }
+  .abstract { text-align: justify; hyphens: auto; margin: 0 0 1.8rem; }
+  .row { display: flex; flex-wrap: wrap; gap: 1.8rem; align-items: flex-start; }
+  .controls { display: flex; flex-direction: column; gap: 0.9rem; flex: 0 0 230px; }
+  .controls label {
+    font-size: 0.9rem; font-style: italic; color: var(--muted);
+    display: flex; flex-direction: column; gap: 0.3rem;
+  }
+  select, button {
+    font-family: inherit; font-style: normal; font-size: 0.95rem; color: var(--fg);
+    padding: 0.35rem 0.6rem; border: 1px solid var(--border); border-radius: 2px;
+    background: var(--field);
+  }
+  button { cursor: pointer; background: var(--btn); }
+  button:hover:enabled { background: var(--btn-h); }
+  button:disabled { opacity: 0.5; cursor: wait; }
+  .stage { position: relative; }
+  canvas { border: 1px solid var(--border); background: #101418; display: block; }
+  .badge {
+    position: absolute; top: 12px; left: 50%; transform: translateX(-50%);
+    padding: 0.4rem 1rem; border-radius: 2px; font-weight: bold;
+    background: rgba(0,0,0,0.65); color: #fff; white-space: nowrap;
+    display: none; text-align: center; font-family: monospace;
+  }
+  .badge .zero { color: #4da3ff; font-size: 1.2rem; letter-spacing: 0.08em; }
+  .badge .nonzero { color: #ff9c4d; font-size: 1.1rem; }
+  .tbar {
+    margin-top: 0.5rem; display: flex; align-items: center; gap: 0.7rem;
+    font-family: "SF Mono", Menlo, Consolas, monospace; font-size: 0.85rem; color: var(--muted);
+  }
+  .tbar input[type=range] { flex: 1; accent-color: var(--accent); }
+  .status { font-size: 0.85rem; color: var(--muted); min-height: 1.2rem; margin-top: 0.4rem; overflow-wrap: break-word; }
+  .pbar { width: 100%; height: 5px; display: none; accent-color: var(--accent); }
+  .legend { font-size: 0.82rem; color: var(--muted); margin-top: 0.6rem; line-height: 1.6; }
+  .swatch { display: inline-block; width: 0.8em; height: 0.8em; border-radius: 50%; vertical-align: -0.05em; }
+  .note {
+    margin-top: 2.4rem; padding-top: 1rem; border-top: 1px solid var(--hairline);
+    font-size: 0.88rem; color: var(--muted); text-align: justify; hyphens: auto;
+  }
+</style>
+</head>
+<body>
+<button id="themeToggle">◑ dark</button>
+
+<header>
+<h1>The Zero-Flow Phenomena</h1>
+<p class="byline">Interactive companion to Theorems 3.1 &amp; 3.4 of
+<a href="https://arxiv.org/abs/2602.00797">Zero-Flow Encoders</a>,
+Wang, Wang, Liu &amp; Suzuki, ICML 2026</p>
+</header>
+
+<nav class="tabs">
+  <button class="tab active" data-panel="panel-marg">§3.1 &nbsp;Unconditional zero-flow</button>
+  <button class="tab" data-panel="panel-cond">§3.4 &nbsp;Conditional zero-flow</button>
+</nav>
+
+<!-- ══════════════════ §3.1 unconditional ══════════════════ -->
+<section id="panel-marg" class="panel">
+<p class="theorem"><b>Theorem 3.1</b> (zero-flow criterion).
+<i>Let \(v_t\) be the rectified flow trained with independent coupling between
+\(p_{\mathrm{source}}\) and \(p_{\mathrm{target}}\). Then
+\(v_{1/2} \equiv 0\) everywhere if and only if
+\(p_{\mathrm{source}} = p_{\mathrm{target}}\).</i></p>
+
+<p class="abstract">A rectified flow is trained with <b>independent coupling</b>
+between the two distributions you choose; particles are then transported from
+\(t = 0\) to \(t = 1\) along the learned velocity field. Pick the <b>same</b>
+dataset twice and watch everything freeze blue at the midpoint.</p>
+
+<div class="row">
+  <div class="controls">
+    <label>source distribution
+      <select id="m_src">
+        <option value="1">gaussian mixture</option>
+        <option value="0">gaussian</option>
+        <option value="2">two moons</option>
+        <option value="3">ring</option>
+        <option value="4">spiral</option>
+      </select>
+    </label>
+    <label>target distribution
+      <select id="m_tgt">
+        <option value="1">gaussian mixture</option>
+        <option value="0">gaussian</option>
+        <option value="2">two moons</option>
+        <option value="3">ring</option>
+        <option value="4">spiral</option>
+      </select>
+    </label>
+    <label>training iterations
+      <select id="m_iters">
+        <option value="1500">1500 (fast)</option>
+        <option value="3000" selected>3000</option>
+        <option value="6000">6000 (better field)</option>
+      </select>
+    </label>
+    <button id="m_go">Start: train &amp; play</button>
+    <button id="m_replay" disabled>Replay animation</button>
+    <progress id="m_pbar" class="pbar" max="1" value="0"></progress>
+    <div class="legend">
+      particle speed:
+      <span class="swatch" style="background:#4da3ff"></span> 0 (still)
+      →
+      <span class="swatch" style="background:#ffd24d"></span>
+      →
+      <span class="swatch" style="background:#ff4d4d"></span> fast<br>
+      red arrows: learned velocity field \(v_t\)
+    </div>
+    <div id="m_status" class="status">loading WebAssembly module...</div>
+  </div>
+
+  <div class="stage">
+    <canvas id="m_cv" width="560" height="560"></canvas>
+    <div id="m_badge" class="badge"></div>
+    <div class="tbar">
+      <span id="m_tlabel">t = 0.00</span>
+      <input type="range" id="m_scrub" min="0" max="50" value="0" disabled>
+      <span id="m_vlabel"></span>
+    </div>
+  </div>
+</div>
+
+<div class="note"><b>Implementation.</b> A velocity-field MLP \(u(x, t)\) is trained with Adam on
+$$\min_{u}\;\mathbb{E}\,\bigl\|\,X' - X - u(X_t,\, t)\,\bigr\|^{2},
+\qquad X_t = t\,X' + (1 - t)\,X,\quad X \perp X',$$
+then \(\mathrm{d}X = u\,\mathrm{d}t\) is integrated from \(t = 0\) to \(1\).
+Antisymmetry (Theorem 3.2): with identical distributions the field satisfies
+\(v_t = -v_{1-t}\) &mdash; particles drift, stop dead at the midpoint, then flow
+back out.</div>
+</section>
+
+<!-- ══════════════════ §3.4 conditional ══════════════════ -->
+<section id="panel-cond" class="panel" hidden>
+<p class="theorem"><b>Theorem 3.4</b> (conditional zero-flow condition).
+<i>For all pairs \((\xi, \eta)\) such that \(f(\xi) = \eta\), and for all
+\(z\), the velocity field \(v_{1/2}(z;\, \eta,\, \xi) = 0\) if and only if
+\(p_{X|Y} = p_{X|f(Y)}\).</i></p>
+
+<p class="abstract">Data follow the joint model \(Y \sim \mathcal{N}(0,1)\),
+\(X = 0.5\,Y + \varepsilon\), \(\varepsilon \sim \mathcal{N}(0,1)\). A conditional
+rectified flow \(u_t(x;\, f(Y'),\, Y)\) is trained with independent coupling
+between \((X, Y)\) and an independent copy \((X', Y')\); each data point
+\((Y_i, X_i)\) is then transported vertically along the learned field. The
+midpoint field vanishes <i>if and only if</i> the statistic \(f\) is
+<b>sufficient</b> for predicting \(X\). Choose \(f\) below: a sufficient
+statistic, e.g. \(\sigma(-2y)\), freezes everything blue at
+\(t = \tfrac{1}{2}\); a lossy one, e.g. \(\sin(2y)\), does not.</p>
+
+<div class="row">
+  <div class="controls">
+    <label>statistic \(f(y)\)
+      <select id="c_fsel">
+        <option value="0">σ(−2y)</option>
+        <option value="1">y</option>
+        <option value="2">sin(2y)</option>
+        <option value="3">|y|</option>
+        <option value="4">sign(y)</option>
+        <option value="5">0 (constant)</option>
+      </select>
+    </label>
+    <label>training iterations
+      <select id="c_iters">
+        <option value="2000">2000 (fast)</option>
+        <option value="4000" selected>4000</option>
+        <option value="8000">8000 (better field)</option>
+      </select>
+    </label>
+    <button id="c_go">Start: train &amp; play</button>
+    <button id="c_replay" disabled>Replay animation</button>
+    <progress id="c_pbar" class="pbar" max="1" value="0"></progress>
+    <div class="legend">
+      horizontal: conditioning variable \(y\); vertical: \(x\)<br>
+      particle speed:
+      <span class="swatch" style="background:#4da3ff"></span> 0 (still)
+      →
+      <span class="swatch" style="background:#ffd24d"></span>
+      →
+      <span class="swatch" style="background:#ff4d4d"></span> fast<br>
+      red arrows: learned field \(v_t(z;\, f(\xi),\, \xi)\)
+    </div>
+    <div id="c_status" class="status">loading WebAssembly module...</div>
+  </div>
+
+  <div class="stage">
+    <canvas id="c_cv" width="560" height="560"></canvas>
+    <div id="c_badge" class="badge"></div>
+    <div class="tbar">
+      <span id="c_tlabel">t = 0.00</span>
+      <input type="range" id="c_scrub" min="0" max="50" value="0" disabled>
+      <span id="c_vlabel"></span>
+    </div>
+  </div>
+</div>
+
+<div class="note"><b>Implementation.</b> A velocity-field MLP \(u_t(x;\, \eta,\, \xi)\) is
+trained with Adam on
+$$\min_{u}\;\int_{0}^{1}\mathbb{E}\,\bigl\|\,X' - X - u_t(X_t,\, f(Y'),\, Y)\,\bigr\|^{2}\,\mathrm{d}t,
+\qquad X_t = t\,X' + (1 - t)\,X,$$
+where \((X', Y')\) is an independent copy of \((X, Y)\). Its optimum
+\(v_t(z;\, \eta,\, \xi) = \mathbb{E}\bigl[X' - X \mid X_t = z,\ f(Y') = \eta,\ Y = \xi\bigr]\)
+transports \(p_{X|Y=\xi}\) to \(p_{X|f(Y)=\eta}\) (Theorem 3.3); the demo
+integrates \(\mathrm{d}X = v\,\mathrm{d}t\) for each data point with the
+consistent conditioning pair \(\eta = f(\xi)\).</div>
+</section>
+
+<footer class="note">Everything runs locally in your browser via WebAssembly.
+Single-file demo built with Emscripten.</footer>
+
+<!--ZF_JS-->
+<!--ZFC_JS-->
+
+<script>
+// ── tabs ────────────────────────────────────────────────────────────────────
+document.querySelectorAll('.tab').forEach(btn =>
+  btn.addEventListener('click', () => {
+    document.querySelectorAll('.tab').forEach(b => b.classList.toggle('active', b === btn));
+    document.querySelectorAll('.panel').forEach(p => p.hidden = (p.id !== btn.dataset.panel));
+  }));
+
+// ── theme switch ────────────────────────────────────────────────────────────
+const themeBtn = document.getElementById('themeToggle');
+function applyTheme(t) {
+  document.documentElement.dataset.theme = t;
+  themeBtn.textContent = t === 'dark' ? '☀ light' : '◑ dark';
+  try { localStorage.setItem('zf-theme', t); } catch (e) {}
+}
+let theme0 = 'light';
+try {
+  theme0 = localStorage.getItem('zf-theme') ||
+    (matchMedia('(prefers-color-scheme: dark)').matches ? 'dark' : 'light');
+} catch (e) {}
+applyTheme(theme0);
+themeBtn.addEventListener('click', () =>
+  applyTheme(document.documentElement.dataset.theme === 'dark' ? 'light' : 'dark'));
+
+// ── shared demo driver ──────────────────────────────────────────────────────
+// cfg: prefix ('m_'|'c_'), api ('zf_'|'zfc_'), factory (module promise fn),
+//      initArgs ($ -> array, seed appended), zeroThresh, badgeZero,
+//      badgeNonzero, readyMsg
+function setupDemo(cfg) {
+  const $ = id => document.getElementById(cfg.prefix + id);
+  const cv = $('cv'), ctx = cv.getContext('2d');
+  const badge = $('badge'), status_ = $('status');
+  const go = $('go'), replayBtn = $('replay'), pbar = $('pbar');
+  const scrub = $('scrub'), tlabel = $('tlabel'), vlabel = $('vlabel');
+  const LO = -3.5, HI = 3.5;
+
+  let Module = null;
+  let grid = null, frames = [], smax = 1, playing = false, timer = null;
+
+  const px = x => (x - LO) / (HI - LO) * cv.width;
+  const py = y => cv.height - (y - LO) / (HI - LO) * cv.height;
+
+  function speedColor(s) {
+    const r = Math.min(1, s / smax);
+    const hue = 212 * (1 - r);
+    return `hsl(${hue}, 90%, ${55 + 10 * (1 - r)}%)`;
+  }
+
+  function draw(k) {
+    const f = frames[k];
+    if (!f) return;
+    ctx.clearRect(0, 0, cv.width, cv.height);
+
+    if (grid) {
+      ctx.strokeStyle = 'rgba(255, 80, 80, 0.55)';
+      ctx.lineWidth = 1;
+      const SC = 22;
+      for (let j = 0; j < grid.x.length; j++) {
+        const u = f.vec[2 * j], v = f.vec[2 * j + 1];
+        if (Math.hypot(u, v) < 0.02) continue;
+        const x0 = px(grid.x[j]), y0 = py(grid.y[j]);
+        const x1 = x0 + u * SC, y1 = y0 - v * SC;
+        ctx.beginPath(); ctx.moveTo(x0, y0); ctx.lineTo(x1, y1); ctx.stroke();
+        const a = Math.atan2(y1 - y0, x1 - x0);
+        ctx.beginPath();
+        ctx.moveTo(x1, y1);
+        ctx.lineTo(x1 - 4 * Math.cos(a - 0.4), y1 - 4 * Math.sin(a - 0.4));
+        ctx.moveTo(x1, y1);
+        ctx.lineTo(x1 - 4 * Math.cos(a + 0.4), y1 - 4 * Math.sin(a + 0.4));
+        ctx.stroke();
+      }
+    }
+
+    for (let j = 0; j < f.pts.length; j += 3) {
+      ctx.fillStyle = speedColor(f.pts[j + 2]);
+      ctx.beginPath();
+      ctx.arc(px(f.pts[j]), py(f.pts[j + 1]), 3.2, 0, 6.2832);
+      ctx.fill();
+    }
+
+    tlabel.textContent = 't = ' + f.t.toFixed(2);
+    vlabel.textContent = 'mean ‖v‖ = ' + f.mean_v.toFixed(3);
+    scrub.value = k;
+  }
+
+  function showMidBadge(f) {
+    const isZero = f.mean_v < cfg.zeroThresh * smax;
+    badge.innerHTML = `t = 0.50 &nbsp; mean ‖v‖ = ${f.mean_v.toFixed(3)}<br>` +
+      (isZero ? `<span class="zero">${cfg.badgeZero}</span>`
+              : `<span class="nonzero">${cfg.badgeNonzero}</span>`);
+    badge.style.display = 'block';
+  }
+
+  function play() {
+    if (!frames.length) return;
+    playing = true;
+    replayBtn.disabled = true;
+    badge.style.display = 'none';
+    const mid = Math.round((frames.length - 1) / 2);
+    let k = 0;
+    clearInterval(timer);
+    timer = setInterval(() => {
+      draw(k);
+      if (k === mid) {
+        clearInterval(timer);
+        showMidBadge(frames[mid]);
+        setTimeout(() => {
+          badge.style.display = 'none';
+          timer = setInterval(step, 90);
+        }, 2200);
+      }
+      k++;
+      if (k >= frames.length) finish();
+      function step() {
+        draw(k);
+        k++;
+        if (k >= frames.length) finish();
+      }
+    }, 90);
+    function finish() {
+      clearInterval(timer);
+      playing = false;
+      replayBtn.disabled = false;
+      status_.textContent = 'done — scrub the timeline or replay.';
+      scrub.disabled = false;
+    }
+  }
+
+  scrub.addEventListener('input', () => {
+    if (playing) return;
+    badge.style.display = 'none';
+    const k = +scrub.value;
+    draw(k);
+    if (frames[k] && Math.abs(frames[k].t - 0.5) < 1e-6) showMidBadge(frames[k]);
+  });
+
+  replayBtn.addEventListener('click', play);
+
+  const raf = () => new Promise(r => requestAnimationFrame(r));
+
+  go.addEventListener('click', async () => {
+    if (!Module) return;
+    const total = +$('iters').value;
+    go.disabled = true; replayBtn.disabled = true; scrub.disabled = true;
+    badge.style.display = 'none';
+    frames = []; grid = null;
+
+    Module['_' + cfg.api + 'init'](...cfg.initArgs($), (Math.random() * 1e9) | 0);
+    let done = 0;
+    const chunk = 50;
+    pbar.max = total;
+    pbar.value = 0;
+    pbar.style.display = 'block';
+    while (done < total) {
+      const loss = Module['_' + cfg.api + 'train'](chunk);
+      done += chunk;
+      pbar.value = done;
+      status_.textContent = `training in browser... iter ${done}/${total}, loss ${loss.toFixed(3)}`;
+      await raf();
+    }
+    pbar.style.display = 'none';
+
+    status_.textContent = 'integrating particles...';
+    await raf();
+    Module['_' + cfg.api + 'animate']();
+
+    const M = Module['_' + cfg.api + 'M'](), K = Module['_' + cfg.api + 'K'](),
+          G = Module['_' + cfg.api + 'G']();
+    const heap = Module.HEAPF32;
+    const gptr = Module['_' + cfg.api + 'grid']() >> 2;
+    grid = { x: heap.slice(gptr, gptr + G * G), y: heap.slice(gptr + G * G, gptr + 2 * G * G) };
+    const pptr = Module['_' + cfg.api + 'pts']() >> 2;
+    const vptr = Module['_' + cfg.api + 'vec']() >> 2;
+    const mptr = Module['_' + cfg.api + 'meanv']() >> 2;
+    for (let k = 0; k <= K; k++) {
+      frames.push({
+        t: k / K,
+        mean_v: heap[mptr + k],
+        pts: heap.slice(pptr + k * M * 3, pptr + (k + 1) * M * 3),
+        vec: heap.slice(vptr + k * G * G * 2, vptr + (k + 1) * G * G * 2),
+      });
+    }
+    const speeds = [];
+    for (const f of frames)
+      for (let j = 2; j < f.pts.length; j += 3) speeds.push(f.pts[j]);
+    speeds.sort((a, b) => a - b);
+    smax = Math.max(0.3, speeds[Math.floor(speeds.length * 0.95)] || 1);
+    scrub.max = frames.length - 1;
+    status_.textContent = 'playing...';
+    play();
+    go.disabled = false;
+  });
+
+  cfg.factory().then(m => {
+    Module = m;
+    status_.textContent = 'ready — ' + cfg.readyMsg;
+  }).catch(e => { status_.textContent = 'WebAssembly failed to load: ' + e; });
+}
+
+if (typeof createZF === 'undefined' || typeof createZFC === 'undefined') {
+  document.getElementById('m_status').textContent =
+    'This is the build TEMPLATE (shell_combined.html) — open zeroflow_combined_standalone.html instead, or run build.sh.';
+  document.getElementById('c_status').textContent = '';
+} else {
+  setupDemo({
+    prefix: 'm_', api: 'zf_', factory: createZF,
+    initArgs: $ => [+$('src').value, +$('tgt').value],
+    zeroThresh: 0.15,
+    badgeZero: 'ZERO VELOCITY',
+    badgeNonzero: 'v ≠ 0 → p<sub>source</sub> ≠ p<sub>target</sub>',
+    readyMsg: 'pick distributions and press Start.',
+  });
+  setupDemo({
+    prefix: 'c_', api: 'zfc_', factory: createZFC,
+    initArgs: $ => [+$('fsel').value],
+    zeroThresh: 0.12,
+    badgeZero: 'ZERO VELOCITY — f(Y) is sufficient',
+    badgeNonzero: 'v ≠ 0 → f(Y) is not sufficient',
+    readyMsg: 'pick a statistic and press Start.',
+  });
+}
+</script>
+</body>
+</html>
