@@ -15,13 +15,15 @@
     color-scheme: light;
     --bg: #fffdf8; --fg: #1c1c1c; --muted: #57534a; --accent: #7b1e1e;
     --border: #b9b2a4; --hairline: #d8d2c4; --btn: #f5f1e8; --btn-h: #ece5d6;
-    --field: #fff;
+    --field: #fff; --canvas-bg: #f7f4ed;
+    --c-slow: #1f6fd0; --c-mid: #b8931f; --c-fast: #c53232;
   }
   :root[data-theme="dark"] {
     color-scheme: dark;
     --bg: #16181d; --fg: #e6e2d8; --muted: #a39d8f; --accent: #c97b6f;
     --border: #4a463e; --hairline: #363329; --btn: #23262d; --btn-h: #2c3038;
-    --field: #1c1f25;
+    --field: #1c1f25; --canvas-bg: #101418;
+    --c-slow: #4da3ff; --c-mid: #ffd24d; --c-fast: #ff4d4d;
   }
   body {
     font-family: "Charter", "Bitstream Charter", "Source Serif 4", Georgia, "Times New Roman", serif;
@@ -63,7 +65,7 @@
   button:hover:enabled { background: var(--btn-h); }
   button:disabled { opacity: 0.5; cursor: wait; }
   .stage { position: relative; }
-  canvas { border: 1px solid var(--border); background: #101418; display: block; }
+  canvas { border: 1px solid var(--border); background: var(--canvas-bg); display: block; }
   .badge {
     position: absolute; top: 12px; left: 50%; transform: translateX(-50%);
     padding: 0.4rem 1rem; border-radius: 2px; font-weight: bold;
@@ -147,11 +149,11 @@ dataset twice and watch everything freeze blue at the midpoint.</p>
     <progress id="m_pbar" class="pbar" max="1" value="0"></progress>
     <div class="legend">
       particle speed:
-      <span class="swatch" style="background:#4da3ff"></span> 0 (still)
+      <span class="swatch" style="background:var(--c-slow)"></span> 0 (still)
       →
-      <span class="swatch" style="background:#ffd24d"></span>
+      <span class="swatch" style="background:var(--c-mid)"></span>
       →
-      <span class="swatch" style="background:#ff4d4d"></span> fast<br>
+      <span class="swatch" style="background:var(--c-fast)"></span> fast<br>
       red arrows: learned velocity field \(v_t\)
     </div>
     <div id="m_status" class="status">loading WebAssembly module...</div>
@@ -219,11 +221,11 @@ statistic, e.g. \(\sigma(-2y)\), freezes everything blue at
     <div class="legend">
       horizontal: conditioning variable \(y\); vertical: \(x\)<br>
       particle speed:
-      <span class="swatch" style="background:#4da3ff"></span> 0 (still)
+      <span class="swatch" style="background:var(--c-slow)"></span> 0 (still)
       →
-      <span class="swatch" style="background:#ffd24d"></span>
+      <span class="swatch" style="background:var(--c-mid)"></span>
       →
-      <span class="swatch" style="background:#ff4d4d"></span> fast<br>
+      <span class="swatch" style="background:var(--c-fast)"></span> fast<br>
       red arrows: learned field \(v_t(z;\, f(\xi),\, \xi)\)
     </div>
     <div id="c_status" class="status">loading WebAssembly module...</div>
@@ -267,10 +269,13 @@ document.querySelectorAll('.tab').forEach(btn =>
 
 // ── theme switch ────────────────────────────────────────────────────────────
 const themeBtn = document.getElementById('themeToggle');
+const themeRedraws = [];   // each demo registers a redraw of its current frame
+const isDark = () => document.documentElement.dataset.theme === 'dark';
 function applyTheme(t) {
   document.documentElement.dataset.theme = t;
   themeBtn.textContent = t === 'dark' ? '☀ light' : '◑ dark';
   try { localStorage.setItem('zf-theme', t); } catch (e) {}
+  themeRedraws.forEach(f => f());
 }
 let theme0 = 'light';
 try {
@@ -302,7 +307,8 @@ function setupDemo(cfg) {
   function speedColor(s) {
     const r = Math.min(1, s / smax);
     const hue = 212 * (1 - r);
-    return `hsl(${hue}, 90%, ${55 + 10 * (1 - r)}%)`;
+    return isDark() ? `hsl(${hue}, 90%, ${55 + 10 * (1 - r)}%)`
+                    : `hsl(${hue}, 85%, ${40 + 8 * (1 - r)}%)`;
   }
 
   function draw(k) {
@@ -311,7 +317,7 @@ function setupDemo(cfg) {
     ctx.clearRect(0, 0, cv.width, cv.height);
 
     if (grid) {
-      ctx.strokeStyle = 'rgba(255, 80, 80, 0.55)';
+      ctx.strokeStyle = isDark() ? 'rgba(255, 80, 80, 0.55)' : 'rgba(178, 34, 34, 0.5)';
       ctx.lineWidth = 1;
       const SC = 22;
       for (let j = 0; j < grid.x.length; j++) {
@@ -449,6 +455,8 @@ function setupDemo(cfg) {
     play();
     go.disabled = false;
   });
+
+  themeRedraws.push(() => { if (frames.length) draw(+scrub.value); });
 
   cfg.factory().then(m => {
     Module = m;
