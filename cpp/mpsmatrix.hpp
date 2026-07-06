@@ -105,8 +105,9 @@ public:
     void eleminv(double l);
     Matrix<MPSfloat> eleminv(double l) const;
     Matrix<MPSfloat> rows(size_t start, size_t end) const;
-    // 2D submatrix (host-side; unified memory). Read form returns the block;
-    // write form copies M into the [rstart,rend) x [cstart,cend) region.
+    // 2D submatrix (GPU block copy, stays in the command stream). Read form
+    // returns the block; write form copies M into the
+    // [rstart,rend) x [cstart,cend) region.
     Matrix<MPSfloat> slice(size_t rstart, size_t rend, size_t cstart,
                            size_t cend) const;
     void slice(size_t rstart, size_t rend, size_t cstart, size_t cend,

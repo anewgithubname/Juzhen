@@ -3,6 +3,12 @@
 #include "mpsmatrix.hpp"
 #include "matrix.hpp"
 
+// Accelerate's SIMD out-of-place transpose: C (M x N, row-major) = A^T where A
+// is N x M row-major. Declared directly because <Accelerate/Accelerate.h>
+// would pull in a cblas.h that clashes with the OpenBLAS one already included.
+extern "C" void vDSP_mtrans(const float* A, long strideA, float* C, long strideC,
+                            unsigned long M, unsigned long N);
+
 Matrix<MPSfloat>::Matrix(const Matrix<float>& M)
 {
     static Profiler profiler("upload to MPS memory");
@@ -18,13 +24,8 @@ Matrix<MPSfloat>::Matrix(const Matrix<float>& M)
     mpsSynchronize(); // before the upload, make sure all the previous operations are done
     profiler.start();
     //change column major to row major
-    for (size_t i = 0; i < numrow; i++)
-    {
-        for (size_t j = 0; j < numcol; j++)
-        {
-            elements[i * numcol + j] = M.elements[j * numrow + i];
-        }
-    }
+    vDSP_mtrans((const float*)M.elements.get(), 1, (float*)elements.get(), 1,
+                numrow, numcol);
     profiler.end();
 }
 
@@ -102,13 +103,8 @@ Matrix<float> Matrix<MPSfloat>::to_host() const
     Matrix<float> M((name + "->host").c_str(), numrow, numcol, transpose);
     mpsSynchronize();
     //change row major to column major
-    for (size_t i = 0; i < numrow; i++)
-    {
-        for (size_t j = 0; j < numcol; j++)
-        {
-            M.elements[j * numrow + i] = elements[i * numcol + j];
-        }
-    }
+    vDSP_mtrans((const float*)elements.get(), 1, (float*)M.elements.get(), 1,
+                numcol, numrow);
     return M;
 }
 
@@ -135,9 +131,8 @@ Matrix<MPSfloat> Matrix<MPSfloat>::add(const Matrix<MPSfloat>& B, float s1, floa
     }
     Matrix<MPSfloat> C("add", numrow, numcol, transpose);
 
-    mpsAx_b((float*) elements.get(), 1.0, 0, (float*) C.elements.get(), numrow * numcol);
-    mpsAdd((float*) B.elements.get(), (float *) C.elements.get(), B.numrow, B.numcol, transpose != B.transpose, s2, s1);
-    
+    mpsAdd((float*) B.elements.get(), (float*) elements.get(), (float*) C.elements.get(),
+           B.numrow, B.numcol, transpose != B.transpose, s2, s1);
 
     return C;
 }
@@ -148,7 +143,8 @@ void Matrix<MPSfloat>::add(const Matrix<MPSfloat>& B, float s1, float s2) {
         throw std::invalid_argument("Matrix dimensions are not compatible");
     }
 
-    mpsAdd((float*) B.elements.get(), (float*) elements.get(), B.numrow, B.numcol, transpose != B.transpose, s2, s1);
+    mpsAdd((float*) B.elements.get(), (float*) elements.get(), (float*) elements.get(),
+           B.numrow, B.numcol, transpose != B.transpose, s2, s1);
 
 }
 
@@ -178,16 +174,15 @@ Matrix<MPSfloat> Matrix<MPSfloat>::eleminv(double l) const
 {
     // std::cout << "eleminv 1" << std::endl;
     Matrix<MPSfloat> M("reci", numrow, numcol, transpose);
-    mpsAx_b((float*) elements.get(), 1.0, 0, (float*) M.elements.get(), numrow * numcol);
-    mpsElemInv((float*) M.elements.get(), numrow * numcol, l);
+    mpsElemInv((float*) elements.get(), (float*) M.elements.get(), numrow * numcol, l);
     return M;
 }
 
 // M = M / l
 void Matrix<MPSfloat>::eleminv(double l)
 {
-    // std::cout << "eleminv 2" << std::endl; 
-    mpsElemInv((float*) elements.get(), numrow * numcol, l);
+    // std::cout << "eleminv 2" << std::endl;
+    mpsElemInv((float*) elements.get(), (float*) elements.get(), numrow * numcol, l);
 }
 
 Matrix<MPSfloat> Matrix<MPSfloat>::rows(size_t start, size_t end) const
@@ -220,9 +215,8 @@ Matrix<MPSfloat> hadmd(const Matrix<MPSfloat>& M1, const Matrix<MPSfloat>& M2){
     }
 
     Matrix<MPSfloat> result("hadmd", M1.numrow, M1.numcol, M1.transpose);
-    mpsAx_b((float*) M1.elements.get(), 1.0, 0.0, (float*) result.elements.get(), M1.numrow * M1.numcol);
-
-    mpsProduct((float*) M2.elements.get(), (float*) result.elements.get(), M2.numrow, M2.numcol, M1.transpose != M2.transpose);
+    mpsProduct((float*) M2.elements.get(), (float*) M1.elements.get(), (float*) result.elements.get(),
+               M2.numrow, M2.numcol, M1.transpose != M2.transpose);
     return result;
 }
 
@@ -233,7 +227,8 @@ Matrix<MPSfloat> hadmd(const Matrix<MPSfloat>& M1, Matrix<MPSfloat>&& M2){
         throw std::invalid_argument("Matrix dimensions are not compatible");
     }
 
-    mpsProduct((float*) M1.elements.get(), (float*) M2.elements.get(), M1.numrow, M1.numcol, M1.transpose != M2.transpose);
+    mpsProduct((float*) M1.elements.get(), (float*) M2.elements.get(), (float*) M2.elements.get(),
+               M1.numrow, M1.numcol, M1.transpose != M2.transpose);
     return std::move(M2);
 }
 
@@ -244,7 +239,8 @@ Matrix<MPSfloat> hadmd(Matrix<MPSfloat>&& M1, const Matrix<MPSfloat>& M2){
         throw std::invalid_argument("Matrix dimensions are not compatible");
     }
 
-    mpsProduct((float*) M2.elements.get(), (float*) M1.elements.get(), M2.numrow, M2.numcol, M1.transpose != M2.transpose);
+    mpsProduct((float*) M2.elements.get(), (float*) M1.elements.get(), (float*) M1.elements.get(),
+               M2.numrow, M2.numcol, M1.transpose != M2.transpose);
     return std::move(M1);
 }
 
@@ -285,92 +281,84 @@ Matrix<MPSfloat> Matrix<MPSfloat>::ones(size_t m, size_t n)
 
 Matrix<MPSfloat> tanh(const Matrix<MPSfloat>& M){
     Matrix<MPSfloat> tanhM("tanhM", M.numrow, M.numcol, M.transpose);
-    mpsAx_b((float*) M.elements.get(), 1.0, 0, (float*) tanhM.elements.get(), M.numrow * M.numcol);
-    mpsTanh((float*) tanhM.elements.get(), M.numrow * M.numcol);
+    mpsTanh((float*) M.elements.get(), (float*) tanhM.elements.get(), M.numrow * M.numcol);
     return tanhM;
 }
 Matrix<MPSfloat> tanh(Matrix<MPSfloat>&& M){
-    mpsTanh((float*) M.elements.get(), M.numrow * M.numcol);
+    mpsTanh((float*) M.elements.get(), (float*) M.elements.get(), M.numrow * M.numcol);
     return std::move(M);
 }
 Matrix<MPSfloat> d_tanh(const Matrix<MPSfloat>& M){
     Matrix<MPSfloat> d_tanhM("d_tanhM", M.numrow, M.numcol, M.transpose);
-    mpsAx_b((float*) M.elements.get(), 1.0, 0, (float*) d_tanhM.elements.get(), M.numrow * M.numcol);
-    mpsdTanh((float*) d_tanhM.elements.get(), M.numrow * M.numcol);
+    mpsdTanh((float*) M.elements.get(), (float*) d_tanhM.elements.get(), M.numrow * M.numcol);
     return d_tanhM;
 }
 Matrix<MPSfloat> d_tanh(Matrix<MPSfloat>&& M){
-    mpsdTanh((float*) M.elements.get(), M.numrow * M.numcol);
+    mpsdTanh((float*) M.elements.get(), (float*) M.elements.get(), M.numrow * M.numcol);
     return std::move(M);
 }
 
 Matrix<MPSfloat> sqrt(const Matrix<MPSfloat>& M){
     Matrix<MPSfloat> sqrtM("sqrtM", M.numrow, M.numcol, M.transpose);
-    mpsAx_b((float*) M.elements.get(), 1.0, 0, (float*) sqrtM.elements.get(), M.numrow * M.numcol);
-    mpsSqrt((float*) sqrtM.elements.get(), M.numrow * M.numcol);
+    mpsSqrt((float*) M.elements.get(), (float*) sqrtM.elements.get(), M.numrow * M.numcol);
     return sqrtM;
 }
 Matrix<MPSfloat> sqrt(Matrix<MPSfloat>&& M){
-    mpsSqrt((float*) M.elements.get(), M.numrow * M.numcol);
+    mpsSqrt((float*) M.elements.get(), (float*) M.elements.get(), M.numrow * M.numcol);
     return std::move(M);
 }
 
 Matrix<MPSfloat> exp(const Matrix<MPSfloat>& M){
     Matrix<MPSfloat> expM("expM", M.numrow, M.numcol, M.transpose);
-    mpsAx_b((float*) M.elements.get(), 1.0, 0, (float*) expM.elements.get(), M.numrow * M.numcol);
-    mpsExp((float*) expM.elements.get(), M.numrow * M.numcol);
+    mpsExp((float*) M.elements.get(), (float*) expM.elements.get(), M.numrow * M.numcol);
     return expM;
 }
 
 Matrix<MPSfloat> exp(Matrix<MPSfloat>&& M){
-    mpsExp((float*) M.elements.get(), M.numrow * M.numcol);
+    mpsExp((float*) M.elements.get(), (float*) M.elements.get(), M.numrow * M.numcol);
     return std::move(M);
 }
 
 Matrix<MPSfloat> log(const Matrix<MPSfloat>& M){
     Matrix<MPSfloat> logM("logM", M.numrow, M.numcol, M.transpose);
-    mpsAx_b((float*) M.elements.get(), 1.0, 0, (float*) logM.elements.get(), M.numrow * M.numcol);
-    mpsLog((float*) logM.elements.get(), M.numrow * M.numcol);
+    mpsLog((float*) M.elements.get(), (float*) logM.elements.get(), M.numrow * M.numcol);
     return logM;
 }
 
 Matrix<MPSfloat> log(Matrix<MPSfloat>&& M){
-    mpsLog((float*) M.elements.get(), M.numrow * M.numcol);
+    mpsLog((float*) M.elements.get(), (float*) M.elements.get(), M.numrow * M.numcol);
     return std::move(M);
 }
 
 Matrix<MPSfloat> square(const Matrix<MPSfloat>& M){
     Matrix<MPSfloat> squareM("squareM", M.numrow, M.numcol, M.transpose);
-    mpsAx_b((float*) M.elements.get(), 1.0, 0, (float*) squareM.elements.get(), M.numrow * M.numcol);
-    mpsSquare((float*) squareM.elements.get(), M.numrow * M.numcol);
+    mpsSquare((float*) M.elements.get(), (float*) squareM.elements.get(), M.numrow * M.numcol);
     return squareM;
 }
 
 Matrix<MPSfloat> square(Matrix<MPSfloat>&& M){
-    mpsSquare((float*) M.elements.get(), M.numrow * M.numcol);
+    mpsSquare((float*) M.elements.get(), (float*) M.elements.get(), M.numrow * M.numcol);
     return std::move(M);
 }
 
 Matrix<MPSfloat> relu(const Matrix<MPSfloat>& M){
     Matrix<MPSfloat> reluM("reluM", M.numrow, M.numcol, M.transpose);
-    mpsAx_b((float*) M.elements.get(), 1.0, 0, (float*) reluM.elements.get(), M.numrow * M.numcol);
-    mpsRelu((float*) reluM.elements.get(), M.numrow * M.numcol);
+    mpsRelu((float*) M.elements.get(), (float*) reluM.elements.get(), M.numrow * M.numcol);
     return reluM;
 }
 
 Matrix<MPSfloat> relu(Matrix<MPSfloat>&& M){
-    mpsRelu((float*) M.elements.get(), M.numrow * M.numcol);
+    mpsRelu((float*) M.elements.get(), (float*) M.elements.get(), M.numrow * M.numcol);
     return std::move(M);
 }
 
 Matrix<MPSfloat> d_relu(const Matrix<MPSfloat>& M){
     Matrix<MPSfloat> d_reluM("d_reluM", M.numrow, M.numcol, M.transpose);
-    mpsAx_b((float*) M.elements.get(), 1.0, 0, (float*) d_reluM.elements.get(), M.numrow * M.numcol);
-    mpsdRelu((float*) d_reluM.elements.get(), M.numrow * M.numcol);
+    mpsdRelu((float*) M.elements.get(), (float*) d_reluM.elements.get(), M.numrow * M.numcol);
     return d_reluM;
 }
 Matrix<MPSfloat> d_relu(Matrix<MPSfloat>&& M){
-    mpsdRelu((float*) M.elements.get(), M.numrow * M.numcol);
+    mpsdRelu((float*) M.elements.get(), (float*) M.elements.get(), M.numrow * M.numcol);
     return std::move(M);
 }
 
@@ -497,19 +485,23 @@ Matrix<float> topk(const Matrix<MPSfloat>& M, int k, int dim){
 Matrix<MPSfloat> Matrix<MPSfloat>::slice(size_t rstart, size_t rend,
                                          size_t cstart, size_t cend) const {
     Matrix<MPSfloat> out("submatrix", rend - rstart, cend - cstart);
-    mpsSynchronize();   // *this may be an in-flight GPU result; wait before host reads
-    for (size_t j = cstart; j < cend; j++)
-        for (size_t i = rstart; i < rend; i++)
-            out.elem(i - rstart, j - cstart) = elem(i, j);
+    mpsCopyMatrixBlock((const float*)elements.get(), (float*)out.elements.get(),
+                       (int)num_row(), (int)num_col(), (bool)get_transpose(),
+                       (int)rstart, (int)cstart,
+                       (int)(rend - rstart), (int)(cend - cstart),
+                       (int)out.num_row(), (int)out.num_col(), (bool)out.get_transpose(),
+                       0, 0);
     return out;
 }
 
 void Matrix<MPSfloat>::slice(size_t rstart, size_t rend, size_t cstart,
                              size_t cend, const Matrix<MPSfloat>& M) {
-    mpsSynchronize();   // wait for pending GPU work on *this and M before host copy
-    for (size_t j = cstart; j < cend; j++)
-        for (size_t i = rstart; i < rend; i++)
-            elem(i, j) = M.elem(i - rstart, j - cstart);
+    mpsCopyMatrixBlock((const float*)M.elements.get(), (float*)elements.get(),
+                       (int)M.num_row(), (int)M.num_col(), (bool)M.get_transpose(),
+                       0, 0,
+                       (int)(rend - rstart), (int)(cend - cstart),
+                       (int)num_row(), (int)num_col(), (bool)get_transpose(),
+                       (int)rstart, (int)cstart);
 }
 
 std::ostream& operator <<(std::ostream& os, const Matrix<MPSfloat>& M) {

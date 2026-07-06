@@ -2108,6 +2108,20 @@ namespace Juzhen
 
 	// ── Transformer Layer ─────────────────────────────────────────────────
 
+#ifdef APPLE_SILICON
+	// Native Metal column-softmax. The generic template below goes through
+	// reduce()/elemwise(), which on the MPS backend fall back to a full
+	// GPU→host→GPU round-trip per call; this overload keeps the whole
+	// operation on the GPU as a single fused kernel.
+	inline Matrix<MPSfloat> col_softmax(const Matrix<MPSfloat>& M) {
+		Matrix<MPSfloat> out("softmax", M.num_row(), M.num_col());
+		mpsSoftmaxCol((const float*)M.data(), (float*)out.data(),
+		              (int)M.num_row(), (int)M.num_col(),
+		              (bool)M.get_transpose());
+		return out;
+	}
+#endif
+
 	// Column-wise softmax: softmax along dim-0 (each column independently).
 	// M shape: (rows, cols).  Returns same shape.
 	template <class D>
@@ -2380,6 +2394,24 @@ namespace Juzhen
 				}
 			}
 #endif
+#ifdef APPLE_SILICON
+			// Fused Metal kernel; same restriction (plain non-transposed input)
+			// and same cached xhat/inv_std contract as the CUDA path.
+			if constexpr (std::is_same_v<D, MPSfloat>) {
+				if (!x.get_transpose()) {
+					Matrix<D> y("ln_y", dim, x.num_col());
+					mpsLayerNormForward(
+						reinterpret_cast<const float*>(x.data()),
+						reinterpret_cast<const float*>(gamma.data()),
+						reinterpret_cast<const float*>(beta.data()),
+						const_cast<float*>(reinterpret_cast<const float*>(y.data())),
+						const_cast<float*>(reinterpret_cast<const float*>(cached_xhat.data())),
+						const_cast<float*>(reinterpret_cast<const float*>(cached_inv.data())),
+						dim, (int)x.num_col());
+					return y;
+				}
+			}
+#endif
 			const float invdim = 1.0f / (float)dim;
 			auto mu  = sum(x, 0) * invdim;                       // (1,N) column means
 			auto xc  = x - ones_d1 * mu;                         // (dim,N) centered
@@ -2398,6 +2430,20 @@ namespace Juzhen
 			if constexpr (std::is_same_v<D, CUDAfloat>) {
 				if (!dy.get_transpose()) {
 					cuda_layernorm_backward(
+						reinterpret_cast<const float*>(dy.data()),
+						reinterpret_cast<const float*>(gamma.data()),
+						reinterpret_cast<const float*>(cached_xhat.data()),
+						reinterpret_cast<const float*>(cached_inv.data()),
+						const_cast<float*>(reinterpret_cast<const float*>(dx.data())),
+						dim, (int)dy.num_col());
+					fused = true;
+				}
+			}
+#endif
+#ifdef APPLE_SILICON
+			if constexpr (std::is_same_v<D, MPSfloat>) {
+				if (!dy.get_transpose()) {
+					mpsLayerNormBackward(
 						reinterpret_cast<const float*>(dy.data()),
 						reinterpret_cast<const float*>(gamma.data()),
 						reinterpret_cast<const float*>(cached_xhat.data()),
@@ -2500,6 +2546,19 @@ namespace Juzhen
 						const_cast<float*>(reinterpret_cast<const float*>(y.data())),
 						reinterpret_cast<const float*>(b.data()),
 						(int)y.num_row(), y.num_row() * y.num_col());
+					return;
+				}
+			}
+#endif
+#ifdef APPLE_SILICON
+			if constexpr (std::is_same_v<D, MPSfloat>) {
+				if (!y.get_transpose()) {
+					// Row-major broadcast: the kernel maps idx/N to the bias
+					// row (the CUDA kernel uses idx%rows for column-major).
+					mpsAddBias(
+						const_cast<float*>(reinterpret_cast<const float*>(y.data())),
+						reinterpret_cast<const float*>(b.data()),
+						(int)y.num_col(), (int)(y.num_row() * y.num_col()));
 					return;
 				}
 			}
@@ -2639,6 +2698,42 @@ namespace Juzhen
 				}
 			} else
 #endif
+#ifdef APPLE_SILICON
+			if constexpr (std::is_same_v<D, MPSfloat>) {
+				// Batched multi-head attention (mirrors the CUDA path): all
+				// batchN*num_heads (head, sequence) blocks go through batched
+				// MPS GEMMs and fused kernels instead of a per-block slice
+				// loop. Q/K/V are repacked so each block is a contiguous
+				// (seq_len x d_h) matrix holding that block's projection
+				// transposed; cached_A holds the softmaxed scores in the same
+				// packed batch layout (same element count as its declared
+				// (seq_len, seq_len*batchN*heads) shape).
+				const int BH = batchN * num_heads;
+				auto p = [](const Matrix<D>& m) {
+					return const_cast<float*>(reinterpret_cast<const float*>(m.data()));
+				};
+				Matrix<D> Qp("Qp", (size_t)BH * seq_len, d_h);
+				Matrix<D> Kp("Kp", (size_t)BH * seq_len, d_h);
+				Matrix<D> Vp("Vp", (size_t)BH * seq_len, d_h);
+				mpsAttnPack(p(cached_Q), p(Qp), d_h, num_heads, seq_len, batchN);
+				mpsAttnPack(p(cached_K), p(Kp), d_h, num_heads, seq_len, batchN);
+				mpsAttnPack(p(cached_V), p(Vp), d_h, num_heads, seq_len, batchN);
+
+				// scores_i = scale * Qp_i * Kp_i^T   — batch of (seq, seq)
+				mpsGemmBatched(p(Qp), p(Kp), p(attn_scores_scratch), BH,
+				               seq_len, d_h, seq_len, d_h, false, true, scale);
+				if (causal)
+					mpsCausalMaskBatched(p(attn_scores_scratch), seq_len, BH, -1e9f);
+				// A_i = softmax(scores_i) over keys (row-wise in packed layout)
+				mpsSoftmaxRowsBatched(p(attn_scores_scratch), p(cached_A),
+				                      seq_len, BH * seq_len);
+				// Hp_i = A_i * Vp_i  (seq, d_h) = H_i^T; unpack into cached_H
+				Matrix<D> Hp("Hp", (size_t)BH * seq_len, d_h);
+				mpsGemmBatched(p(cached_A), p(Vp), p(Hp), BH,
+				               seq_len, seq_len, seq_len, d_h, false, false, 1.0f);
+				mpsAttnUnpack(p(Hp), p(cached_H), d_h, num_heads, seq_len, batchN);
+			} else
+#endif
 			{
 				for (int hh = 0; hh < num_heads; ++hh) {
 					const int r0 = hh * d_h;
@@ -2654,15 +2749,18 @@ namespace Juzhen
 						// Causal masking: for query row, disallow future keys col > row.
 						if (causal) {
 #ifdef APPLE_SILICON
-							// `scores` is an async GPU (Metal) matmul result. The
-							// mask below writes it via host elem(); without first
-							// waiting for the GEMM, the in-flight kernel overwrites
-							// those host writes and the mask is lost.
-							mpsSynchronize();
+							if constexpr (std::is_same_v<D, MPSfloat>) {
+								// GPU mask kernel: stays in the command stream, so
+								// no host sync per (head, batch) is needed.
+								mpsCausalMask((float*)scores.data(), seq_len,
+								              (bool)scores.get_transpose(), -1e9f);
+							} else
 #endif
-							for (int row = 0; row < seq_len; ++row) {
-								for (int col = row + 1; col < seq_len; ++col) {
-									scores.elem(row, col) = -1e9f;
+							{
+								for (int row = 0; row < seq_len; ++row) {
+									for (int col = row + 1; col < seq_len; ++col) {
+										scores.elem(row, col) = -1e9f;
+									}
 								}
 							}
 						}
@@ -2805,6 +2903,47 @@ namespace Juzhen
 						dk_ptr + hh * d_h, d_k, stride_qkv,
 						batchN));
 				}
+			} else
+#endif
+#ifdef APPLE_SILICON
+			if constexpr (std::is_same_v<D, MPSfloat>) {
+				// Batched attention backward, mirroring the batched forward:
+				// cached_A already holds the packed softmax batch. All math is
+				// the packed-transposed form of the per-block formulas below.
+				const int BH = batchN * num_heads;
+				auto p = [](const Matrix<D>& m) {
+					return const_cast<float*>(reinterpret_cast<const float*>(m.data()));
+				};
+				Matrix<D> Qp("Qp", (size_t)BH * seq_len, d_h);
+				Matrix<D> Kp("Kp", (size_t)BH * seq_len, d_h);
+				Matrix<D> Vp("Vp", (size_t)BH * seq_len, d_h);
+				Matrix<D> dHp("dHp", (size_t)BH * seq_len, d_h);
+				mpsAttnPack(p(cached_Q), p(Qp), d_h, num_heads, seq_len, batchN);
+				mpsAttnPack(p(cached_K), p(Kp), d_h, num_heads, seq_len, batchN);
+				mpsAttnPack(p(cached_V), p(Vp), d_h, num_heads, seq_len, batchN);
+				mpsAttnPack(p(dH), p(dHp), d_h, num_heads, seq_len, batchN);
+
+				// dVp_i = A_i^T * dHp_i          (seq, d_h)
+				Matrix<D> dVp("dVp", (size_t)BH * seq_len, d_h);
+				mpsGemmBatched(p(cached_A), p(dHp), p(dVp), BH,
+				               seq_len, seq_len, seq_len, d_h, true, false, 1.0f);
+				// dA_i = dHp_i * Vp_i^T          (seq, seq)
+				mpsGemmBatched(p(dHp), p(Vp), p(attn_dAiT_scratch), BH,
+				               seq_len, d_h, seq_len, d_h, false, true, 1.0f);
+				// dS_i = A_i ⊙ (dA_i − rowsum(A_i ⊙ dA_i)) * scale
+				mpsSoftmaxBackwardRowsBatched(p(cached_A), p(attn_dAiT_scratch),
+				                              p(attn_dS_scratch), seq_len,
+				                              BH * seq_len, scale);
+				// dQp_i = dS_i * Kp_i ;  dKp_i = dS_i^T * Qp_i   (seq, d_h)
+				Matrix<D> dQp("dQp", (size_t)BH * seq_len, d_h);
+				Matrix<D> dKp("dKp", (size_t)BH * seq_len, d_h);
+				mpsGemmBatched(p(attn_dS_scratch), p(Kp), p(dQp), BH,
+				               seq_len, seq_len, seq_len, d_h, false, false, 1.0f);
+				mpsGemmBatched(p(attn_dS_scratch), p(Qp), p(dKp), BH,
+				               seq_len, seq_len, seq_len, d_h, true, false, 1.0f);
+				mpsAttnUnpack(p(dQp), p(dQ), d_h, num_heads, seq_len, batchN);
+				mpsAttnUnpack(p(dKp), p(dK), d_h, num_heads, seq_len, batchN);
+				mpsAttnUnpack(p(dVp), p(dV), d_h, num_heads, seq_len, batchN);
 			} else
 #endif
 			{

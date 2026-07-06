@@ -187,6 +187,24 @@ Matrix<T> adam_update(Matrix<T> &&g, adam_state<T> &state){
         }
     }
 #endif
+#ifdef APPLE_SILICON
+    // Fused Metal Adam step (elementwise, so layout is irrelevant beyond the
+    // transpose-flag guard); replaces ~12 matrix ops and their temporaries.
+    if constexpr (std::is_same_v<T, MPSfloat>) {
+        if (!g.get_transpose()) {
+            const size_t n = g.num_row() * g.num_col();
+            const float bc1 = 1.0f / (1.0f - powf(beta1, (float)iteration));
+            const float bc2 = 1.0f / (1.0f - powf(beta2, (float)iteration));
+            mpsAdamUpdate(
+                const_cast<float*>(reinterpret_cast<const float*>(g.data())),
+                const_cast<float*>(reinterpret_cast<const float*>(m.data())),
+                const_cast<float*>(reinterpret_cast<const float*>(v.data())),
+                alpha, beta1, beta2, eps, bc1, bc2, (int)n);
+            iteration++;
+            return std::move(g);
+        }
+    }
+#endif
 
     m = beta1 * m + (1 - beta1) * g;
     v = beta2 * v + (1 - beta2) * square(g);

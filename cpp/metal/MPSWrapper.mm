@@ -5,10 +5,11 @@
 #include "MPSWrapper.h"
 #include <iostream>
 #include <map>
+#include <tuple>
+#include <vector>
 
 static id<MTLDevice> device = nil;
 static id<MTLCommandQueue> commandQueue = nil;
-static id<MTLCommandBuffer> commandBuffer = nil;
 static id<MTLComputePipelineState> zeroPipelineState = nil;
 static id<MTLComputePipelineState> ax_bPipelineState = nil;
 static id<MTLComputePipelineState> matrixaddPipelineState = nil;
@@ -27,7 +28,24 @@ static id<MTLComputePipelineState> im2colPipelineState = nil;
 static id<MTLComputePipelineState> col2imPipelineState = nil;
 static id<MTLComputePipelineState> packFeatureMap2DPipelineState = nil;
 static id<MTLComputePipelineState> conv2dOutputAddBiasPipelineState = nil;
+static id<MTLComputePipelineState> softmaxColPipelineState = nil;
+static id<MTLComputePipelineState> causalMaskPipelineState = nil;
+static id<MTLComputePipelineState> attnPackPipelineState = nil;
+static id<MTLComputePipelineState> attnUnpackPipelineState = nil;
+static id<MTLComputePipelineState> causalMaskBatchedPipelineState = nil;
+static id<MTLComputePipelineState> softmaxRowsBatchedPipelineState = nil;
+static id<MTLComputePipelineState> softmaxBackwardRowsBatchedPipelineState = nil;
+static id<MTLComputePipelineState> layernormForwardPipelineState = nil;
+static id<MTLComputePipelineState> layernormBackwardPipelineState = nil;
+static id<MTLComputePipelineState> addBiasPipelineState = nil;
+static id<MTLComputePipelineState> adamUpdatePipelineState = nil;
 
+// MPS kernel objects are expensive to create and fully reusable across
+// encodes, so cache them by shape. Training loops repeat a handful of shapes,
+// making the hit rate ~100%; entries live until mpsDestroy().
+static std::map<std::tuple<bool, bool, int, int, int>, MPSMatrixMultiplication*> gemmKernelCache;
+static std::map<std::tuple<bool, bool, int, int, int, float>, MPSMatrixMultiplication*> gemmBatchedKernelCache;
+static std::map<std::tuple<bool, int, int>, MPSMatrixVectorMultiplication*> gemvKernelCache;
 
 MPSMatrixRandomMTGP32* randomKernel = nil;
 MPSMatrixRandomDistributionDescriptor* randDesc = nil;
@@ -36,9 +54,68 @@ MPSMatrixRandomDistributionDescriptor* randUniformDesc = nil;
 
 static std::map<float*, id<MTLBuffer>> bufferMap;
 
+// ── batched command encoding ────────────────────────────────────────────────
+// Ops encode into one shared command buffer instead of committing one buffer
+// per op; the buffer is committed when it fills up (kMaxEncodedOps) or on
+// mpsSynchronize(). Consecutive custom kernels share a single serial compute
+// encoder (serial dispatch keeps them ordered); MPS library kernels encode
+// directly into the command buffer, so the encoder is closed around them.
+// mpsSynchronize() waits on every committed-but-unfinished buffer, not just
+// the most recent one.
+static id<MTLCommandBuffer> commandBuffer = nil;               // open, not committed
+static id<MTLComputeCommandEncoder> computeEncoder = nil;      // open encoder on commandBuffer
+static std::vector<id<MTLCommandBuffer>> inflightBuffers;      // committed, not waited on
+static int encodedOps = 0;
+static const int kMaxEncodedOps = 256;
+
+static id<MTLCommandBuffer> currentCommandBuffer() {
+    if (commandBuffer == nil) {
+        commandBuffer = [[commandQueue commandBuffer] retain];
+    }
+    return commandBuffer;
+}
+
+static void endComputeEncoder() {
+    if (computeEncoder != nil) {
+        [computeEncoder endEncoding];
+        [computeEncoder release];
+        computeEncoder = nil;
+    }
+}
+
+static id<MTLComputeCommandEncoder> currentComputeEncoder() {
+    if (computeEncoder == nil) {
+        computeEncoder = [[currentCommandBuffer() computeCommandEncoder] retain];
+    }
+    return computeEncoder;
+}
+
+// MPS library kernels encode straight into the command buffer, which requires
+// no compute encoder to be open.
+static id<MTLCommandBuffer> currentMPSCommandBuffer() {
+    endComputeEncoder();
+    return currentCommandBuffer();
+}
+
+static void commitCurrent() {
+    endComputeEncoder();
+    if (commandBuffer != nil) {
+        [commandBuffer commit];
+        inflightBuffers.push_back(commandBuffer);  // keeps the retain
+        commandBuffer = nil;
+        encodedOps = 0;
+    }
+}
+
+// Call after encoding each op: periodically flush so long op sequences reach
+// the GPU before mpsSynchronize() is called.
+static void opEncoded() {
+    if (++encodedOps >= kMaxEncodedOps) commitCurrent();
+}
+
 void mpsInit() {
     device = MTLCreateSystemDefaultDevice();
-    
+
     commandQueue = [device newCommandQueue];
 
     // Random number distribution descriptor (Normal distribution)
@@ -46,7 +123,7 @@ void mpsInit() {
         [MPSMatrixRandomDistributionDescriptor normalDistributionDescriptorWithMean:0.0f standardDeviation:1.0f];
     randUniformDesc =
         [MPSMatrixRandomDistributionDescriptor uniformDistributionDescriptorWithMinimum:0.0f maximum:1.0f];
-    
+
     randomKernel = [[MPSMatrixRandomMTGP32 alloc] initWithDevice:device
                                                     destinationDataType:MPSDataTypeFloat32
                                                     seed:3334
@@ -72,19 +149,30 @@ void mpsInit() {
     id<MTLFunction> matrixaddKernel = [defaultLibrary newFunctionWithName:@"matrix_add"];
     id<MTLFunction> matrixcopyblockKernel = [defaultLibrary newFunctionWithName:@"matrix_copy_block"];
     id<MTLFunction> matrixproductKernel = [defaultLibrary newFunctionWithName:@"matrix_product"];
-    id<MTLFunction> expKernel = [defaultLibrary newFunctionWithName:@"inplace_exp_kernel"];
-    id<MTLFunction> logKernel = [defaultLibrary newFunctionWithName:@"inplace_log_kernel"];
-    id<MTLFunction> elemInvKernel = [defaultLibrary newFunctionWithName:@"inplace_elem_inv_kernel"];
-    id<MTLFunction> squareKernel = [defaultLibrary newFunctionWithName:@"inplace_square_kernel"];
-    id<MTLFunction> tanhKernel = [defaultLibrary newFunctionWithName:@"inplace_tanh_kernel"];
-    id<MTLFunction> dTanhKernel = [defaultLibrary newFunctionWithName:@"inplace_dtanh_kernel"];
-    id<MTLFunction> sqrtKernel = [defaultLibrary newFunctionWithName:@"inplace_sqrt_kernel"];
-    id<MTLFunction> reluKernel = [defaultLibrary newFunctionWithName:@"inplace_relu_kernel"];
-    id<MTLFunction> dreluKernel = [defaultLibrary newFunctionWithName:@"inplace_drelu_kernel"];
+    id<MTLFunction> expKernel = [defaultLibrary newFunctionWithName:@"exp_kernel"];
+    id<MTLFunction> logKernel = [defaultLibrary newFunctionWithName:@"log_kernel"];
+    id<MTLFunction> elemInvKernel = [defaultLibrary newFunctionWithName:@"elem_inv_kernel"];
+    id<MTLFunction> squareKernel = [defaultLibrary newFunctionWithName:@"square_kernel"];
+    id<MTLFunction> tanhKernel = [defaultLibrary newFunctionWithName:@"tanh_kernel"];
+    id<MTLFunction> dTanhKernel = [defaultLibrary newFunctionWithName:@"dtanh_kernel"];
+    id<MTLFunction> sqrtKernel = [defaultLibrary newFunctionWithName:@"sqrt_kernel"];
+    id<MTLFunction> reluKernel = [defaultLibrary newFunctionWithName:@"relu_kernel"];
+    id<MTLFunction> dreluKernel = [defaultLibrary newFunctionWithName:@"drelu_kernel"];
     id<MTLFunction> im2colKernel = [defaultLibrary newFunctionWithName:@"im2col_kernel"];
     id<MTLFunction> col2imKernel = [defaultLibrary newFunctionWithName:@"col2im_kernel"];
     id<MTLFunction> packFeatureMap2DKernel = [defaultLibrary newFunctionWithName:@"pack_feature_map_2d_kernel"];
     id<MTLFunction> conv2dOutputAddBiasKernel = [defaultLibrary newFunctionWithName:@"conv2d_output_add_bias_kernel"];
+    id<MTLFunction> softmaxColKernel = [defaultLibrary newFunctionWithName:@"softmax_col_kernel"];
+    id<MTLFunction> causalMaskKernel = [defaultLibrary newFunctionWithName:@"causal_mask_kernel"];
+    id<MTLFunction> attnPackKernel = [defaultLibrary newFunctionWithName:@"attn_pack_kernel"];
+    id<MTLFunction> attnUnpackKernel = [defaultLibrary newFunctionWithName:@"attn_unpack_kernel"];
+    id<MTLFunction> causalMaskBatchedKernel = [defaultLibrary newFunctionWithName:@"causal_mask_batched_kernel"];
+    id<MTLFunction> softmaxRowsBatchedKernel = [defaultLibrary newFunctionWithName:@"softmax_rows_batched_kernel"];
+    id<MTLFunction> softmaxBackwardRowsBatchedKernel = [defaultLibrary newFunctionWithName:@"softmax_backward_rows_batched_kernel"];
+    id<MTLFunction> layernormForwardKernel = [defaultLibrary newFunctionWithName:@"layernorm_forward_rm_kernel"];
+    id<MTLFunction> layernormBackwardKernel = [defaultLibrary newFunctionWithName:@"layernorm_backward_rm_kernel"];
+    id<MTLFunction> addBiasKernel = [defaultLibrary newFunctionWithName:@"add_bias_rm_kernel"];
+    id<MTLFunction> adamUpdateKernel = [defaultLibrary newFunctionWithName:@"adam_update_kernel"];
 
     // Create compute pipeline state
     zeroPipelineState = [device newComputePipelineStateWithFunction:zeroKernel error:&error];
@@ -105,11 +193,29 @@ void mpsInit() {
     col2imPipelineState = [device newComputePipelineStateWithFunction:col2imKernel error:&error];
     packFeatureMap2DPipelineState = [device newComputePipelineStateWithFunction:packFeatureMap2DKernel error:&error];
     conv2dOutputAddBiasPipelineState = [device newComputePipelineStateWithFunction:conv2dOutputAddBiasKernel error:&error];
+    softmaxColPipelineState = [device newComputePipelineStateWithFunction:softmaxColKernel error:&error];
+    causalMaskPipelineState = [device newComputePipelineStateWithFunction:causalMaskKernel error:&error];
+    attnPackPipelineState = [device newComputePipelineStateWithFunction:attnPackKernel error:&error];
+    attnUnpackPipelineState = [device newComputePipelineStateWithFunction:attnUnpackKernel error:&error];
+    causalMaskBatchedPipelineState = [device newComputePipelineStateWithFunction:causalMaskBatchedKernel error:&error];
+    softmaxRowsBatchedPipelineState = [device newComputePipelineStateWithFunction:softmaxRowsBatchedKernel error:&error];
+    softmaxBackwardRowsBatchedPipelineState = [device newComputePipelineStateWithFunction:softmaxBackwardRowsBatchedKernel error:&error];
+    layernormForwardPipelineState = [device newComputePipelineStateWithFunction:layernormForwardKernel error:&error];
+    layernormBackwardPipelineState = [device newComputePipelineStateWithFunction:layernormBackwardKernel error:&error];
+    addBiasPipelineState = [device newComputePipelineStateWithFunction:addBiasKernel error:&error];
+    adamUpdatePipelineState = [device newComputePipelineStateWithFunction:adamUpdateKernel error:&error];
 
 }
 
 void mpsDestroy() {
+    mpsSynchronize();   // drain any encoded/committed work before teardown
     bufferMap.clear();
+    for (auto& [key, kernel] : gemmKernelCache) [kernel release];
+    gemmKernelCache.clear();
+    for (auto& [key, kernel] : gemmBatchedKernelCache) [kernel release];
+    gemmBatchedKernelCache.clear();
+    for (auto& [key, kernel] : gemvKernelCache) [kernel release];
+    gemvKernelCache.clear();
     [randUniformDesc release];
     [randomUniformKernel release];
     [randDesc release];
@@ -132,6 +238,17 @@ void mpsDestroy() {
     [col2imPipelineState release];
     [packFeatureMap2DPipelineState release];
     [conv2dOutputAddBiasPipelineState release];
+    [softmaxColPipelineState release];
+    [causalMaskPipelineState release];
+    [attnPackPipelineState release];
+    [attnUnpackPipelineState release];
+    [causalMaskBatchedPipelineState release];
+    [softmaxRowsBatchedPipelineState release];
+    [softmaxBackwardRowsBatchedPipelineState release];
+    [layernormForwardPipelineState release];
+    [layernormBackwardPipelineState release];
+    [addBiasPipelineState release];
+    [adamUpdatePipelineState release];
     [commandQueue release];
     [device release];
     device = nil;
@@ -161,11 +278,11 @@ void mpsFree(float* ptr) {
  * @param C: M x N
  */
 void mpsGemm(const float* A, const float* B, float* C, int rowA, int colA, int rowB, int colB, bool transposeA, bool transposeB) {
-    commandBuffer = [commandQueue commandBuffer];
+    id<MTLCommandBuffer> cb = currentMPSCommandBuffer();
 
     auto matA = [[MPSMatrix alloc] initWithBuffer:bufferMap[(float *) A]
         descriptor:[MPSMatrixDescriptor matrixDescriptorWithRows:rowA columns:colA rowBytes:colA*sizeof(float) dataType:MPSDataTypeFloat32]];
-    
+
     auto matB = [[MPSMatrix alloc] initWithBuffer:bufferMap[(float *) B]
         descriptor:[MPSMatrixDescriptor matrixDescriptorWithRows:rowB columns:colB rowBytes:colB*sizeof(float) dataType:MPSDataTypeFloat32]];
 
@@ -175,39 +292,47 @@ void mpsGemm(const float* A, const float* B, float* C, int rowA, int colA, int r
     auto matC = [[MPSMatrix alloc] initWithBuffer:bufferMap[C]
         descriptor:[MPSMatrixDescriptor matrixDescriptorWithRows:resultRows columns:resultColumns rowBytes:resultColumns*sizeof(float) dataType:MPSDataTypeFloat32]];
 
-    auto gemmKernel = [[MPSMatrixMultiplication alloc] initWithDevice:device
-        transposeLeft:transposeA transposeRight:transposeB resultRows:resultRows resultColumns:resultColumns interiorColumns:interiorColumns alpha:1.0f beta:0.0f];
-    [gemmKernel encodeToCommandBuffer:commandBuffer leftMatrix:matA rightMatrix:matB resultMatrix:matC];
+    const auto key = std::make_tuple(transposeA, transposeB, resultRows, resultColumns, interiorColumns);
+    MPSMatrixMultiplication* gemmKernel;
+    auto it = gemmKernelCache.find(key);
+    if (it != gemmKernelCache.end()) {
+        gemmKernel = it->second;
+    } else {
+        gemmKernel = [[MPSMatrixMultiplication alloc] initWithDevice:device
+            transposeLeft:transposeA transposeRight:transposeB resultRows:resultRows resultColumns:resultColumns interiorColumns:interiorColumns alpha:1.0f beta:0.0f];
+        gemmKernelCache[key] = gemmKernel;
+    }
+    [gemmKernel encodeToCommandBuffer:cb leftMatrix:matA rightMatrix:matB resultMatrix:matC];
 
-    [commandBuffer commit];
+    opEncoded();
 
-    [matA release]; [matB release]; [matC release]; [gemmKernel release];
+    [matA release]; [matB release]; [matC release];
 }
 
-void mpsAdd(const float* A, float* B, int rowA, int colA, bool transpose, float a, float b){
+void mpsAdd(const float* A, const float* B, float* C, int rowA, int colA, bool transpose, float a, float b){
     id<MTLBuffer> bufferA = bufferMap[(float *) A];
-    id<MTLBuffer> bufferB = bufferMap[B];
+    id<MTLBuffer> bufferB = bufferMap[(float *) B];
+    id<MTLBuffer> bufferC = bufferMap[C];
 
-    commandBuffer = [commandQueue commandBuffer];
-    id<MTLComputeCommandEncoder> encoder = [commandBuffer computeCommandEncoder];
+    id<MTLComputeCommandEncoder> encoder = currentComputeEncoder();
 
     [encoder setComputePipelineState:matrixaddPipelineState];
     [encoder setBuffer:bufferA offset:0 atIndex:0];
     [encoder setBuffer:bufferB offset:0 atIndex:1];
-    [encoder setBytes:&rowA length:sizeof(int) atIndex:2];
-    [encoder setBytes:&colA length:sizeof(int) atIndex:3];
-    [encoder setBytes:&transpose length:sizeof(bool) atIndex:4];
-    [encoder setBytes:&a length:sizeof(float) atIndex:5];
-    [encoder setBytes:&b length:sizeof(float) atIndex:6];
+    [encoder setBuffer:bufferC offset:0 atIndex:2];
+    [encoder setBytes:&rowA length:sizeof(int) atIndex:3];
+    [encoder setBytes:&colA length:sizeof(int) atIndex:4];
+    [encoder setBytes:&transpose length:sizeof(bool) atIndex:5];
+    [encoder setBytes:&a length:sizeof(float) atIndex:6];
+    [encoder setBytes:&b length:sizeof(float) atIndex:7];
 
 
     MTLSize gridSize = MTLSizeMake(colA, rowA, 1); // Threads match matrix elements
     MTLSize threadGroupSize = MTLSizeMake(16, 16, 1); // Adjust for performance
-        
+
     [encoder dispatchThreads:gridSize threadsPerThreadgroup:threadGroupSize];
 
-    [encoder endEncoding];
-    [commandBuffer commit];
+    opEncoded();
 }
 
 void mpsCopyMatrixBlock(const float* src, float* dst,
@@ -219,8 +344,7 @@ void mpsCopyMatrixBlock(const float* src, float* dst,
     id<MTLBuffer> srcBuffer = bufferMap[(float*)src];
     id<MTLBuffer> dstBuffer = bufferMap[dst];
 
-    commandBuffer = [commandQueue commandBuffer];
-    id<MTLComputeCommandEncoder> encoder = [commandBuffer computeCommandEncoder];
+    id<MTLComputeCommandEncoder> encoder = currentComputeEncoder();
 
     [encoder setComputePipelineState:matrixcopyblockPipelineState];
     [encoder setBuffer:srcBuffer offset:0 atIndex:0];
@@ -240,46 +364,44 @@ void mpsCopyMatrixBlock(const float* src, float* dst,
     MTLSize threadGroupSize = MTLSizeMake(16, 16, 1);
     [encoder dispatchThreads:gridSize threadsPerThreadgroup:threadGroupSize];
 
-    [encoder endEncoding];
-    [commandBuffer commit];
+    opEncoded();
 }
 
-void mpsProduct(const float* A, float* B, int rowA, int colA, bool transpose){
+void mpsProduct(const float* A, const float* B, float* C, int rowA, int colA, bool transpose){
     id<MTLBuffer> bufferA = bufferMap[(float *) A];
-    id<MTLBuffer> bufferB = bufferMap[B];
+    id<MTLBuffer> bufferB = bufferMap[(float *) B];
+    id<MTLBuffer> bufferC = bufferMap[C];
 
-    commandBuffer = [commandQueue commandBuffer];
-    id<MTLComputeCommandEncoder> encoder = [commandBuffer computeCommandEncoder];
+    id<MTLComputeCommandEncoder> encoder = currentComputeEncoder();
 
     [encoder setComputePipelineState:matrixproductPipelineState];
     [encoder setBuffer:bufferA offset:0 atIndex:0];
     [encoder setBuffer:bufferB offset:0 atIndex:1];
-    [encoder setBytes:&rowA length:sizeof(int) atIndex:2];
-    [encoder setBytes:&colA length:sizeof(int) atIndex:3];
-    [encoder setBytes:&transpose length:sizeof(bool) atIndex:4];
+    [encoder setBuffer:bufferC offset:0 atIndex:2];
+    [encoder setBytes:&rowA length:sizeof(int) atIndex:3];
+    [encoder setBytes:&colA length:sizeof(int) atIndex:4];
+    [encoder setBytes:&transpose length:sizeof(bool) atIndex:5];
 
     MTLSize gridSize = MTLSizeMake(colA, rowA, 1); // Threads match matrix elements
     MTLSize threadGroupSize = MTLSizeMake(16, 16, 1); // Adjust for performance
 
     [encoder dispatchThreads:gridSize threadsPerThreadgroup:threadGroupSize];
 
-    [encoder endEncoding];
-    [commandBuffer commit];
+    opEncoded();
 }
 
 void mpsAx_b(const float* x, float a, float b, float* y, int N) {
     id<MTLBuffer> bufferX = bufferMap[(float *) x];
     id<MTLBuffer> bufferY = bufferMap[y];
 
-    commandBuffer = [commandQueue commandBuffer];
-    id<MTLComputeCommandEncoder> encoder = [commandBuffer computeCommandEncoder];
+    id<MTLComputeCommandEncoder> encoder = currentComputeEncoder();
 
     [encoder setComputePipelineState:ax_bPipelineState];
     [encoder setBuffer:bufferX offset:0 atIndex:0];
     [encoder setBuffer:bufferY offset:0 atIndex:1];
     [encoder setBytes:&a length:sizeof(float) atIndex:2];
     [encoder setBytes:&b length:sizeof(float) atIndex:3];
-    
+
     // Set up thread groups
     MTLSize gridSize = MTLSizeMake(N, 1, 1);
     NSUInteger threadGroupSize = ax_bPipelineState.maxTotalThreadsPerThreadgroup;
@@ -289,16 +411,14 @@ void mpsAx_b(const float* x, float a, float b, float* y, int N) {
 
     [encoder dispatchThreads:gridSize threadsPerThreadgroup:threadsPerGroup];
 
-    [encoder endEncoding];
-    [commandBuffer commit];
+    opEncoded();
 }
 
 void mpsRandn(float *A, int N){
     // Get GPU buffer associated with A
     id<MTLBuffer> bufferA = bufferMap[A];
 
-    // Create a command buffer to schedule GPU commands
-    commandBuffer = [commandQueue commandBuffer];
+    id<MTLCommandBuffer> cb = currentMPSCommandBuffer();
 
     // Matrix descriptor to wrap buffer A
     MPSMatrixDescriptor* matrixDesc = [MPSMatrixDescriptor matrixDescriptorWithRows:N columns:1
@@ -307,8 +427,8 @@ void mpsRandn(float *A, int N){
     auto matA = [[MPSMatrix alloc] initWithBuffer:bufferA descriptor:matrixDesc];
 
     // Encode random number generation into command buffer
-    [randomKernel encodeToCommandBuffer:commandBuffer destinationMatrix:matA];
-    [commandBuffer commit];
+    [randomKernel encodeToCommandBuffer:cb destinationMatrix:matA];
+    opEncoded();
     // Cleanup
     [matA release];
 }
@@ -317,8 +437,7 @@ void mpsRand(float *A, int N){
     // Get GPU buffer associated with A
     id<MTLBuffer> bufferA = bufferMap[A];
 
-    // Create a command buffer to schedule GPU commands
-    commandBuffer = [commandQueue commandBuffer];
+    id<MTLCommandBuffer> cb = currentMPSCommandBuffer();
 
     // Matrix descriptor to wrap buffer A
     MPSMatrixDescriptor* matrixDesc = [MPSMatrixDescriptor matrixDescriptorWithRows:N columns:1
@@ -327,8 +446,8 @@ void mpsRand(float *A, int N){
     auto matA = [[MPSMatrix alloc] initWithBuffer:bufferA descriptor:matrixDesc];
 
     // Encode random number generation into command buffer
-    [randomUniformKernel encodeToCommandBuffer:commandBuffer destinationMatrix:matA];
-    [commandBuffer commit];
+    [randomUniformKernel encodeToCommandBuffer:cb destinationMatrix:matA];
+    opEncoded();
     // Cleanup
     [matA release];
 }
@@ -336,8 +455,7 @@ void mpsRand(float *A, int N){
 void mpsFill(float* A, int N, float val) {
     id<MTLBuffer> buffer = bufferMap[A];
 
-    commandBuffer = [commandQueue commandBuffer];
-    id<MTLComputeCommandEncoder> encoder = [commandBuffer computeCommandEncoder];
+    id<MTLComputeCommandEncoder> encoder = currentComputeEncoder();
 
     [encoder setComputePipelineState:zeroPipelineState];
     [encoder setBuffer:buffer offset:0 atIndex:0];
@@ -352,58 +470,38 @@ void mpsFill(float* A, int N, float val) {
 
     [encoder dispatchThreads:gridSize threadsPerThreadgroup:threadsPerGroup];
 
-    [encoder endEncoding];
-    [commandBuffer commit];
+    opEncoded();
 }
 
-void mpsRelu(float *A, int N){
-    id<MTLBuffer> buffer = bufferMap[A];
+// Shared encode path for elementwise src -> dst kernels (in-place: src == dst).
+static void encodeElemwise(id<MTLComputePipelineState> pso, const float* src, float* dst, int N) {
+    id<MTLBuffer> srcBuffer = bufferMap[(float *) src];
+    id<MTLBuffer> dstBuffer = bufferMap[dst];
 
-    commandBuffer = [commandQueue commandBuffer];
-    id<MTLComputeCommandEncoder> encoder = [commandBuffer computeCommandEncoder];
+    id<MTLComputeCommandEncoder> encoder = currentComputeEncoder();
 
-    [encoder setComputePipelineState:reluPipelineState];
-    [encoder setBuffer:buffer offset:0 atIndex:0];
-    [encoder setBytes:&N length:sizeof(int) atIndex:1];
+    [encoder setComputePipelineState:pso];
+    [encoder setBuffer:srcBuffer offset:0 atIndex:0];
+    [encoder setBuffer:dstBuffer offset:0 atIndex:1];
 
     // Set up thread groups
     MTLSize gridSize = MTLSizeMake(N, 1, 1);
-    NSUInteger threadGroupSize = reluPipelineState.maxTotalThreadsPerThreadgroup;
-    if (threadGroupSize > N) threadGroupSize = N;
+    NSUInteger threadGroupSize = pso.maxTotalThreadsPerThreadgroup;
+    if (threadGroupSize > (NSUInteger)N) threadGroupSize = N;
 
     MTLSize threadsPerGroup = MTLSizeMake(threadGroupSize, 1, 1);
 
     [encoder dispatchThreads:gridSize threadsPerThreadgroup:threadsPerGroup];
 
-    [encoder endEncoding];
-    [commandBuffer commit];
+    opEncoded();
 }
 
-void mpsDRelu(float *A, int N){
-    id<MTLBuffer> buffer = bufferMap[A];
-
-    commandBuffer = [commandQueue commandBuffer];
-    id<MTLComputeCommandEncoder> encoder = [commandBuffer computeCommandEncoder];
-
-    [encoder setComputePipelineState:dreluPipelineState];
-    [encoder setBuffer:buffer offset:0 atIndex:0];
-    [encoder setBytes:&N length:sizeof(int) atIndex:1];
-
-    // Set up thread groups
-    MTLSize gridSize = MTLSizeMake(N, 1, 1);
-    NSUInteger threadGroupSize = dreluPipelineState.maxTotalThreadsPerThreadgroup;
-    if (threadGroupSize > N) threadGroupSize = N;
-
-    MTLSize threadsPerGroup = MTLSizeMake(threadGroupSize, 1, 1);
-
-    [encoder dispatchThreads:gridSize threadsPerThreadgroup:threadsPerGroup];
-
-    [encoder endEncoding];
-    [commandBuffer commit];
+void mpsRelu(const float* src, float* dst, int N){
+    encodeElemwise(reluPipelineState, src, dst, N);
 }
 
-void mpsdRelu(float *A, int N){
-    mpsDRelu(A, N);
+void mpsdRelu(const float* src, float* dst, int N){
+    encodeElemwise(dreluPipelineState, src, dst, N);
 }
 
 void mpsIm2col(const float* input, float* col,
@@ -418,8 +516,7 @@ void mpsIm2col(const float* input, float* col,
     const int K = C * kH * kW;
     const int total = N * Hout * Wout * K;
 
-    commandBuffer = [commandQueue commandBuffer];
-    id<MTLComputeCommandEncoder> encoder = [commandBuffer computeCommandEncoder];
+    id<MTLComputeCommandEncoder> encoder = currentComputeEncoder();
     [encoder setComputePipelineState:im2colPipelineState];
     [encoder setBuffer:inBuffer offset:0 atIndex:0];
     [encoder setBuffer:colBuffer offset:0 atIndex:1];
@@ -442,8 +539,7 @@ void mpsIm2col(const float* input, float* col,
     MTLSize threadsPerGroup = MTLSizeMake(tgs, 1, 1);
     [encoder dispatchThreads:gridSize threadsPerThreadgroup:threadsPerGroup];
 
-    [encoder endEncoding];
-    [commandBuffer commit];
+    opEncoded();
 }
 
 void mpsCol2im(const float* col, float* output,
@@ -457,8 +553,7 @@ void mpsCol2im(const float* col, float* output,
 
     const int total = N * C * H * W;
 
-    commandBuffer = [commandQueue commandBuffer];
-    id<MTLComputeCommandEncoder> encoder = [commandBuffer computeCommandEncoder];
+    id<MTLComputeCommandEncoder> encoder = currentComputeEncoder();
     [encoder setComputePipelineState:col2imPipelineState];
     [encoder setBuffer:colBuffer offset:0 atIndex:0];
     [encoder setBuffer:outBuffer offset:0 atIndex:1];
@@ -481,8 +576,7 @@ void mpsCol2im(const float* col, float* output,
     MTLSize threadsPerGroup = MTLSizeMake(tgs, 1, 1);
     [encoder dispatchThreads:gridSize threadsPerThreadgroup:threadsPerGroup];
 
-    [encoder endEncoding];
-    [commandBuffer commit];
+    opEncoded();
 }
 
 void mpsPackFeatureMap2D(const float* featureMap, float* packed,
@@ -491,8 +585,7 @@ void mpsPackFeatureMap2D(const float* featureMap, float* packed,
     id<MTLBuffer> dst = bufferMap[packed];
     const int total = N * C * P;
 
-    commandBuffer = [commandQueue commandBuffer];
-    id<MTLComputeCommandEncoder> encoder = [commandBuffer computeCommandEncoder];
+    id<MTLComputeCommandEncoder> encoder = currentComputeEncoder();
     [encoder setComputePipelineState:packFeatureMap2DPipelineState];
     [encoder setBuffer:src offset:0 atIndex:0];
     [encoder setBuffer:dst offset:0 atIndex:1];
@@ -506,8 +599,7 @@ void mpsPackFeatureMap2D(const float* featureMap, float* packed,
     MTLSize threadsPerGroup = MTLSizeMake(tgs, 1, 1);
     [encoder dispatchThreads:gridSize threadsPerThreadgroup:threadsPerGroup];
 
-    [encoder endEncoding];
-    [commandBuffer commit];
+    opEncoded();
 }
 
 void mpsConv2dOutputAddBias(const float* y2d, const float* bias, float* output,
@@ -517,8 +609,7 @@ void mpsConv2dOutputAddBias(const float* y2d, const float* bias, float* output,
     id<MTLBuffer> o = bufferMap[output];
     const int total = N * Cout * Hout * Wout;
 
-    commandBuffer = [commandQueue commandBuffer];
-    id<MTLComputeCommandEncoder> encoder = [commandBuffer computeCommandEncoder];
+    id<MTLComputeCommandEncoder> encoder = currentComputeEncoder();
     [encoder setComputePipelineState:conv2dOutputAddBiasPipelineState];
     [encoder setBuffer:y offset:0 atIndex:0];
     [encoder setBuffer:b offset:0 atIndex:1];
@@ -534,168 +625,321 @@ void mpsConv2dOutputAddBias(const float* y2d, const float* bias, float* output,
     MTLSize threadsPerGroup = MTLSizeMake(tgs, 1, 1);
     [encoder dispatchThreads:gridSize threadsPerThreadgroup:threadsPerGroup];
 
-    [encoder endEncoding];
-    [commandBuffer commit];
+    opEncoded();
 }
 
-void mpsTanh(float* A, int N){
-    id<MTLBuffer> buffer = bufferMap[A];
+void mpsTanh(const float* src, float* dst, int N){
+    encodeElemwise(tanhPipelineState, src, dst, N);
+}
 
-    commandBuffer = [commandQueue commandBuffer];
-    id<MTLComputeCommandEncoder> encoder = [commandBuffer computeCommandEncoder];
+void mpsdTanh(const float* src, float* dst, int N){
+    encodeElemwise(dTanhPipelineState, src, dst, N);
+}
 
-    [encoder setComputePipelineState:tanhPipelineState];
-    [encoder setBuffer:buffer offset:0 atIndex:0];
-    [encoder setBytes:&N length:sizeof(int) atIndex:1];
+void mpsSqrt(const float* src, float* dst, int N){
+    encodeElemwise(sqrtPipelineState, src, dst, N);
+}
 
-    // Set up thread groups
-    MTLSize gridSize = MTLSizeMake(N, 1, 1);
-    NSUInteger threadGroupSize = tanhPipelineState.maxTotalThreadsPerThreadgroup;
-    if (threadGroupSize > N) threadGroupSize = N;
+void mpsExp(const float* src, float* dst, int N){
+    encodeElemwise(expPipelineState, src, dst, N);
+}
 
-    MTLSize threadsPerGroup = MTLSizeMake(threadGroupSize, 1, 1);
+void mpsLog(const float* src, float* dst, int N){
+    encodeElemwise(logPipelineState, src, dst, N);
+}
+
+void mpsSquare(const float* src, float* dst, int N){
+    encodeElemwise(squarePipelineState, src, dst, N);
+}
+
+void mpsSoftmaxCol(const float* src, float* dst, int rows, int cols, bool transpose) {
+    id<MTLBuffer> srcBuffer = bufferMap[(float*)src];
+    id<MTLBuffer> dstBuffer = bufferMap[dst];
+
+    id<MTLComputeCommandEncoder> encoder = currentComputeEncoder();
+
+    [encoder setComputePipelineState:softmaxColPipelineState];
+    [encoder setBuffer:srcBuffer offset:0 atIndex:0];
+    [encoder setBuffer:dstBuffer offset:0 atIndex:1];
+    [encoder setBytes:&rows length:sizeof(int) atIndex:2];
+    [encoder setBytes:&cols length:sizeof(int) atIndex:3];
+    [encoder setBytes:&transpose length:sizeof(bool) atIndex:4];
+
+    MTLSize gridSize = MTLSizeMake(cols, 1, 1);
+    NSUInteger tgs = softmaxColPipelineState.maxTotalThreadsPerThreadgroup;
+    if (tgs > (NSUInteger)cols) tgs = cols;
+    MTLSize threadsPerGroup = MTLSizeMake(tgs, 1, 1);
 
     [encoder dispatchThreads:gridSize threadsPerThreadgroup:threadsPerGroup];
 
-    [encoder endEncoding];
-    [commandBuffer commit];
+    opEncoded();
 }
 
-void mpsdTanh(float* A, int N){
-    id<MTLBuffer> buffer = bufferMap[A];
+void mpsCausalMask(float* S, int n, bool transpose, float maskVal) {
+    id<MTLBuffer> buffer = bufferMap[S];
 
-    commandBuffer = [commandQueue commandBuffer];
-    id<MTLComputeCommandEncoder> encoder = [commandBuffer computeCommandEncoder];
+    id<MTLComputeCommandEncoder> encoder = currentComputeEncoder();
 
-    [encoder setComputePipelineState:dTanhPipelineState];
+    [encoder setComputePipelineState:causalMaskPipelineState];
     [encoder setBuffer:buffer offset:0 atIndex:0];
-    [encoder setBytes:&N length:sizeof(int) atIndex:1];
+    [encoder setBytes:&n length:sizeof(int) atIndex:1];
+    [encoder setBytes:&transpose length:sizeof(bool) atIndex:2];
+    [encoder setBytes:&maskVal length:sizeof(float) atIndex:3];
 
-    // Set up thread groups
+    MTLSize gridSize = MTLSizeMake(n, n, 1);
+    MTLSize threadGroupSize = MTLSizeMake(16, 16, 1);
+    [encoder dispatchThreads:gridSize threadsPerThreadgroup:threadGroupSize];
+
+    opEncoded();
+}
+
+void mpsGemmBatched(const float* A, const float* B, float* C, int batch,
+                    int rowA, int colA, int rowB, int colB,
+                    bool transposeA, bool transposeB, float alpha) {
+    id<MTLCommandBuffer> cb = currentMPSCommandBuffer();
+
+    auto matA = [[MPSMatrix alloc] initWithBuffer:bufferMap[(float *) A]
+        descriptor:[MPSMatrixDescriptor matrixDescriptorWithRows:rowA columns:colA
+            matrices:batch rowBytes:colA*sizeof(float)
+            matrixBytes:(NSUInteger)rowA*colA*sizeof(float) dataType:MPSDataTypeFloat32]];
+
+    auto matB = [[MPSMatrix alloc] initWithBuffer:bufferMap[(float *) B]
+        descriptor:[MPSMatrixDescriptor matrixDescriptorWithRows:rowB columns:colB
+            matrices:batch rowBytes:colB*sizeof(float)
+            matrixBytes:(NSUInteger)rowB*colB*sizeof(float) dataType:MPSDataTypeFloat32]];
+
+    int resultRows = transposeA ? colA : rowA;
+    int resultColumns = transposeB ? rowB : colB;
+    int interiorColumns = transposeA ? rowA : colA;
+    auto matC = [[MPSMatrix alloc] initWithBuffer:bufferMap[C]
+        descriptor:[MPSMatrixDescriptor matrixDescriptorWithRows:resultRows columns:resultColumns
+            matrices:batch rowBytes:resultColumns*sizeof(float)
+            matrixBytes:(NSUInteger)resultRows*resultColumns*sizeof(float) dataType:MPSDataTypeFloat32]];
+
+    const auto key = std::make_tuple(transposeA, transposeB, resultRows, resultColumns, interiorColumns, alpha);
+    MPSMatrixMultiplication* gemmKernel;
+    auto it = gemmBatchedKernelCache.find(key);
+    if (it != gemmBatchedKernelCache.end()) {
+        gemmKernel = it->second;
+    } else {
+        gemmKernel = [[MPSMatrixMultiplication alloc] initWithDevice:device
+            transposeLeft:transposeA transposeRight:transposeB resultRows:resultRows resultColumns:resultColumns interiorColumns:interiorColumns alpha:alpha beta:0.0f];
+        gemmBatchedKernelCache[key] = gemmKernel;
+    }
+    [gemmKernel encodeToCommandBuffer:cb leftMatrix:matA rightMatrix:matB resultMatrix:matC];
+
+    opEncoded();
+
+    [matA release]; [matB release]; [matC release];
+}
+
+// Shared encode path for the attention pack/unpack gather kernels.
+static void encodeAttnRepack(id<MTLComputePipelineState> pso, const float* src, float* dst,
+                             int d_h, int heads, int seq, int batch) {
+    id<MTLBuffer> srcBuffer = bufferMap[(float*)src];
+    id<MTLBuffer> dstBuffer = bufferMap[dst];
+
+    id<MTLComputeCommandEncoder> encoder = currentComputeEncoder();
+
+    [encoder setComputePipelineState:pso];
+    [encoder setBuffer:srcBuffer offset:0 atIndex:0];
+    [encoder setBuffer:dstBuffer offset:0 atIndex:1];
+    [encoder setBytes:&d_h length:sizeof(int) atIndex:2];
+    [encoder setBytes:&heads length:sizeof(int) atIndex:3];
+    [encoder setBytes:&seq length:sizeof(int) atIndex:4];
+    [encoder setBytes:&batch length:sizeof(int) atIndex:5];
+
+    const int total = heads * batch * seq * d_h;
+    MTLSize gridSize = MTLSizeMake(total, 1, 1);
+    NSUInteger tgs = pso.maxTotalThreadsPerThreadgroup;
+    if (tgs > (NSUInteger)total) tgs = total;
+    [encoder dispatchThreads:gridSize threadsPerThreadgroup:MTLSizeMake(tgs, 1, 1)];
+
+    opEncoded();
+}
+
+void mpsAttnPack(const float* src, float* dst, int d_h, int heads, int seq, int batch) {
+    encodeAttnRepack(attnPackPipelineState, src, dst, d_h, heads, seq, batch);
+}
+
+void mpsAttnUnpack(const float* src, float* dst, int d_h, int heads, int seq, int batch) {
+    encodeAttnRepack(attnUnpackPipelineState, src, dst, d_h, heads, seq, batch);
+}
+
+void mpsCausalMaskBatched(float* S, int n, int batch, float maskVal) {
+    id<MTLBuffer> buffer = bufferMap[S];
+
+    id<MTLComputeCommandEncoder> encoder = currentComputeEncoder();
+
+    [encoder setComputePipelineState:causalMaskBatchedPipelineState];
+    [encoder setBuffer:buffer offset:0 atIndex:0];
+    [encoder setBytes:&n length:sizeof(int) atIndex:1];
+    [encoder setBytes:&batch length:sizeof(int) atIndex:2];
+    [encoder setBytes:&maskVal length:sizeof(float) atIndex:3];
+
+    const int total = batch * n * n;
+    MTLSize gridSize = MTLSizeMake(total, 1, 1);
+    NSUInteger tgs = causalMaskBatchedPipelineState.maxTotalThreadsPerThreadgroup;
+    if (tgs > (NSUInteger)total) tgs = total;
+    [encoder dispatchThreads:gridSize threadsPerThreadgroup:MTLSizeMake(tgs, 1, 1)];
+
+    opEncoded();
+}
+
+void mpsSoftmaxRowsBatched(const float* x, float* y, int n, int rows) {
+    id<MTLBuffer> xBuffer = bufferMap[(float*)x];
+    id<MTLBuffer> yBuffer = bufferMap[y];
+
+    id<MTLComputeCommandEncoder> encoder = currentComputeEncoder();
+
+    [encoder setComputePipelineState:softmaxRowsBatchedPipelineState];
+    [encoder setBuffer:xBuffer offset:0 atIndex:0];
+    [encoder setBuffer:yBuffer offset:0 atIndex:1];
+    [encoder setBytes:&n length:sizeof(int) atIndex:2];
+    [encoder setBytes:&rows length:sizeof(int) atIndex:3];
+
+    MTLSize gridSize = MTLSizeMake(rows, 1, 1);
+    NSUInteger tgs = softmaxRowsBatchedPipelineState.maxTotalThreadsPerThreadgroup;
+    if (tgs > (NSUInteger)rows) tgs = rows;
+    [encoder dispatchThreads:gridSize threadsPerThreadgroup:MTLSizeMake(tgs, 1, 1)];
+
+    opEncoded();
+}
+
+void mpsSoftmaxBackwardRowsBatched(const float* A, const float* dA, float* dS,
+                                   int n, int rows, float scale) {
+    id<MTLBuffer> aBuffer = bufferMap[(float*)A];
+    id<MTLBuffer> daBuffer = bufferMap[(float*)dA];
+    id<MTLBuffer> dsBuffer = bufferMap[dS];
+
+    id<MTLComputeCommandEncoder> encoder = currentComputeEncoder();
+
+    [encoder setComputePipelineState:softmaxBackwardRowsBatchedPipelineState];
+    [encoder setBuffer:aBuffer offset:0 atIndex:0];
+    [encoder setBuffer:daBuffer offset:0 atIndex:1];
+    [encoder setBuffer:dsBuffer offset:0 atIndex:2];
+    [encoder setBytes:&n length:sizeof(int) atIndex:3];
+    [encoder setBytes:&rows length:sizeof(int) atIndex:4];
+    [encoder setBytes:&scale length:sizeof(float) atIndex:5];
+
+    MTLSize gridSize = MTLSizeMake(rows, 1, 1);
+    NSUInteger tgs = softmaxBackwardRowsBatchedPipelineState.maxTotalThreadsPerThreadgroup;
+    if (tgs > (NSUInteger)rows) tgs = rows;
+    [encoder dispatchThreads:gridSize threadsPerThreadgroup:MTLSizeMake(tgs, 1, 1)];
+
+    opEncoded();
+}
+
+void mpsLayerNormForward(const float* x, const float* gamma, const float* beta,
+                         float* y, float* xhat, float* invStd, int dim, int N) {
+    id<MTLComputeCommandEncoder> encoder = currentComputeEncoder();
+
+    [encoder setComputePipelineState:layernormForwardPipelineState];
+    [encoder setBuffer:bufferMap[(float*)x] offset:0 atIndex:0];
+    [encoder setBuffer:bufferMap[(float*)gamma] offset:0 atIndex:1];
+    [encoder setBuffer:bufferMap[(float*)beta] offset:0 atIndex:2];
+    [encoder setBuffer:bufferMap[y] offset:0 atIndex:3];
+    [encoder setBuffer:bufferMap[xhat] offset:0 atIndex:4];
+    [encoder setBuffer:bufferMap[invStd] offset:0 atIndex:5];
+    [encoder setBytes:&dim length:sizeof(int) atIndex:6];
+    [encoder setBytes:&N length:sizeof(int) atIndex:7];
+
     MTLSize gridSize = MTLSizeMake(N, 1, 1);
-    NSUInteger threadGroupSize = dTanhPipelineState.maxTotalThreadsPerThreadgroup;
-    if (threadGroupSize > N) threadGroupSize = N;
+    NSUInteger tgs = layernormForwardPipelineState.maxTotalThreadsPerThreadgroup;
+    if (tgs > (NSUInteger)N) tgs = N;
+    [encoder dispatchThreads:gridSize threadsPerThreadgroup:MTLSizeMake(tgs, 1, 1)];
 
-    MTLSize threadsPerGroup = MTLSizeMake(threadGroupSize, 1, 1);
-
-    [encoder dispatchThreads:gridSize threadsPerThreadgroup:threadsPerGroup];
-
-    [encoder endEncoding];
-    [commandBuffer commit];
+    opEncoded();
 }
 
-void mpsSqrt(float* A, int N){
-    id<MTLBuffer> buffer = bufferMap[A];
+void mpsLayerNormBackward(const float* dy, const float* gamma, const float* xhat,
+                          const float* invStd, float* dx, int dim, int N) {
+    id<MTLComputeCommandEncoder> encoder = currentComputeEncoder();
 
-    commandBuffer = [commandQueue commandBuffer];
-    id<MTLComputeCommandEncoder> encoder = [commandBuffer computeCommandEncoder];
+    [encoder setComputePipelineState:layernormBackwardPipelineState];
+    [encoder setBuffer:bufferMap[(float*)dy] offset:0 atIndex:0];
+    [encoder setBuffer:bufferMap[(float*)gamma] offset:0 atIndex:1];
+    [encoder setBuffer:bufferMap[(float*)xhat] offset:0 atIndex:2];
+    [encoder setBuffer:bufferMap[(float*)invStd] offset:0 atIndex:3];
+    [encoder setBuffer:bufferMap[dx] offset:0 atIndex:4];
+    [encoder setBytes:&dim length:sizeof(int) atIndex:5];
+    [encoder setBytes:&N length:sizeof(int) atIndex:6];
 
-    [encoder setComputePipelineState:sqrtPipelineState];
-    [encoder setBuffer:buffer offset:0 atIndex:0];
-    [encoder setBytes:&N length:sizeof(int) atIndex:1];
-
-    // Set up thread groups
     MTLSize gridSize = MTLSizeMake(N, 1, 1);
-    NSUInteger threadGroupSize = sqrtPipelineState.maxTotalThreadsPerThreadgroup;
-    if (threadGroupSize > N) threadGroupSize = N;
+    NSUInteger tgs = layernormBackwardPipelineState.maxTotalThreadsPerThreadgroup;
+    if (tgs > (NSUInteger)N) tgs = N;
+    [encoder dispatchThreads:gridSize threadsPerThreadgroup:MTLSizeMake(tgs, 1, 1)];
 
-    MTLSize threadsPerGroup = MTLSizeMake(threadGroupSize, 1, 1);
-
-    [encoder dispatchThreads:gridSize threadsPerThreadgroup:threadsPerGroup];
-
-    [encoder endEncoding];
-    [commandBuffer commit];
-
+    opEncoded();
 }
 
-void mpsExp(float *M, int N){
-    id<MTLBuffer> buffer = bufferMap[M];
+void mpsAddBias(float* y, const float* b, int N, int total) {
+    id<MTLComputeCommandEncoder> encoder = currentComputeEncoder();
 
-    commandBuffer = [commandQueue commandBuffer];
-    id<MTLComputeCommandEncoder> encoder = [commandBuffer computeCommandEncoder];
-
-    [encoder setComputePipelineState:expPipelineState];
-    [encoder setBuffer:buffer offset:0 atIndex:0];
-    [encoder setBytes:&N length:sizeof(int) atIndex:1];
-
-    // Set up thread groups
-    MTLSize gridSize = MTLSizeMake(N, 1, 1);
-    NSUInteger threadGroupSize = expPipelineState.maxTotalThreadsPerThreadgroup;
-    if (threadGroupSize > N) threadGroupSize = N;
-
-    MTLSize threadsPerGroup = MTLSizeMake(threadGroupSize, 1, 1);
-
-    [encoder dispatchThreads:gridSize threadsPerThreadgroup:threadsPerGroup];
-
-    [encoder endEncoding];
-    [commandBuffer commit];
-}
-
-void mpsLog(float *M, int N){
-    id<MTLBuffer> buffer = bufferMap[M];
-
-    commandBuffer = [commandQueue commandBuffer];
-    id<MTLComputeCommandEncoder> encoder = [commandBuffer computeCommandEncoder];
-
-    [encoder setComputePipelineState:logPipelineState];
-    [encoder setBuffer:buffer offset:0 atIndex:0];
-    [encoder setBytes:&N length:sizeof(int) atIndex:1];
-
-    // Set up thread groups
-    MTLSize gridSize = MTLSizeMake(N, 1, 1);
-    NSUInteger threadGroupSize = logPipelineState.maxTotalThreadsPerThreadgroup;
-    if (threadGroupSize > N) threadGroupSize = N;
-
-    MTLSize threadsPerGroup = MTLSizeMake(threadGroupSize, 1, 1);
-
-    [encoder dispatchThreads:gridSize threadsPerThreadgroup:threadsPerGroup];
-
-    [encoder endEncoding];
-    [commandBuffer commit];
-}
-
-void mpsSquare(float* A, int N){
-    id<MTLBuffer> buffer = bufferMap[A];
-
-    commandBuffer = [commandQueue commandBuffer];
-    id<MTLComputeCommandEncoder> encoder = [commandBuffer computeCommandEncoder];
-
-    [encoder setComputePipelineState:squarePipelineState];
-    [encoder setBuffer:buffer offset:0 atIndex:0];
+    [encoder setComputePipelineState:addBiasPipelineState];
+    [encoder setBuffer:bufferMap[y] offset:0 atIndex:0];
+    [encoder setBuffer:bufferMap[(float*)b] offset:0 atIndex:1];
     [encoder setBytes:&N length:sizeof(int) atIndex:2];
+    [encoder setBytes:&total length:sizeof(int) atIndex:3];
 
-    // Set up thread groups
-    MTLSize gridSize = MTLSizeMake(N, 1, 1);
-    NSUInteger threadGroupSize = squarePipelineState.maxTotalThreadsPerThreadgroup;
-    if (threadGroupSize > N) threadGroupSize = N;
+    MTLSize gridSize = MTLSizeMake(total, 1, 1);
+    NSUInteger tgs = addBiasPipelineState.maxTotalThreadsPerThreadgroup;
+    if (tgs > (NSUInteger)total) tgs = total;
+    [encoder dispatchThreads:gridSize threadsPerThreadgroup:MTLSizeMake(tgs, 1, 1)];
 
-    MTLSize threadsPerGroup = MTLSizeMake(threadGroupSize, 1, 1);
+    opEncoded();
+}
 
-    [encoder dispatchThreads:gridSize threadsPerThreadgroup:threadsPerGroup];
-    
-    [encoder endEncoding];
-    [commandBuffer commit];
+void mpsAdamUpdate(float* g, float* m, float* v, float alpha, float beta1,
+                   float beta2, float eps, float bc1, float bc2, int n) {
+    id<MTLComputeCommandEncoder> encoder = currentComputeEncoder();
+
+    [encoder setComputePipelineState:adamUpdatePipelineState];
+    [encoder setBuffer:bufferMap[g] offset:0 atIndex:0];
+    [encoder setBuffer:bufferMap[m] offset:0 atIndex:1];
+    [encoder setBuffer:bufferMap[v] offset:0 atIndex:2];
+    [encoder setBytes:&alpha length:sizeof(float) atIndex:3];
+    [encoder setBytes:&beta1 length:sizeof(float) atIndex:4];
+    [encoder setBytes:&beta2 length:sizeof(float) atIndex:5];
+    [encoder setBytes:&eps length:sizeof(float) atIndex:6];
+    [encoder setBytes:&bc1 length:sizeof(float) atIndex:7];
+    [encoder setBytes:&bc2 length:sizeof(float) atIndex:8];
+
+    MTLSize gridSize = MTLSizeMake(n, 1, 1);
+    NSUInteger tgs = adamUpdatePipelineState.maxTotalThreadsPerThreadgroup;
+    if (tgs > (NSUInteger)n) tgs = n;
+    [encoder dispatchThreads:gridSize threadsPerThreadgroup:MTLSizeMake(tgs, 1, 1)];
+
+    opEncoded();
 }
 
 void mpsGemv(const float* A, const float* x, float* y, int rowA, int colA, bool transposeA) {
-    commandBuffer = [commandQueue commandBuffer];
+    id<MTLCommandBuffer> cb = currentMPSCommandBuffer();
 
     auto matA = [[MPSMatrix alloc] initWithBuffer:bufferMap[(float *) A]
         descriptor:[MPSMatrixDescriptor matrixDescriptorWithRows:rowA columns:colA rowBytes:colA*sizeof(float) dataType:MPSDataTypeFloat32]];
-    
+
     auto vecX = [[MPSVector alloc] initWithBuffer:bufferMap[(float *) x]
         descriptor:[MPSVectorDescriptor vectorDescriptorWithLength:transposeA ? rowA : colA dataType:MPSDataTypeFloat32]];
 
     auto vecY = [[MPSVector alloc] initWithBuffer:bufferMap[y]
         descriptor:[MPSVectorDescriptor vectorDescriptorWithLength:transposeA ? colA : rowA dataType:MPSDataTypeFloat32]];
-        
-    auto gemvKernel = [[MPSMatrixVectorMultiplication alloc] initWithDevice:device
-        transpose:transposeA rows:transposeA ? colA : rowA columns:transposeA ? rowA : colA alpha:1.0f beta:0.0f];
-    [gemvKernel encodeToCommandBuffer:commandBuffer inputMatrix:matA inputVector:vecX resultVector:vecY];
 
-    [commandBuffer commit];
+    const auto key = std::make_tuple(transposeA, rowA, colA);
+    MPSMatrixVectorMultiplication* gemvKernel;
+    auto it = gemvKernelCache.find(key);
+    if (it != gemvKernelCache.end()) {
+        gemvKernel = it->second;
+    } else {
+        gemvKernel = [[MPSMatrixVectorMultiplication alloc] initWithDevice:device
+            transpose:transposeA rows:transposeA ? colA : rowA columns:transposeA ? rowA : colA alpha:1.0f beta:0.0f];
+        gemvKernelCache[key] = gemvKernel;
+    }
+    [gemvKernel encodeToCommandBuffer:cb inputMatrix:matA inputVector:vecX resultVector:vecY];
 
-    [matA release]; [vecX release]; [vecY release]; [gemvKernel release];
+    opEncoded();
+
+    [matA release]; [vecX release]; [vecY release];
 }
 
 void mpsTopk(const float* A, float* B, float *C, int rowA, int colA, int k){
@@ -704,21 +948,21 @@ void mpsTopk(const float* A, float* B, float *C, int rowA, int colA, int k){
     id<MTLBuffer> bufferB  = [device newBufferWithLength:rowA*k*sizeof(int) options:MTLResourceStorageModeShared];
     id<MTLBuffer> bufferC = bufferMap[C];
 
-    commandBuffer = [commandQueue commandBuffer];
-    
+    id<MTLCommandBuffer> cb = currentMPSCommandBuffer();
+
     auto matA = [[MPSMatrix alloc] initWithBuffer:bufferA
         descriptor:[MPSMatrixDescriptor matrixDescriptorWithRows:rowA columns:colA rowBytes:colA*sizeof(float) dataType:MPSDataTypeFloat32]];
-    
+
     auto matB = [[MPSMatrix alloc] initWithBuffer:bufferB
         descriptor:[MPSMatrixDescriptor matrixDescriptorWithRows:rowA columns:k rowBytes:k*sizeof(int) dataType:MPSDataTypeUInt32]];
-    
+
     auto matC = [[MPSMatrix alloc] initWithBuffer:bufferC
         descriptor:[MPSMatrixDescriptor matrixDescriptorWithRows:rowA columns:k rowBytes:k*sizeof(float) dataType:MPSDataTypeFloat32]];
 
     auto topkKernel = [[MPSMatrixFindTopK alloc] initWithDevice:device numberOfTopKValues:k];
-    [topkKernel encodeToCommandBuffer:commandBuffer inputMatrix:matA resultIndexMatrix:matB resultValueMatrix:matC];
+    [topkKernel encodeToCommandBuffer:cb inputMatrix:matA resultIndexMatrix:matB resultValueMatrix:matC];
 
-    [commandBuffer commit];
+    opEncoded();
 
     mpsSynchronize();
     // std::cout << "Copying topk results" << std::endl;
@@ -731,35 +975,39 @@ void mpsTopk(const float* A, float* B, float *C, int rowA, int colA, int k){
     }
 
     [matA release]; [matB release]; [matC release]; [topkKernel release]; [bufferB release];
-    
+
 }
 
-void mpsElemInv(float *M, int N, float l){
-    id<MTLBuffer> buffer = bufferMap[M];
+void mpsElemInv(const float* src, float* dst, int N, float l){
+    id<MTLBuffer> srcBuffer = bufferMap[(float *) src];
+    id<MTLBuffer> dstBuffer = bufferMap[dst];
 
-    commandBuffer = [commandQueue commandBuffer];
-    id<MTLComputeCommandEncoder> encoder = [commandBuffer computeCommandEncoder];
+    id<MTLComputeCommandEncoder> encoder = currentComputeEncoder();
 
     [encoder setComputePipelineState:elemInvPipelineState];
-    [encoder setBuffer:buffer offset:0 atIndex:0];
-    [encoder setBytes:&l length:sizeof(float) atIndex:1];
-    [encoder setBytes:&N length:sizeof(int) atIndex:2];
+    [encoder setBuffer:srcBuffer offset:0 atIndex:0];
+    [encoder setBuffer:dstBuffer offset:0 atIndex:1];
+    [encoder setBytes:&l length:sizeof(float) atIndex:2];
 
     // Set up thread groups
     MTLSize gridSize = MTLSizeMake(N, 1, 1);
     NSUInteger threadGroupSize = elemInvPipelineState.maxTotalThreadsPerThreadgroup;
-    if (threadGroupSize > N) threadGroupSize = N;
+    if (threadGroupSize > (NSUInteger)N) threadGroupSize = N;
 
     MTLSize threadsPerGroup = MTLSizeMake(threadGroupSize, 1, 1);
 
     [encoder dispatchThreads:gridSize threadsPerThreadgroup:threadsPerGroup];
-    
-    [encoder endEncoding];
-    [commandBuffer commit];
+
+    opEncoded();
 }
 
-/* Synchronize the command buffer */
+/* Commit all encoded work and wait until every in-flight command buffer has
+   completed, so the host can safely read/write buffer contents. */
 void mpsSynchronize() {
-    [commandBuffer waitUntilCompleted];
-    commandBuffer = nil;
+    commitCurrent();
+    for (id<MTLCommandBuffer> cb : inflightBuffers) {
+        [cb waitUntilCompleted];
+        [cb release];
+    }
+    inflightBuffers.clear();
 }
