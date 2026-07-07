@@ -12,8 +12,12 @@
     width: 100%; box-sizing: border-box; height: 4rem; font-size: 1rem;
     padding: 0.6rem; border-radius: 6px; border: 1px solid #888; font-family: inherit;
   }
+  .backend { display: flex; gap: 1.5rem; margin: 0.8rem 0 0.2rem; font-size: 0.95rem; }
+  .backend label { display: flex; align-items: center; gap: 0.4rem; cursor: pointer; }
+  .backend label.disabled { opacity: 0.4; cursor: not-allowed; }
   .controls { display: flex; flex-wrap: wrap; gap: 1.2rem; align-items: center; margin: 0.8rem 0; }
   .controls label { font-size: 0.85rem; display: flex; align-items: center; gap: 0.4rem; }
+  .controls label[hidden] { display: none; }
   .controls output { font-family: monospace; min-width: 2.5rem; }
   button { font-size: 1rem; padding: 0.4rem 1.4rem; border-radius: 6px; border: 1px solid #888; cursor: pointer; }
   button:disabled { opacity: 0.5; cursor: wait; }
@@ -22,8 +26,10 @@
     padding: 1rem 1.2rem; min-height: 8rem; margin-top: 0.6rem; white-space: pre-wrap; word-break: break-word;
   }
   #story .seed { font-weight: 600; }
+  #story .denoising { opacity: 0.85; }
   #story .cursor { display: inline-block; width: 0.5em; height: 1.05em; background: currentColor; vertical-align: text-bottom; animation: blink 1s steps(1) infinite; }
   @keyframes blink { 50% { opacity: 0; } }
+  #round { font-size: 0.8rem; font-family: monospace; opacity: 0.7; margin-top: 0.3rem; min-height: 1.1em; }
   .examples { font-size: 0.85rem; opacity: 0.8; margin-top: 0.3rem; }
   .examples a { cursor: pointer; text-decoration: underline; }
   footer { margin-top: 2rem; font-size: 0.85rem; opacity: 0.7; }
@@ -31,10 +37,13 @@
 </head>
 <body>
 <h1>Juzhen TinyStories — a small model that tells stories</h1>
-<p>A ~30M-parameter Transformer trained from scratch with
+<p>Two ~30M-parameter Transformers trained from scratch with
 <a href="https://github.com/anewgithubname/Juzhen">Juzhen</a> on the
-<a href="https://arxiv.org/abs/2305.07759">TinyStories</a> corpus (BPE tokens).
-Start a story and it writes the rest. <span id="modelinfo"></span></p>
+<a href="https://arxiv.org/abs/2305.07759">TinyStories</a> corpus (BPE tokens):
+an <b>autoregressive</b> LM that writes left to right, and a
+<b>masked discrete diffusion</b> LM that starts from an all-masked window and
+progressively unmasks it. Start a story and watch each write the rest.
+<span id="modelinfo"></span></p>
 
 <textarea id="seed">Once upon a time, there was a little robot who</textarea>
 <div class="examples">try:
@@ -43,71 +52,151 @@ Start a story and it writes the rest. <span id="modelinfo"></span></p>
   <a data-t="The little boat sailed across the big blue sea to find">a little boat</a>
 </div>
 
+<div class="backend">
+  <label><input type="radio" name="backend" value="ar" checked> Autoregressive</label>
+  <label id="ddlabel"><input type="radio" name="backend" value="dd" id="ddradio"> Discrete Diffusion</label>
+</div>
+
 <div class="controls">
-  <label>length <input type="range" id="length" min="50" max="600" step="50" value="250"><output id="lengthv">250</output></label>
+  <label class="ar-only">length <input type="range" id="length" min="50" max="600" step="50" value="250"><output id="lengthv">250</output></label>
   <label>temperature <input type="range" id="temp" min="0.1" max="1.5" step="0.1" value="0.8"><output id="tempv">0.8</output></label>
-  <label>top-k <input type="range" id="topk" min="1" max="100" step="1" value="40"><output id="topkv">40</output></label>
+  <label class="ar-only">top-k <input type="range" id="topk" min="1" max="100" step="1" value="40"><output id="topkv">40</output></label>
+  <label class="dd-only" hidden>denoising steps <input type="range" id="steps" min="8" max="256" step="8" value="64"><output id="stepsv">64</output></label>
+  <label class="dd-only" hidden>explore noise <input type="range" id="noise" min="0" max="3" step="0.1" value="1.0"><output id="noisev">1.0</output></label>
   <button id="go">Write the story</button>
 </div>
 
 <div id="story"><span style="opacity:0.5">The story appears here.</span></div>
+<div id="round"></div>
 
 <footer>Character-simple, coherent English by design — TinyStories models learn
-grammar, characters and simple plots, not facts. Backend: Juzhen (C++/CUDA),
-BPE-4096 tokenizer, streamed over HTTP.</footer>
+grammar, characters and simple plots, not facts. Autoregressive: causal
+attention, top-k sampling, streamed token by token. Diffusion: bidirectional
+attention, MaskGIT-style progressive decoding (□ = still masked), streamed
+round by round. Backend: Juzhen (C++/CUDA), BPE-4096 tokenizer, HTTP.</footer>
 
 <script>
 const seedEl = document.getElementById('seed');
 const story = document.getElementById('story');
+const roundEl = document.getElementById('round');
 const go = document.getElementById('go');
-for (const [id, ov] of [['length','lengthv'],['temp','tempv'],['topk','topkv']]) {
+for (const [id, ov] of [['length','lengthv'],['temp','tempv'],['topk','topkv'],
+                        ['steps','stepsv'],['noise','noisev']]) {
   const inp = document.getElementById(id), o = document.getElementById(ov);
   inp.addEventListener('input', () => o.textContent = inp.value);
 }
 document.querySelectorAll('.examples a').forEach(a =>
   a.addEventListener('click', () => { seedEl.value = a.dataset.t; }));
 
+const backend = () => document.querySelector('input[name=backend]:checked').value;
+document.querySelectorAll('input[name=backend]').forEach(r =>
+  r.addEventListener('change', () => {
+    const dd = backend() === 'dd';
+    document.querySelectorAll('.ar-only').forEach(el => el.hidden = dd);
+    document.querySelectorAll('.dd-only').forEach(el => el.hidden = !dd);
+  }));
+
 let aborter = null;
-async function generate() {
-  if (aborter) { aborter.abort(); return; }
-  const seed = seedEl.value;
+
+async function generateAR(seed) {
   const length = document.getElementById('length').value;
   const temp = document.getElementById('temp').value;
   const topk = document.getElementById('topk').value;
 
-  story.innerHTML = '';
   const seedSpan = document.createElement('span');
   seedSpan.className = 'seed'; seedSpan.textContent = seed;
   const genSpan = document.createElement('span');
   const cursor = document.createElement('span'); cursor.className = 'cursor';
-  story.append(seedSpan, genSpan, cursor);
+  story.replaceChildren(seedSpan, genSpan, cursor);
 
-  aborter = new AbortController();
-  go.textContent = 'Stop';
+  const res = await fetch(`/generate?length=${length}&temperature=${temp}&topk=${topk}`, {
+    method: 'POST', headers: { 'Content-Type': 'text/plain; charset=utf-8' },
+    body: seed, signal: aborter.signal,
+  });
+  const reader = res.body.getReader();
+  const dec = new TextDecoder();
   try {
-    const res = await fetch(`/generate?length=${length}&temperature=${temp}&topk=${topk}`, {
-      method: 'POST', headers: { 'Content-Type': 'text/plain; charset=utf-8' },
-      body: seed, signal: aborter.signal,
-    });
-    const reader = res.body.getReader();
-    const dec = new TextDecoder();
     while (true) {
       const { done, value } = await reader.read();
       if (done) break;
       genSpan.textContent += dec.decode(value, { stream: true });
     }
+  } finally { cursor.remove(); }
+}
+
+async function generateDD(seed) {
+  const temp = document.getElementById('temp').value;
+  const steps = document.getElementById('steps').value;
+  const noise = document.getElementById('noise').value;
+
+  const seedSpan = document.createElement('span');
+  seedSpan.className = 'seed'; seedSpan.textContent = seed;
+  const genSpan = document.createElement('span');
+  genSpan.className = 'denoising';
+  story.replaceChildren(seedSpan, genSpan);
+
+  const res = await fetch(`/diffuse?steps=${steps}&temperature=${temp}&noise=${noise}`, {
+    method: 'POST', headers: { 'Content-Type': 'text/plain; charset=utf-8' },
+    body: seed, signal: aborter.signal,
+  });
+  if (!res.ok) { genSpan.textContent = ' [' + await res.text() + ']'; return; }
+  const reader = res.body.getReader();
+  const dec = new TextDecoder();
+  let buf = '';
+  try {
+    while (true) {
+      const { done, value } = await reader.read();
+      if (done) break;
+      buf += dec.decode(value, { stream: true });
+      const lines = buf.split('\n');
+      buf = lines.pop();
+      for (const line of lines) {
+        if (!line.trim()) continue;
+        const obj = JSON.parse(line);
+        genSpan.textContent = obj.text;
+        if (obj.done) {
+          genSpan.classList.remove('denoising');
+          roundEl.textContent = '';
+        } else {
+          roundEl.textContent = `denoising round ${obj.round}/${obj.total}`;
+        }
+      }
+    }
+  } finally { genSpan.classList.remove('denoising'); }
+}
+
+async function generate() {
+  if (aborter) { aborter.abort(); return; }
+  aborter = new AbortController();
+  go.textContent = 'Stop';
+  roundEl.textContent = '';
+  try {
+    if (backend() === 'dd') await generateDD(seedEl.value);
+    else await generateAR(seedEl.value);
   } catch (err) {
-    if (err.name !== 'AbortError') { genSpan.textContent += ' [connection error]'; console.error(err); }
+    if (err.name !== 'AbortError') {
+      story.append(' [connection error]');
+      console.error(err);
+    }
   } finally {
-    cursor.remove(); aborter = null; go.textContent = 'Write the story';
+    aborter = null; go.textContent = 'Write the story'; roundEl.textContent = '';
   }
 }
 go.addEventListener('click', generate);
 
 fetch('/info').then(r => r.json()).then(info => {
   const acc = info.val_acc >= 0 ? `, next-token accuracy ${info.val_acc.toFixed(1)}%` : '';
-  document.getElementById('modelinfo').textContent =
-    `Model: ${info.num_blocks}×Transformer(d=${info.d_model}, ${info.num_heads} heads), ${info.seq_len}-token context, vocab ${info.vocab}${acc}.`;
+  let txt = `Model: ${info.num_blocks}×Transformer(d=${info.d_model}, ${info.num_heads} heads), ` +
+            `${info.seq_len}-token context, vocab ${info.vocab}${acc}.`;
+  if (info.diffusion) {
+    txt += ` Diffusion masked-token accuracy ${info.dd_val_acc.toFixed(1)}%.`;
+  } else {
+    const lbl = document.getElementById('ddlabel');
+    lbl.classList.add('disabled');
+    lbl.title = 'diffusion weights not found — train demo_diffusion_tinystories first';
+    document.getElementById('ddradio').disabled = true;
+  }
+  document.getElementById('modelinfo').textContent = txt;
 }).catch(() => {});
 </script>
 </body>

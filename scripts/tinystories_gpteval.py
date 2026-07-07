@@ -22,7 +22,8 @@ import sys
 import time
 import urllib.request
 
-OUT = "/mnt/external_hdd/data/nlp/tinystories/gpteval_completions.json"
+OUT = os.environ.get("TS_GPTEVAL_OUT",
+                     "/mnt/external_hdd/data/nlp/tinystories/gpteval_completions.json")
 SERVER = os.environ.get("TS_SERVER", "http://localhost:8127")
 JUDGE_MODEL = "claude-opus-4-8"
 OPENAI_JUDGE = os.environ.get("OPENAI_JUDGE", "gpt-4o")  # paper used gpt-4 (2023)

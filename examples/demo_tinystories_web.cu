@@ -1,14 +1,21 @@
 /**
  * @file demo_tinystories_web.cu
- * @brief Web demo for the TinyStories BPE language model: type the opening of a
- *        story and the model streams a continuation, token by token.
+ * @brief Web demo for the TinyStories BPE language models: type the opening of
+ *        a story and a model writes the rest. Two selectable backends:
  *
- * Loads the trained weight cache produced by demo_tinystories.cu (no training
- * here — it errors out if the cache is missing). The one new piece relative to
- * the trainer is a C++ BPE *encoder* (bpe_encode) that turns arbitrary user
- * text into token ids using the merge rules exported in tokenizer.txt; decoding,
- * the GPU one-hot embedding, the batch=1 network and top-k sampling are all
- * shared with demo_tinystories.cu.
+ *   - autoregressive (demo_tinystories.cu weights): streams the continuation
+ *     token by token over POST /generate
+ *   - masked discrete diffusion (demo_diffusion_tinystories.cu weights):
+ *     MaskGIT-style progressive decoding over POST /diffuse, streaming the
+ *     whole window once per denoising round (NDJSON) so the front end can
+ *     animate the unmasking; loaded only if its weight cache exists
+ *
+ * Loads trained weight caches only (no training here — it errors out if the
+ * AR cache is missing; the diffusion backend is optional). The one new piece
+ * relative to the trainers is a C++ BPE *encoder* (bpe_encode) that turns
+ * arbitrary user text into token ids using the merge rules exported in
+ * tokenizer.txt; decoding, the GPU one-hot embedding, the batch=1 networks
+ * and the samplers are all shared with the trainer demos.
  *
     Copyright (C) 2022 Song Liu (song.liu@bristol.ac.uk)
 
@@ -36,6 +43,7 @@
 #include <cstdio>
 #include <cstdlib>
 #include <fstream>
+#include <functional>
 #include <list>
 #include <map>
 #include <memory>
@@ -80,6 +88,27 @@ static string data_dir() {
 static string weights_path() {
     if (const char* p = getenv("TS_WEIGHTS")) return p;
     return data_dir() + "/tinystories.weights";
+}
+static string weights_path_dd() {
+    if (const char* p = getenv("TSDIFF_WEIGHTS")) return p;
+    return data_dir() + "/tinystories_diffusion.weights";
+}
+
+static string json_escape(const string& s) {
+    string o;
+    for (unsigned char c : s) {
+        switch (c) {
+            case '"':  o += "\\\""; break;
+            case '\\': o += "\\\\"; break;
+            case '\n': o += "\\n";  break;
+            case '\r': o += "\\r";  break;
+            case '\t': o += "\\t";  break;
+            default:
+                if (c < 0x20) { char buf[8]; snprintf(buf, 8, "\\u%04x", c); o += buf; }
+                else o += (char)c;
+        }
+    }
+    return o;
 }
 
 // ── tokenizer.txt: vocab strings + merge rules ──────────────────────────────
@@ -179,15 +208,16 @@ struct Tokenizer {
     }
 };
 
-// ── weight cache (matches demo_tinystories.cu) ──────────────────────────────
-static const int WEIGHTS_MAGIC = 0x4a5a5453;
+// ── weight caches (match demo_tinystories.cu / demo_diffusion_tinystories.cu) ─
+static const int WEIGHTS_MAGIC = 0x4a5a5453;      // "JZTS" — autoregressive
+static const int DD_WEIGHTS_MAGIC = 0x4a5a4444;   // "JZDD" — masked diffusion
 struct ModelConfig { int seq_len, d_model, d_k, d_ff, num_heads, num_blocks; };
 
-static bool read_cache_header(FILE* fp, const ModelConfig& cfg, int V,
+static bool read_cache_header(FILE* fp, const ModelConfig& cfg, int V, int magic,
                               float& val_loss, float& val_acc) {
     int h[8] = {};
     if (fread(h, sizeof(int), 8, fp) != 8) return false;
-    if (h[0] != WEIGHTS_MAGIC || h[1] != V || h[2] != cfg.seq_len || h[3] != cfg.d_model ||
+    if (h[0] != magic || h[1] != V || h[2] != cfg.seq_len || h[3] != cfg.d_model ||
         h[4] != cfg.d_k || h[5] != cfg.d_ff || h[6] != cfg.num_heads || h[7] != cfg.num_blocks)
         return false;
     return fread(&val_loss, sizeof(float), 1, fp) == 1 &&
@@ -229,21 +259,27 @@ int compute() {
     const int seq_len = cfg.seq_len;
     const int in_dim = V + seq_len;
 
-    // batch=1 inference network
+    // token one-hot slots: AR reads V tokens; diffusion reads V+1 (slot V = [MASK])
+    const int MASK = V;
+    const int V1 = V + 1;
+    const int in_dim_dd = V1 + seq_len;
+
+    // batch=1 inference networks
     using TF = TransformerLayer<FLOAT>;
-    auto make_blocks = [&](int b) {
+    auto make_blocks = [&](int b, bool causal) {
         vector<unique_ptr<TF>> v;
         for (int i = 0; i < cfg.num_blocks; ++i)
-            v.push_back(make_unique<TF>(cfg.d_model, cfg.d_k, cfg.d_ff, seq_len, b, cfg.num_heads));
+            v.push_back(make_unique<TF>(cfg.d_model, cfg.d_k, cfg.d_ff, seq_len, b,
+                                        cfg.num_heads, causal));
         return v;
     };
     LinearLayer<FLOAT> g_embed(cfg.d_model, in_dim, seq_len);
-    auto g_blocks = make_blocks(1);
+    auto g_blocks = make_blocks(1, /*causal=*/true);
     LinearLayer<FLOAT> g_proj(V, cfg.d_model, seq_len);
 
     float val_loss = -1, val_acc = -1;
     FILE* fp = fopen(weights_path().c_str(), "rb");
-    if (!fp || !read_cache_header(fp, cfg, V, val_loss, val_acc)) {
+    if (!fp || !read_cache_header(fp, cfg, V, WEIGHTS_MAGIC, val_loss, val_acc)) {
         cout << "No valid weight cache at " << weights_path()
              << " — train with demo_tinystories first." << endl;
         if (fp) fclose(fp);
@@ -251,7 +287,7 @@ int compute() {
     }
     load_cached_weights(fp, cfg.num_blocks, g_embed, g_blocks, g_proj);
     fclose(fp);
-    cout << "Loaded model (val_loss " << val_loss << ", val_acc " << val_acc << "%)." << endl;
+    cout << "Loaded AR model (val_loss " << val_loss << ", val_acc " << val_acc << "%)." << endl;
 
     list<Layer<FLOAT>*> gennn;
     gennn.push_back(&g_proj);
@@ -259,26 +295,55 @@ int compute() {
     gennn.push_back(&g_embed);
     freeze(gennn);
 
-    auto make_X = [&](const Matrix<float>& ids_h) {
+    // optional masked-diffusion backend (bidirectional attention, [MASK] slot)
+    LinearLayer<FLOAT> dd_embed(cfg.d_model, in_dim_dd, seq_len);
+    auto dd_blocks = make_blocks(1, /*causal=*/false);
+    LinearLayer<FLOAT> dd_proj(V, cfg.d_model, seq_len);
+    float dd_val_loss = -1, dd_val_acc = -1;
+    bool have_dd = false;
+    if (FILE* dfp = fopen(weights_path_dd().c_str(), "rb")) {
+        if (read_cache_header(dfp, cfg, V, DD_WEIGHTS_MAGIC, dd_val_loss, dd_val_acc)) {
+            load_cached_weights(dfp, cfg.num_blocks, dd_embed, dd_blocks, dd_proj);
+            have_dd = true;
+            cout << "Loaded diffusion model (val_loss " << dd_val_loss
+                 << ", masked_acc " << dd_val_acc << "%)." << endl;
+        } else {
+            cout << "Diffusion weight cache at " << weights_path_dd()
+                 << " is stale or invalid; serving AR only." << endl;
+        }
+        fclose(dfp);
+    } else {
+        cout << "No diffusion weight cache at " << weights_path_dd()
+             << " — train with demo_diffusion_tinystories to enable that backend." << endl;
+    }
+    list<Layer<FLOAT>*> ddnn;
+    ddnn.push_back(&dd_proj);
+    for (int i = cfg.num_blocks - 1; i >= 0; --i) ddnn.push_back(dd_blocks[i].get());
+    ddnn.push_back(&dd_embed);
+    freeze(ddnn);
+
+    // idim/vslot parameterize the two input encodings (AR: V, diffusion: V+1)
+    auto make_X_dim = [&](const Matrix<float>& ids_h, int idim, int vslot) {
         const size_t n = ids_h.num_col();
 #ifdef CUDA
         auto ids = Matrix<CUDAfloat>(ids_h);
-        auto X = Matrix<CUDAfloat>::zeros(in_dim, n);
+        auto X = Matrix<CUDAfloat>::zeros(idim, n);
         const int threads = 256, nblocks = (int)((n + threads - 1) / threads);
         ts_onehot_input_kernel<<<nblocks, threads>>>(
             const_cast<float*>(reinterpret_cast<const float*>(X.data())),
-            reinterpret_cast<const float*>(ids.data()), in_dim, V, seq_len, n);
+            reinterpret_cast<const float*>(ids.data()), idim, vslot, seq_len, n);
         CudaErrorCheck(cudaGetLastError());
         return X;
 #else
-        Matrix<float> X("X", in_dim, n); X.zeros();
+        Matrix<float> X("X", idim, n); X.zeros();
         for (size_t j = 0; j < n; ++j) {
             X.elem((int)ids_h.elem(0, j), j) = 1.0f;
-            X.elem(V + (j % seq_len), j) = 1.0f;
+            X.elem(vslot + (j % seq_len), j) = 1.0f;
         }
         return Matrix<FLOAT>(X);   // host->device (no-op copy when FLOAT==float)
 #endif
     };
+    auto make_X = [&](const Matrix<float>& ids_h) { return make_X_dim(ids_h, in_dim, V); };
 
     auto predict_mutex = make_shared<mutex>();
     uniform_real_distribution<float> u01(0.0f, 1.0f);
@@ -305,6 +370,87 @@ int compute() {
         return ranked[k - 1].second;
     };
 
+    // ── diffusion decoding (see demo_diffusion_tinystories.cu) ──────────────
+    const double PI = 3.14159265358979323846;
+
+    // one denoiser pass over a full window (tok[s] in [0,V], V = [MASK])
+    auto dd_denoise = [&](const vector<int>& t) {
+        Matrix<float> ids_h("dd_ids", 1, seq_len);
+        for (int s = 0; s < seq_len; ++s) ids_h.elem(0, s) = (float)t[s];
+        forward(ddnn, make_X_dim(ids_h, in_dim_dd, V1));
+        return as_host(dd_proj.value());
+    };
+
+    auto dd_sample_col = [&](const Matrix<float>& logits, int col, float temp,
+                             int& tok_out, float& conf_out) {
+        float mx = -1e30f;
+        for (int r = 0; r < V; ++r) mx = max(mx, logits.elem(r, col));
+        vector<float> p(V);
+        float Z = 0.0f;
+        for (int r = 0; r < V; ++r) { p[r] = expf((logits.elem(r, col) - mx) / temp); Z += p[r]; }
+        float draw = u01(global_rand_gen) * Z, acc = 0.0f;
+        int chosen = V - 1;
+        for (int r = 0; r < V; ++r) { acc += p[r]; if (draw <= acc) { chosen = r; break; } }
+        tok_out = chosen;
+        conf_out = p[chosen] / Z;
+    };
+
+    auto dd_gumbel = [&]() {
+        float u = u01(global_rand_gen);
+        return -logf(-logf(u > 1e-9f ? u : 1e-9f));
+    };
+
+    // render the window from `from` on: [MASK] -> □, <|endoftext|> -> ¶
+    auto dd_render = [&](const vector<int>& t, int from) {
+        string out;
+        for (int s = from; s < seq_len; ++s) {
+            if (t[s] == MASK) out += "\xE2\x96\xA1";            // □
+            else if (t[s] == tok.eot_id) out += "\xC2\xB6";     // ¶
+            else out += tok.decode_token(t[s]);
+        }
+        return out;
+    };
+    // final text: stop at the first <|endoftext|> after the prompt
+    auto dd_final = [&](const vector<int>& t, int from) {
+        string out;
+        for (int s = from; s < seq_len; ++s) {
+            if (t[s] == tok.eot_id) break;
+            if (t[s] != MASK) out += tok.decode_token(t[s]);
+        }
+        return out;
+    };
+
+    // MaskGIT-style progressive decoding, reporting the rendered window after
+    // every round via on_round (returning false aborts: client disconnected).
+    auto dd_decode = [&](vector<int> t, int T, float temp, float noise_scale, int from,
+                         const function<bool(int, const string&)>& on_round) {
+        int n_masked = 0;
+        for (int s = 0; s < seq_len; ++s) if (t[s] == MASK) n_masked++;
+        const int initial = n_masked;
+        for (int k = 1; k <= T && n_masked > 0; ++k) {
+            auto logits = dd_denoise(t);
+            vector<int>   cand(seq_len, 0);
+            vector<float> score(seq_len, -1e30f);
+            const float anneal = noise_scale * (float)(T - k) / (float)T;
+            for (int s = 0; s < seq_len; ++s) {
+                if (t[s] != MASK) continue;
+                float conf; dd_sample_col(logits, s, temp, cand[s], conf);
+                score[s] = logf(conf > 1e-9f ? conf : 1e-9f) + anneal * dd_gumbel();
+            }
+            int target = (k >= T) ? 0
+                : (int)floor(initial * cos(0.5 * PI * (double)k / (double)T));
+            target = min(target, n_masked);
+            const int reveal = n_masked - target;
+            vector<int> order;
+            for (int s = 0; s < seq_len; ++s) if (t[s] == MASK) order.push_back(s);
+            partial_sort(order.begin(), order.begin() + reveal, order.end(),
+                         [&](int a, int b) { return score[a] > score[b]; });
+            for (int j = 0; j < reveal; ++j) { t[order[j]] = cand[order[j]]; n_masked--; }
+            if (!on_round(k, dd_render(t, from))) break;
+        }
+        return t;
+    };
+
     httplib::Server svr;
 
     svr.Get("/", [](const httplib::Request&, httplib::Response& res) {
@@ -319,7 +465,9 @@ int compute() {
         ss << "{\"vocab\":" << V << ",\"seq_len\":" << seq_len
            << ",\"d_model\":" << cfg.d_model << ",\"num_blocks\":" << cfg.num_blocks
            << ",\"num_heads\":" << cfg.num_heads
-           << ",\"val_loss\":" << val_loss << ",\"val_acc\":" << val_acc << "}";
+           << ",\"val_loss\":" << val_loss << ",\"val_acc\":" << val_acc
+           << ",\"diffusion\":" << (have_dd ? "true" : "false")
+           << ",\"dd_val_loss\":" << dd_val_loss << ",\"dd_val_acc\":" << dd_val_acc << "}";
         res.set_content(ss.str(), "application/json");
     });
 
@@ -348,6 +496,51 @@ int compute() {
                     const string piece = tok.decode_token(next);
                     if (!piece.empty() && !sink.write(piece.c_str(), piece.size())) break;
                 }
+                sink.done();
+                return true;
+            });
+    });
+
+    // POST /diffuse?steps=&temperature=&noise=, body = story opening (text).
+    // The prompt is pinned as context; the rest of the 256-token window starts
+    // as [MASK] and is progressively decoded. Streams NDJSON: one line per
+    // denoising round ({"round":k,"total":T,"text":"..."} with □ for still-
+    // masked slots), then {"done":true,"text":"..."} trimmed at end-of-story.
+    svr.Post("/diffuse", [&](const httplib::Request& req, httplib::Response& res) {
+        if (!have_dd) {
+            res.status = 503;
+            res.set_content("diffusion backend not available — train demo_diffusion_tinystories first",
+                            "text/plain");
+            return;
+        }
+        int T = 64; float temperature = 0.8f, noise = 1.0f;
+        if (req.has_param("steps")) T = atoi(req.get_param_value("steps").c_str());
+        if (req.has_param("temperature")) temperature = atof(req.get_param_value("temperature").c_str());
+        if (req.has_param("noise")) noise = atof(req.get_param_value("noise").c_str());
+        T = max(1, min(T, 256));
+        temperature = max(0.05f, min(temperature, 5.0f));
+        noise = max(0.0f, min(noise, 5.0f));
+
+        auto ctx = make_shared<vector<int>>(seq_len, MASK);
+        vector<int> ids = tok.encode(req.body);
+        const int plen = min((int)ids.size(), seq_len / 2);
+        for (int s = 0; s < plen; ++s) (*ctx)[s] = ids[s];
+
+        res.set_chunked_content_provider(
+            "application/x-ndjson",
+            [&, ctx, T, temperature, noise, plen](size_t, httplib::DataSink& sink) {
+                lock_guard<mutex> lock(*predict_mutex);
+                auto emit = [&](const string& line) {
+                    return sink.write(line.c_str(), line.size());
+                };
+                emit("{\"round\":0,\"total\":" + to_string(T) + ",\"text\":\""
+                     + json_escape(dd_render(*ctx, plen)) + "\"}\n");
+                auto t = dd_decode(*ctx, T, temperature, noise, plen,
+                    [&](int k, const string& text) {
+                        return emit("{\"round\":" + to_string(k) + ",\"total\":" + to_string(T)
+                                    + ",\"text\":\"" + json_escape(text) + "\"}\n");
+                    });
+                emit("{\"done\":true,\"text\":\"" + json_escape(dd_final(t, plen)) + "\"}\n");
                 sink.done();
                 return true;
             });
