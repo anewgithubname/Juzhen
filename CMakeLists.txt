@@ -121,12 +121,6 @@ set(OpenBLAS_INCLUDE_DIRS "external/OpenBLAS/include")
 
 set(spdlog_INCLUDE_DIRS "${PROJECT_SOURCE_DIR}/external/spdlog/include")
 
-set(BOOST_ROOT "${PROJECT_SOURCE_DIR}/external/boost_1_82_0")
-set(BOOST_INCLUDEDIR "${BOOST_ROOT}")
-set(Boost_NO_SYSTEM_PATHS ON)
-
-find_package(Boost REQUIRED)
-
 if(NVIDIA_CUDA) # add relevant backend implementations for CUDA
     add_library(juzhen cpp/launcher.cu cpp/cumatrix.cu cpp/cukernels.cu)
 elseif(ROCM_HIP) # add relevant backend implementations for ROCm/HIP
@@ -141,7 +135,6 @@ endif()
 # target_precompile_headers(juzhen PRIVATE cpp/juzhen.hpp)
 target_include_directories(juzhen PUBLIC "external/spdlog/include")
 target_include_directories(juzhen PUBLIC ${OpenBLAS_INCLUDE_DIRS})
-target_include_directories(juzhen PUBLIC ${Boost_INCLUDE_DIRS})
 
 if(NVIDIA_CUDA) # if we are on GPU, we need to include the cuda headers
     target_include_directories(juzhen PUBLIC ${CUDA_INCLUDE_DIRS})
@@ -204,7 +197,6 @@ macro(GENERATE_PROJ TARGETNAME FILE)
     add_dependencies(${TARGETNAME} juzhen)
     target_include_directories(${TARGETNAME} PUBLIC "external/spdlog/include")
     target_include_directories(${TARGETNAME} PUBLIC ${OpenBLAS_INCLUDE_DIRS})
-    target_include_directories(${TARGETNAME} PUBLIC ${Boost_INCLUDE_DIRS})
 
     
     if(NVIDIA_CUDA) # if we are on GPU, we need to link the cuda libraries

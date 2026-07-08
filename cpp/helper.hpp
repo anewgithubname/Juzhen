@@ -48,13 +48,42 @@ typedef std::chrono::high_resolution_clock Clock;
 #include "hipbackend.hpp"
 #endif
 
-#include <boost/serialization/strong_typedef.hpp>
-#include <boost/type_index.hpp>
-#define datatype(D) boost::typeindex::type_id<D>().pretty_name() 
+#include <typeinfo>
 
-BOOST_STRONG_TYPEDEF(float, CUDAfloat)
-BOOST_STRONG_TYPEDEF(float, MPSfloat)
-BOOST_STRONG_TYPEDEF(float, ROCMfloat)
+// Strong typedefs for the GPU element types. Each is a distinct,
+// standard-layout struct wrapping a single `T`, so it has the same size and
+// layout as `T` and a `D*` can be reinterpret_cast to `T*` for BLAS/kernel
+// calls. This reproduces the operator set of the former BOOST_STRONG_TYPEDEF
+// (construct from T, implicit conversion to T&/const T&, assignment from T or
+// self, ==, <), so it is a drop-in replacement with no Boost dependency.
+#define JUZHEN_STRONG_TYPEDEF(T, D)                                   \
+    struct D {                                                        \
+        T t;                                                          \
+        D() : t() {}                                                  \
+        explicit D(const T t_) : t(t_) {}                             \
+        D(const D& d_) : t(d_.t) {}                                   \
+        D& operator=(const D& rhs) { t = rhs.t; return *this; }       \
+        D& operator=(const T& rhs) { t = rhs; return *this; }         \
+        operator const T&() const { return t; }                      \
+        operator T&() { return t; }                                   \
+        bool operator==(const D& rhs) const { return t == rhs.t; }    \
+        bool operator<(const D& rhs) const { return t < rhs.t; }      \
+    };
+
+JUZHEN_STRONG_TYPEDEF(float, CUDAfloat)
+JUZHEN_STRONG_TYPEDEF(float, MPSfloat)
+JUZHEN_STRONG_TYPEDEF(float, ROCMfloat)
+
+// Human-readable type name (replaces boost::typeindex type_id<D>().pretty_name()).
+// Unlisted types fall back to the compiler's typeid name.
+template <class D> inline const char* type_name() { return typeid(D).name(); }
+template <> inline const char* type_name<float>()     { return "float"; }
+template <> inline const char* type_name<double>()    { return "double"; }
+template <> inline const char* type_name<int>()       { return "int"; }
+template <> inline const char* type_name<CUDAfloat>() { return "CUDAfloat"; }
+template <> inline const char* type_name<MPSfloat>()  { return "MPSfloat"; }
+template <> inline const char* type_name<ROCMfloat>() { return "ROCMfloat"; }
+#define datatype(D) type_name<D>()
 
 typedef std::vector<size_t> idxlist;
 
