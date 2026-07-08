@@ -1,3 +1,11 @@
+// xpu_info.hpp — CPU / instruction-set feature detection (cross-platform).
+//
+// The x86/x64 CPUID feature-detection code (the CPUInfo / InstructionSet_Internal
+// class below) is adapted from Microsoft's public "__cpuid / __cpuidex"
+// documentation sample ("InstructionSet.cpp"):
+//   https://learn.microsoft.com/cpp/intrinsics/cpuid-cpuidex
+// Microsoft's documentation code samples are provided under the MIT License.
+// The Linux (cpuid.h) and Apple (sysctl) code paths are additions by this project.
 #pragma once
 
 #if !defined(_WIN64) && defined(__x86_64__) // Linux, x86_64
