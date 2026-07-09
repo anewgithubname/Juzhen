@@ -94,6 +94,8 @@ Zt.csv
 # exclude some testing files
 stock_analysis/**
 build_cuda126/**
+# CTest scratch dir left behind when ctest is run from the source root
+Testing/
 build*/**
 
 *.txt

@@ -8,9 +8,9 @@ add_definitions(-DPROJECT_DIR="${CMAKE_SOURCE_DIR}")
 add_definitions(-DBENCHMARKSERVER="DONOTKNOW")
 
 # do you need GPU support?
-option(NVIDIA_CUDA "Build with NVIDIA CUDA backend" OFF)
+option(NVIDIA_CUDA "Build with NVIDIA CUDA backend" ON)
 option(ROCM_HIP "Build with AMD ROCm/HIP backend (scaffold)" OFF)
-option(APPLE_SILICON "Build with Apple Silicon backend" ON)
+option(APPLE_SILICON "Build with Apple Silicon backend" OFF)
 set(ROCM_OFFLOAD_ARCH "" CACHE STRING "ROCm offload architecture, e.g. gfx1151")
 
 set(HAS_CONCEPTS ON)
@@ -34,7 +34,7 @@ if(NVIDIA_CUDA)
         set(CMAKE_CUDA_COMPILER /usr/local/cuda-12.6/bin/nvcc)
     endif()
     
-    set(CMAKE_CUDA_ARCHITECTURES 61)
+    set(CMAKE_CUDA_ARCHITECTURES native)
     project(animated_octo_sniffle LANGUAGES CXX CUDA)
     find_package(CUDAToolkit REQUIRED)
 
@@ -289,6 +289,7 @@ GENERATE_PROJ(demo_diffusion_tinystories examples/demo_diffusion_tinystories.cu)
 GENERATE_PROJ(demo_discretediffusion_web examples/demo_discretediffusion_web.cu)
 target_link_libraries(demo_discretediffusion_web Threads::Threads)
 GENERATE_PROJ(demo_arithmetic examples/demo_arithmetic.cu)
+GENERATE_PROJ(demo_word2vec examples/demo_word2vec.cu)
 GENERATE_PROJ(testCNNTrainParity tests/testCNNTrainParity.cu)
 GENERATE_PROJ(testRocmDeviceProof tests/testRocmDeviceProof.cu)
 GENERATE_PROJ(testRocmOpsSmoke tests/testRocmOpsSmoke.cu)
@@ -334,3 +335,10 @@ add_test(test26 testUNetScoreCPU)
 add_test(test27 testDiffusionTrainIterCPU)
 add_test(test28 testCNNTrainParity)
 set_tests_properties(test25 test26 test27 test28 PROPERTIES SKIP_RETURN_CODE 77)
+# word2vec smoke run: tiny config, asserts the loss drops; skips (77) when
+# datasets/text8 is absent. Cache path kept out of datasets/ so a real
+# trained cache is never clobbered.
+add_test(test29 demo_word2vec)
+set_tests_properties(test29 PROPERTIES
+    ENVIRONMENT "STEPS=1200;VOCAB=5000;BATCH=256;DIM=64;NEG=16;W2V_WEIGHTS=word2vec_smoke.weights;W2V_INTERACTIVE=0"
+    SKIP_RETURN_CODE 77)
