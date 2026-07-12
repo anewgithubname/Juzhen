@@ -115,6 +115,16 @@ namespace Juzhen
 		adam_state<D>& adamWstate() { return adamW; }
 		adam_state<D>& adambstate() { return adamb; }
 
+		// Unified checkpoint schema. Derived layers with additional trainable
+		// tensors/optimizers override these two methods; callers never need to
+		// reach into a layer's private implementation details.
+		virtual std::vector<std::pair<std::string, Matrix<D>*>> checkpoint_parameters() {
+			return {{"weights", &weights}, {"bias", &bias}};
+		}
+		virtual std::vector<std::pair<std::string, adam_state<D>*>> checkpoint_optimizers() {
+			return {{"adam_weights", &adamW}, {"adam_bias", &adamb}};
+		}
+
 		void print() {
 			using namespace std;
 			cout << weights << endl << bias << endl << lrW << endl << lrb << endl;
@@ -2632,8 +2642,6 @@ namespace Juzhen
 		}
 
 		void eval(const Matrix<D>& input) override {
-			const int N = seq_len * batchN;
-
 			// 1. LN1 then linear projections  — Q,K,V : (d_k, N)
 			cached_x1 = ln1.forward(input);
 			cached_Q = Wq * cached_x1;
@@ -3040,6 +3048,20 @@ namespace Juzhen
 		const Matrix<D>& get_ln1_beta() const  { return ln1.get_beta(); }
 		const Matrix<D>& get_ln2_gamma() const { return ln2.get_gamma(); }
 		const Matrix<D>& get_ln2_beta() const  { return ln2.get_beta(); }
+
+		std::vector<std::pair<std::string, Matrix<D>*>> checkpoint_parameters() override {
+			return {{"Wq",&Wq},{"Wk",&Wk},{"Wv",&Wv},{"Wo",&Wo},{"bo",&bo},
+			        {"W1",&W1},{"b1",&b1},{"W2",&W2},{"b2",&b2},
+			        {"ln1_gamma",&ln1.gamma},{"ln1_beta",&ln1.beta},
+			        {"ln2_gamma",&ln2.gamma},{"ln2_beta",&ln2.beta}};
+		}
+		std::vector<std::pair<std::string, adam_state<D>*>> checkpoint_optimizers() override {
+			return {{"adam_Wq",&adam_Wq},{"adam_Wk",&adam_Wk},{"adam_Wv",&adam_Wv},
+			        {"adam_Wo",&adam_Wo},{"adam_bo",&adam_bo},{"adam_W1",&adam_W1},
+			        {"adam_b1",&adam_b1},{"adam_W2",&adam_W2},{"adam_b2",&adam_b2},
+			        {"ln1_adam_gamma",&ln1.adam_g},{"ln1_adam_beta",&ln1.adam_b},
+			        {"ln2_adam_gamma",&ln2.adam_g},{"ln2_adam_beta",&ln2.adam_b}};
+		}
 
 		// Set the Adam learning rate for every parameter group in this block
 		// (attention, FFN, and both LayerNorms). Used to drive an LR schedule.

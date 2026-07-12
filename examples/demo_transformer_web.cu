@@ -227,7 +227,7 @@ static void load_cached_weights(FILE* fp, int num_blocks,
                                 vector<unique_ptr<TransformerLayer<FLOAT>>>& blocks,
                                 LinearLayer<FLOAT>& proj) {
     Matrix<float> M("cache", 1, 1);
-    auto next = [&]() -> Matrix<float>& { read(fp, M); return M; };
+    auto next = [&]() -> Matrix<float> { read(fp, M); return M; };
     emb.W() = Matrix<FLOAT>(next());
     emb.b() = Matrix<FLOAT>(next());
     for (int i = 0; i < num_blocks; ++i) {

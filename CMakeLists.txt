@@ -294,6 +294,10 @@ GENERATE_PROJ(testCNNTrainParity tests/testCNNTrainParity.cu)
 GENERATE_PROJ(testRocmDeviceProof tests/testRocmDeviceProof.cu)
 GENERATE_PROJ(testRocmOpsSmoke tests/testRocmOpsSmoke.cu)
 GENERATE_PROJ(testRocmCpuParity tests/testRocmCpuParity.cu)
+GENERATE_PROJ(benchmarkCoreOps tests/benchmarkCoreOps.cu)
+GENERATE_PROJ(benchmarkTrainingStep tests/benchmarkTrainingStep.cu)
+GENERATE_PROJ(testElementwiseReduceTorchDump tests/testElementwiseReduceTorchDump.cu)
+GENERATE_PROJ(testCheckpointResume tests/testCheckpointResume.cu)
 # GENERATE_PROJ(wintest examples/demo_gui.cu)
 
 enable_testing()
@@ -342,3 +346,26 @@ add_test(test29 demo_word2vec)
 set_tests_properties(test29 PROPERTIES
     ENVIRONMENT "STEPS=1200;VOCAB=5000;BATCH=256;DIM=64;NEG=16;W2V_WEIGHTS=word2vec_smoke.weights;W2V_INTERACTIVE=0"
     SKIP_RETURN_CODE 77)
+
+# Informational microbenchmarks have no brittle hardware-specific threshold.
+add_test(NAME benchmark_core_ops COMMAND benchmarkCoreOps)
+set_tests_properties(benchmark_core_ops PROPERTIES LABELS "benchmark" TIMEOUT 300)
+add_test(NAME benchmark_training_step COMMAND benchmarkTrainingStep)
+set_tests_properties(benchmark_training_step PROPERTIES LABELS "benchmark" TIMEOUT 300)
+add_test(NAME benchmark_pytorch_compare COMMAND python3
+    ${CMAKE_SOURCE_DIR}/tests/benchmarkPytorchCompare.py
+    $<TARGET_FILE:benchmarkTrainingStep> $<TARGET_FILE:testTransformerTorchDump>
+    ${CMAKE_SOURCE_DIR})
+set_tests_properties(benchmark_pytorch_compare PROPERTIES
+    LABELS "benchmark;pytorch" SKIP_RETURN_CODE 77 TIMEOUT 300)
+
+add_test(NAME elementwise_reduce_torch_dump COMMAND testElementwiseReduceTorchDump)
+add_test(NAME elementwise_reduce_torch_compare COMMAND python3
+    ${CMAKE_SOURCE_DIR}/tests/testElementwiseReduceTorch.py
+    ${CMAKE_SOURCE_DIR}/res/elementwise_reduce_torch_dump.bin)
+set_tests_properties(elementwise_reduce_torch_dump PROPERTIES
+    FIXTURES_SETUP elementwise_reduce_dump LABELS "unit;pytorch")
+set_tests_properties(elementwise_reduce_torch_compare PROPERTIES
+    FIXTURES_REQUIRED elementwise_reduce_dump LABELS "unit;pytorch" SKIP_RETURN_CODE 77)
+add_test(NAME checkpoint_resume_consistency COMMAND testCheckpointResume)
+set_tests_properties(checkpoint_resume_consistency PROPERTIES LABELS "unit;checkpoint")
