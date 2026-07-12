@@ -43,7 +43,7 @@ Matrix<CUDAfloat>::Matrix(const Matrix<float>& M)
     profiler.end();
 
     if (stat != cudaSuccess) {
-        LOG_ERROR("host to device memory copy failed, {}.", stat);
+        LOG_ERROR("host to device memory copy failed, {}.", cudaGetErrorString(stat));
     }
 }
 
@@ -76,7 +76,7 @@ Matrix<CUDAfloat>::Matrix(const Matrix<CUDAfloat>& M) {
 
     cudaError_t stat = cudaMemcpy(elements.get(), M.elements.get(), numcol * numrow * sizeof(float), cudaMemcpyDeviceToDevice);
     if (stat != cudaSuccess) {
-        LOG_ERROR("device memory copy failed, {}.", stat);
+        LOG_ERROR("device memory copy failed, {}.", cudaGetErrorString(stat));
     }
 
 }
@@ -107,7 +107,7 @@ Matrix<CUDAfloat>& Matrix<CUDAfloat>::operator=(const Matrix<CUDAfloat>& M) {
 
     cudaError_t stat = cudaMemcpy(elements.get(), M.elements.get(), numcol * numrow * sizeof(float), cudaMemcpyDeviceToDevice);
     if (stat != cudaSuccess) {
-        LOG_ERROR("device memory copy failed, {}.", stat);
+        LOG_ERROR("device memory copy failed, {}.", cudaGetErrorString(stat));
         ERROR_OUT;
     }
 
@@ -157,7 +157,7 @@ Matrix<float> Matrix<CUDAfloat>::to_host() const
     //     p.end();
     // }
     if (stat != cudaSuccess) {
-        LOG_ERROR("device memory upload to host failed, {}.", stat);
+        LOG_ERROR("device memory upload to host failed, {}.", cudaGetErrorString(stat));
         ERROR_OUT;
     }
     STATIC_TOC;
@@ -365,12 +365,12 @@ Matrix<CUDAfloat> Matrix<CUDAfloat>::randn(size_t m, size_t n) {
         cudaMalloc(&p, (m * n + 1) * sizeof(float));
         curandStatus_t curand_stat = curandGenerateNormal(gen, p, m * n + 1, 0.0f, 1.0f);
         if (curand_stat != CURAND_STATUS_SUCCESS) {
-            LOG_ERROR("sample random nums failed, {}.", curand_stat);
+            LOG_ERROR("sample random nums failed, {}.", static_cast<int>(curand_stat));
             ERROR_OUT;
         }
         cudaError_t stat = cudaMemcpy((float *) M.elements.get(), p, m * n * sizeof(float), cudaMemcpyDeviceToDevice);
         if (stat != cudaSuccess) {
-            LOG_ERROR("device memory copy failed, {}.", stat);
+            LOG_ERROR("device memory copy failed, {}.", cudaGetErrorString(stat));
             ERROR_OUT;
         }
         cudaFree(p);
@@ -379,7 +379,7 @@ Matrix<CUDAfloat> Matrix<CUDAfloat>::randn(size_t m, size_t n) {
         // generate normal 
         auto stat = curandGenerateNormal(gen, (float *) M.elements.get(), M.numcol * M.numrow, 0.0f, 1.0f);
         if (stat != CURAND_STATUS_SUCCESS) {
-            LOG_ERROR("curand generate normal failed, {}.", stat);
+            LOG_ERROR("curand generate normal failed, {}.", static_cast<int>(stat));
             ERROR_OUT;
         }
     }
@@ -397,12 +397,12 @@ Matrix<CUDAfloat> Matrix<CUDAfloat>::rand(size_t m, size_t n) {
         cudaMalloc(&p, (m * n + 1) * sizeof(float));
         curandStatus_t curand_stat = curandGenerateUniform(gen, p, m * n + 1);
         if (curand_stat != CURAND_STATUS_SUCCESS) {
-            LOG_ERROR("sample random nums failed, {}.", curand_stat);
+            LOG_ERROR("sample random nums failed, {}.", static_cast<int>(curand_stat));
             ERROR_OUT;
         }
         cudaError_t stat = cudaMemcpy((float *) M.elements.get(), p, m * n * sizeof(float), cudaMemcpyDeviceToDevice);
         if (stat != cudaSuccess) {
-            LOG_ERROR("device memory copy failed, {}.", stat);
+            LOG_ERROR("device memory copy failed, {}.", cudaGetErrorString(stat));
             ERROR_OUT;
         }
         cudaFree(p);
@@ -411,7 +411,7 @@ Matrix<CUDAfloat> Matrix<CUDAfloat>::rand(size_t m, size_t n) {
         // generate normal 
         auto stat = curandGenerateUniform(gen, (float *) M.elements.get(), M.numcol * M.numrow);
         if (stat != CURAND_STATUS_SUCCESS) {
-            LOG_ERROR("curand generate normal failed, {}.", stat);
+            LOG_ERROR("curand generate normal failed, {}.", static_cast<int>(stat));
             ERROR_OUT;
         }
     }
