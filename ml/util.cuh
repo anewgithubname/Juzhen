@@ -25,6 +25,9 @@
 
 #pragma once
 
+#include <cmath>        // std::sqrt (float overload) in the fused CPU Adam
+#include <type_traits>  // std::is_same_v guards of the fused Adam paths
+
 #include "../cpp/juzhen.hpp"
 
 #ifdef CUDA
@@ -205,6 +208,41 @@ Matrix<T> adam_update(Matrix<T> &&g, adam_state<T> &state){
         }
     }
 #endif
+
+    // Fused CPU Adam step: the CUDA and Metal paths above replace the ~12
+    // matrix-op kernels (and their temporaries) of the generic formulation
+    // below with one elementwise pass; this is the same fusion for plain
+    // CPU floats. It replicates the generic path's float rounding EXACTLY,
+    // so results are bit-identical: scale() casts its double factor back
+    // to float and its add(0, s1) form appends "+ 0.0f"; the bias-corrected
+    // divisors go through double 1.0/x before the float cast (operator/'s
+    // scale(1.0/r)); the final division is eleminv's DOUBLE 1.0/x followed
+    // by a float hadmd multiply; sqrt is the float overload, as in the
+    // elemwise lambda of juzhen.hpp's sqrt(Matrix). Transposed operands
+    // fall through to the generic formulation, as in the CUDA guard.
+    if constexpr (std::is_same_v<T, float>) {
+        if (!g.get_transpose() && !m.get_transpose() && !v.get_transpose()) {
+            const float omb1 = 1 - beta1, omb2 = 1 - beta2;
+            const float r1 = (float)(1.0 / (1.0 - pow((double)beta1, (double)iteration)));
+            const float r2 = (float)(1.0 / (1.0 - pow((double)beta2, (double)iteration)));
+            float* gp = const_cast<float*>(g.data());
+            float* mp = const_cast<float*>(m.data());
+            float* vp = const_cast<float*>(v.data());
+            const size_t n = g.num_row() * g.num_col();
+            for (size_t i = 0; i < n; i++) {
+                const float gi = gp[i];
+                const float mi = (beta1 * mp[i] + 0.0f) + (omb1 * gi + 0.0f);
+                const float vi = (beta2 * vp[i] + 0.0f) + (omb2 * (gi * gi) + 0.0f);
+                mp[i] = mi; vp[i] = vi;
+                const float mh  = r1 * mi + 0.0f;
+                const float vh  = r2 * vi + 0.0f;
+                const float den = 1.0f * std::sqrt(vh) + eps;
+                gp[i] = (alpha * mh + 0.0f) * (float)(1.0 / den);
+            }
+            iteration++;
+            return std::move(g);
+        }
+    }
 
     m = beta1 * m + (1 - beta1) * g;
     v = beta2 * v + (1 - beta2) * square(g);
