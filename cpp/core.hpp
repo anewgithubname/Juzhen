@@ -150,7 +150,6 @@ class Matrix {
     void eleminv(double l);
     Matrix<D> eleminv(double l) const;
 
-    Matrix<D> inv();  // using LU decomposition
     D norm() const;   // using single for loop
     const Matrix<D> T() const;
 
@@ -407,54 +406,6 @@ Matrix<D> Matrix<D>::dot(const Matrix<D> &B) const {
          C.elements.get(), C.numrow);
     STATIC_TOC;
     return C;
-}
-
-/*
-Matrix inversion using Lapack, found and modified from:
-https://stackoverflow.com/questions/3519959/computing-the-inverse-of-a-matrix-using-lapack-in-c/41474839
-*/
-template <class D>
-Matrix<D> Matrix<D>::inv() {
-    Matrix<D> inv("inv_M", numrow, numcol, 0);
-    for (size_t i = 0; i < numrow * numcol; i++) {
-        inv.elements[i] = elements[i];
-    }
-
-    int N = (int)num_row();
-    int error = 0;
-    int *pivot = (int *)malloc(
-        N *
-        sizeof(
-            int));  // LAPACK requires MIN(M,N), here M==N, so N will do fine.
-    int Nwork = 2 * N * N;
-    D *workspace = (D *)malloc(Nwork * sizeof(D));
-
-    /*  LU factorisation */
-    getrf_(&N, &N, inv.elements.get(), &N, pivot, &error);
-
-    if (error != 0) {
-        // NSLog(@"Error 1");
-        std::cout << "Error 1" << std::endl;
-        ::free(pivot);
-        ::free(workspace);
-        exit(1);
-    }
-
-    /*  matrix inversion */
-    getri_(&N, inv.elements.get(), &N, pivot, workspace, &Nwork, &error);
-
-    if (error != 0) {
-        // NSLog(@"Error 2");
-        std::cout << "Error 2" << std::endl;
-        ::free(pivot);
-        ::free(workspace);
-        exit(1);
-    }
-
-    ::free(pivot);
-    ::free(workspace);
-
-    return inv;
 }
 
 // C = s1*A + s2*B

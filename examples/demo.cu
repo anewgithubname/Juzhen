@@ -82,7 +82,7 @@ void cpu_arithmetics(){
 
     cout<< "timer started..."<<endl;
     auto t1 = Clock::now();
-    Matrix<float> && C = (((A+B).T()*100.0f*(A+B)/5.0+1.0f)*2.0f+2.0f).inv()/4.0;
+    Matrix<float> && C = (((A+B).T()*100.0f*(A+B)/5.0+1.0f)*2.0f+2.0f)/4.0;
     auto t2 = Clock::now();
     cout << "Time taken: " << time_in_ms(t1, t2) <<" ms" << endl;
 

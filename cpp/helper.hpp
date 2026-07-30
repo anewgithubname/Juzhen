@@ -174,23 +174,7 @@ class Profiler {
 #define TIC(profilerlogger) Profiler *profilerlogger = new Profiler(std::string(__FUNCTION__) + ", " + std::string(__FILE__) + ":" + std::to_string(__LINE__)); profilerlogger->start()
 #define TOC(profilerlogger) delete profilerlogger
 
-//CBLAS declarations
-extern "C"
-{
-    void sgesv_(int *N, int *NRHS, float *A, int *lda, int *IPIV, float *B, int *ldb, int *INFO);
-
-    // LU decomoposition of a general matrix
-    void sgetrf_(int *M, int *N, float *A, int *lda, int *IPIV, int *INFO);
-    void dgetrf_(int *M, int *N, double *A, int *lda, int *IPIV, int *INFO);
-
-    void sgetrs_(char *TRANS, int *N, int *NRHS, float *A, int *lda, int *IPIV, float *B, int *ldb, int *INFO);
-
-    // generate inverse of a matrix given its LU decomposition
-    void sgetri_(int *N, float *A, int *lda, int *IPIV, float *WORK, int *lwork, int *INFO);
-    void dgetri_(int *N, double *A, int *lda, int *IPIV, double *WORK, int *lwork, int *INFO);
-}
-
-//overloading CBLAS interface for different types. 
+//overloading CBLAS interface for different types.
 inline void gemv(CBLAS_TRANSPOSE transM, int m, int n, float alpha, float *A, int lda, float *x, int ldx, float beta, float *y, int ldy){
     STATIC_TIC;
     cblas_sgemv(CblasColMajor, transM, m, n, alpha, A, lda, x, ldx, beta, y, ldy);
@@ -275,28 +259,4 @@ inline void gemm(CBLAS_TRANSPOSE transA, CBLAS_TRANSPOSE transB, int nr, int nc,
 #endif
 }
 
-inline void getrf_(int *m, int *n, float *a, int *lda, int *ipiv, int *info){
-    sgetrf_(m, n, a, lda, ipiv, info);
-}
-
-inline void getrf_(int *m, int *n, double *a, int *lda, int *ipiv, int *info){
-    dgetrf_(m, n, a, lda, ipiv, info);
-}
-
-inline void getrf_(int *m, int *n, int *a, int *lda, int *ipiv, int *info){
-    std::cout << "getrf not implemented for int!" << std::endl;
-}
-
-inline void getri_(int *n, float *a, int *lda, int *ipiv, float *work, int *lwork, int *info){
-    sgetri_(n, a, lda, ipiv, work, lwork, info);
-}
-
-inline void getri_(int *n, double *a, int *lda, int *ipiv, double *work, int *lwork, int *info){
-    dgetri_(n, a, lda, ipiv, work, lwork, info);
-}
-
-inline void getri_(int *n, int *a, int *lda, int *ipiv, int *work, int *lwork, int *info){
-    std::cout << "getri not implemented for int!" << std::endl;
-}
-
-#endif
+#endif
