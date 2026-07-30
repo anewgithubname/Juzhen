@@ -29,6 +29,16 @@
 
 #include <cstddef>
 
+// These kernels define results by their exact accumulation order, so the
+// compiler must not contract a*b+c into fma (contraction skips the
+// intermediate rounding and changes bits — on aarch64 -ffp-contract=fast
+// is the default, so an unguarded build gives different results than
+// x86). Clang honors the standard pragma; GCC ignores it, so builds must
+// also pass -ffp-contract=off (see the BLAS_FREE branch in CMakeLists).
+#ifdef __clang__
+#pragma STDC FP_CONTRACT OFF
+#endif
+
 namespace jz {
 
 // C (m x n) = alpha * op(A) (m x k) * op(B) (k x n) + beta * C

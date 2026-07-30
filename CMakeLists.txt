@@ -115,6 +115,13 @@ endif()
 if(BLAS_FREE) # no external BLAS: handwritten kernels, nothing to find or link
     message("BUILD WITHOUT EXTERNAL BLAS (handwritten gemm/gemv)!")
     add_definitions(-DJUZHEN_NO_BLAS)
+    # The handwritten kernels promise a fixed accumulation order; fma
+    # contraction would break bit-portability across architectures
+    # (aarch64 defaults to -ffp-contract=fast). GCC ignores the standard
+    # FP_CONTRACT pragma, so pin it here for every compiler.
+    if(NOT MSVC)
+        add_compile_options(-ffp-contract=off)
+    endif()
     set(BLAS_LIBRARIES "")
     set(OpenBLAS_LIBRARIES "")
     set(OpenBLAS_INCLUDE_DIRS "")

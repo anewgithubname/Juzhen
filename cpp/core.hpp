@@ -31,6 +31,7 @@
 
 #include <sstream>
 #include <fstream>
+#include <cstring>
 
 template <class D>
 class Matrix;
