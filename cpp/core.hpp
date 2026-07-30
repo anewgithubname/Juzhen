@@ -402,30 +402,12 @@ Matrix<D> Matrix<D>::dot(const Matrix<D> &B) const {
     }
     Matrix<D> C("dot", num_row(), B.num_col(), 0);
     C.zeros();
-#ifdef NO_CBLAS
-    size_t n = C.num_row();
-    size_t m = C.num_col();
-    size_t k = num_col();
-
-#pragma omp simd
-#pragma ivdep
-    for (size_t i = 0; i < n; i++) {
-#pragma ivdep
-        for (size_t j = 0; j < m; j++) {
-#pragma ivdep
-            for (size_t l = 0; l < k; l++) {
-                C.elem(i, j) += elem(i, l) * B.elem(l, j);
-            }
-        }
-    }
-#else
     CBLAS_TRANSPOSE transA = transpose ? CblasTrans : CblasNoTrans;
     CBLAS_TRANSPOSE transB = B.transpose ? CblasTrans : CblasNoTrans;
 
     gemm(transA, transB, num_row(), B.num_col(), num_col(), 1.0f,
          elements.get(), numrow, B.elements.get(), B.numrow, 1.0f,
          C.elements.get(), C.numrow);
-#endif
     STATIC_TOC;
     return C;
 }

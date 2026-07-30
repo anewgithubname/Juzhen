@@ -77,34 +77,6 @@ inline Matrix<D> Matrix<D>::rand(size_t m, size_t n) {
 // sum function as the "sum" in MATLAB
 template <class D>
 Matrix<D> sum(const Matrix<D> &M, int dim) {
-#ifdef NO_CBLAS
-    size_t n = M.num_row();
-    size_t m = M.num_col();
-
-    if (dim == 0) {
-        Matrix<D> sumM("sumM", 1, M.num_col(), 0);
-        sumM.zeros();
-
-        for (size_t j = 0; j < m; j++) {
-#pragma clang loop vectorize(enable)
-            for (size_t i = 0; i < n; i++) {
-                sumM.elem(0, j) += M.elem(i, j);
-            }
-        }
-        return sumM;
-    } else {
-        Matrix<D> sumM("sumM", M.num_row(), 1, 0);
-        sumM.zeros();
-
-        for (size_t j = 0; j < m; j++) {
-#pragma clang loop vectorize(enable)
-            for (size_t i = 0; i < n; i++) {
-                sumM.elem(i, 0) += M.elem(i, j);
-            }
-        }
-        return sumM;
-    }
-#else
     int transM = M.transpose;
     if (dim == 0) {
         transM = !transM;
@@ -120,7 +92,6 @@ Matrix<D> sum(const Matrix<D> &M, int dim) {
         sumM.transpose = 1;
     }
     return sumM;
-#endif
 }
 // hstack function as the "hstack" in NumPy
 template <class D>
