@@ -331,7 +331,6 @@ Matrix<D> &Matrix<D>::operator=(Matrix<D> &&M) noexcept {
 template <class D>
 void Matrix<D>::ones() {
     size_t numelems = num_row() * num_col();
-#pragma ivdep
     for (size_t i = 0; i < numelems; i++) elements[i] = 1.0;
 }
 
@@ -339,8 +338,6 @@ template <class D>
 D Matrix<D>::norm() const {
     D norm = 0;
     size_t numelems = num_row() * num_col();
-#pragma clang loop vectorize(enable)
-#pragma ivdep
     for (size_t i = 0; i < numelems; i++) norm += elements[i] * elements[i];
 
     return sqrt(norm);
@@ -470,16 +467,7 @@ Matrix<D> Matrix<D>::add(const Matrix<D> &B, D s1, D s2) const {
 
     Matrix<D> C("add", num_row(), num_col(), 0);
 
-#ifdef INTEL_MKL
-    C.zeros();
-    char transA = transpose ? 'T' : 'N';
-    char transB = B.transpose ? 'T' : 'N';
-
-    omatadd(transA, transB, num_row(), num_col(), s1, elements.get(), numrow,
-            s2, B.elements.get(), B.numrow, C.elements.get(), C.numrow);
-#else
     for (size_t j = 0; j < num_col(); j++) {
-#pragma clang loop vectorize(enable)
         for (size_t i = 0; i < num_row(); i++) {
             // NOTE: Perhaps there is better way of doing this
             //  considering the cache hit rate.
@@ -487,7 +475,6 @@ Matrix<D> Matrix<D>::add(const Matrix<D> &B, D s1, D s2) const {
             C.elem(i, j) = s1 * elem(i, j) + s2 * B.elem(i, j);
         }
     }
-#endif
     return C;
 }
 
@@ -500,7 +487,6 @@ void Matrix<D>::add(const Matrix<D> &B, D s1, D s2) {
     }
 
     for (size_t j = 0; j < num_col(); j++) {
-#pragma clang loop vectorize(enable)
         for (size_t i = 0; i < num_row(); i++) {
             // NOTE: Perhaps there is better way of doing this
             //  considering the cache hit rate.
@@ -513,24 +499,11 @@ void Matrix<D>::add(const Matrix<D> &B, D s1, D s2) {
 // C = s1*A + b
 template <class D>
 Matrix<D> Matrix<D>::add(D b, D s1) const {
-#ifdef INTEL_MKL
-    Matrix<D> C("add", num_row(), num_col(), 0);
-    C.zeros();
-    auto e = Matrix<D>::ones(num_row(), num_col());
-    char transA = transpose ? 'T' : 'N';
-    char transB = 'N';
-
-    omatadd(transA, transB, num_row(), num_col(), s1, elements.get(), numrow, b,
-            e.elements.get(), e.numrow, C.elements.get(), C.numrow);
-#else
-
     Matrix<D> C("add", numrow, numcol, transpose);
     size_t numelems = num_row() * num_col();
-#pragma ivdep
     for (size_t i = 0; i < numelems; i++) {
         C.elements[i] = s1 * elements[i] + b;
     }
-#endif
     return C;
 }
 
@@ -538,7 +511,6 @@ Matrix<D> Matrix<D>::add(D b, D s1) const {
 template <class D>
 void Matrix<D>::add(D b, D s1) {
     size_t numelems = num_row() * num_col();
-#pragma ivdep
     for (size_t i = 0; i < numelems; i++) {
         elements[i] = s1 * elements[i] + b;
     }

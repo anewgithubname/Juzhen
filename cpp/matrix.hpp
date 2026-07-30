@@ -30,7 +30,6 @@ Matrix<D> Matrix<D>::ones(size_t m, size_t n) {
     static Profiler p("ones");
     p.start();
     Matrix<D> M("ones", m, n);
-#pragma ivdep
     for (size_t i = 0; i < m * n; i++) {
         M.elements[i] = 1;
     }
@@ -41,7 +40,6 @@ Matrix<D> Matrix<D>::ones(size_t m, size_t n) {
 template <class D>
 inline Matrix<D> Matrix<D>::zeros(size_t m, size_t n) {
     Matrix<D> M("zeros", m, n);
-#pragma ivdep
     for (size_t i = 0; i < m * n; i++) {
         M.elements[i] = 0;
     }
@@ -55,7 +53,6 @@ inline Matrix<D> Matrix<D>::randn(size_t m, size_t n) {
     Matrix<D> M("randn", m, n);
     // cannot be vectorized, due to the implementation of std::random.
     size_t numelems = M.num_row() * M.num_col();
-#pragma ivdep
     for (size_t i = 0; i < numelems; i++) M.elements[i] = (D)d(global_rand_gen);
 
     return M;
@@ -68,7 +65,6 @@ inline Matrix<D> Matrix<D>::rand(size_t m, size_t n) {
     Matrix<D> M("rand", m, n);
     // cannot be vectorized, due to the implementation of std::random.
     size_t numelems = M.num_row() * M.num_col();
-#pragma ivdep
     for (size_t i = 0; i < numelems; i++) M.elements[i] = (D)d(global_rand_gen);
 
     return M;
@@ -190,8 +186,6 @@ template <class D, class Function>
 Matrix<D> elemwise(Function func, const Matrix<D> &M) {
     size_t numelems = M.num_row() * M.num_col();
     Matrix<D> res("res", M.numrow, M.numcol, M.transpose);
-#pragma ivdep
-#pragma clang loop vectorize(enable) interleave(enable)
     for (size_t i = 0; i < numelems; i++) res.elements[i] = func(M.elements[i]);
 
     return res;
@@ -200,8 +194,6 @@ Matrix<D> elemwise(Function func, const Matrix<D> &M) {
 template <class D, class Function>
 Matrix<D> elemwise(Function func, Matrix<D> &&M) {
     size_t numelems = M.num_row() * M.num_col();
-#pragma ivdep
-#pragma clang loop vectorize(enable) interleave(enable)
     for (size_t i = 0; i < numelems; i++) M.elements[i] = func(M.elements[i]);
 
     return std::move(M);
@@ -261,8 +253,6 @@ template <class D>
 Matrix<D> exp(const Matrix<D> &M) {
     size_t numelems = M.num_row() * M.num_col();
     Matrix<D> expM("expM", M.numrow, M.numcol, M.transpose);
-#pragma ivdep
-#pragma clang loop vectorize(enable) interleave(enable)
     for (size_t i = 0; i < numelems; i++) expM.elements[i] = exp(M.elements[i]);
 
     return expM;
@@ -271,8 +261,6 @@ Matrix<D> exp(const Matrix<D> &M) {
 template <class D>
 Matrix<D> exp(Matrix<D> &&M) {
     size_t numelems = M.num_row() * M.num_col();
-#pragma ivdep
-#pragma clang loop vectorize(enable) interleave(enable)
     for (size_t i = 0; i < numelems; i++) M.elements[i] = exp(M.elements[i]);
 
     return std::move(M);
@@ -283,8 +271,6 @@ template <class D>
 Matrix<D> log(const Matrix<D> &M) {
     size_t numelems = M.num_row() * M.num_col();
     Matrix<D> logM("logM", M.numrow, M.numcol, M.transpose);
-#pragma ivdep
-#pragma clang loop vectorize(enable) interleave(enable)
     for (size_t i = 0; i < numelems; i++) logM.elements[i] = log(M.elements[i]);
 
     return logM;
@@ -295,7 +281,6 @@ Matrix<D> tanh(const Matrix<D> &M) {
     p.start();
     size_t numelems = M.num_row() * M.num_col();
     Matrix<D> tanhM("tanh", M.numrow, M.numcol, M.transpose);
-#pragma ivdep
     for (size_t i = 0; i < numelems; i++)
         tanhM.elements[i] = tanh(M.elements[i]);
 
@@ -308,7 +293,6 @@ Matrix<D> tanh(Matrix<D> &&M) {
     static Profiler p("tanh right");
     p.start();
     size_t numelems = M.num_row() * M.num_col();
-#pragma ivdep
     for (size_t i = 0; i < numelems; i++) M.elements[i] = tanh(M.elements[i]);
 
     p.end();
@@ -320,7 +304,6 @@ Matrix<D> d_tanh(const Matrix<D> &M) {
     p.start();
     size_t numelems = M.num_row() * M.num_col();
     Matrix<D> d_tanhM("tanh", M.numrow, M.numcol, M.transpose);
-#pragma ivdep
     for (size_t i = 0; i < numelems; i++)
         d_tanhM.elements[i] = 1 - tanh(M.elements[i]) * tanh(M.elements[i]);
 
@@ -333,7 +316,6 @@ Matrix<D> d_tanh(Matrix<D> &&M) {
     static Profiler p("dtanh right");
     p.start();
     size_t numelems = M.num_row() * M.num_col();
-#pragma ivdep
     for (size_t i = 0; i < numelems; i++)
         M.elements[i] = 1 - tanh(M.elements[i]) * tanh(M.elements[i]);
 
@@ -346,7 +328,6 @@ template <class D>
 Matrix<D> atan_exp(const Matrix<D> &M) {
     size_t numelems = M.num_row() * M.num_col();
     Matrix<D> atan_expM("atan_exp", M.numrow, M.numcol, M.transpose);
-#pragma ivdep
     for (size_t i = 0; i < numelems; i++)
         atan_expM.elements[i] = atan(exp(M.elements[i]));
 
@@ -357,7 +338,6 @@ Matrix<D> atan_exp(const Matrix<D> &M) {
 template <class D>
 Matrix<D> atan_exp(Matrix<D> &&M) {
     size_t numelems = M.num_row() * M.num_col();
-#pragma ivdep
     for (size_t i = 0; i < numelems; i++)
         M.elements[i] = atan(exp(M.elements[i]));
 
@@ -369,7 +349,6 @@ template <class D>
 Matrix<D> d_atan_exp(const Matrix<D> &M) {
     size_t numelems = M.num_row() * M.num_col();
     Matrix<D> d_atan_expM("d_atan_exp", M.numrow, M.numcol, M.transpose);
-#pragma ivdep
     for (size_t i = 0; i < numelems; i++)
         d_atan_expM.elements[i] =
             exp(M.elements[i]) / (1 + exp(2 * M.elements[i]));
@@ -381,7 +360,6 @@ Matrix<D> d_atan_exp(const Matrix<D> &M) {
 template <class D>
 Matrix<D> d_atan_exp(Matrix<D> &&M) {
     size_t numelems = M.num_row() * M.num_col();
-#pragma ivdep
     for (size_t i = 0; i < numelems; i++)
         M.elements[i] = exp(M.elements[i]) / (1 + exp(2 * M.elements[i]));
 
@@ -393,7 +371,6 @@ template <class D>
 Matrix<D> sin(const Matrix<D> &M) {
     size_t numelems = M.num_row() * M.num_col();
     Matrix<D> sinM("sin", M.numrow, M.numcol, M.transpose);
-#pragma ivdep
     for (size_t i = 0; i < numelems; i++) sinM.elements[i] = sin(M.elements[i]);
 
     return sinM;
@@ -403,7 +380,6 @@ Matrix<D> sin(const Matrix<D> &M) {
 template <class D>
 Matrix<D> sin(Matrix<D> &&M) {
     size_t numelems = M.num_row() * M.num_col();
-#pragma ivdep
     for (size_t i = 0; i < numelems; i++) M.elements[i] = sin(M.elements[i]);
 
     return std::move(M);
@@ -414,7 +390,6 @@ template <class D>
 Matrix<D> cos(const Matrix<D> &M) {
     size_t numelems = M.num_row() * M.num_col();
     Matrix<D> cosM("cos", M.numrow, M.numcol, M.transpose);
-#pragma ivdep
     for (size_t i = 0; i < numelems; i++) cosM.elements[i] = cos(M.elements[i]);
 
     return cosM;
@@ -424,7 +399,6 @@ Matrix<D> cos(const Matrix<D> &M) {
 template <class D>
 Matrix<D> cos(Matrix<D> &&M) {
     size_t numelems = M.num_row() * M.num_col();
-#pragma ivdep
     for (size_t i = 0; i < numelems; i++) M.elements[i] = cos(M.elements[i]);
 
     return std::move(M);
@@ -434,7 +408,6 @@ template <class D>
 inline Matrix<D> square(const Matrix<D> &M) {
     size_t numelems = M.num_row() * M.num_col();
     Matrix<D> res("square", M.numrow, M.numcol, M.transpose);
-#pragma ivdep
     for (size_t i = 0; i < numelems; i++)
         res.elements[i] = M.elements[i] * M.elements[i];
 
@@ -445,7 +418,6 @@ inline Matrix<D> square(const Matrix<D> &M) {
 template <class D>
 inline Matrix<D> square(Matrix<D> &&M) {
     size_t numelems = M.num_row() * M.num_col();
-#pragma ivdep
     for (size_t i = 0; i < numelems; i++) M.elements[i] *= M.elements[i];
 
     return std::move(M);
@@ -462,7 +434,6 @@ Matrix<D> hadmd(const Matrix<D> &M1, const Matrix<D> &M2) {
     size_t numrow = M1.num_row();
     Matrix<D> result("hadmd", M1.num_row(), M1.num_col());
     for (size_t j = 0; j < numcol; j++) {
-#pragma ivdep
         for (size_t i = 0; i < numrow; i++) {
             result.elem(i, j) = M1.elem(i, j) * M2.elem(i, j);
         }
@@ -479,7 +450,6 @@ Matrix<D> hadmd(const Matrix<D> &M1, Matrix<D> &&M2) {
     size_t numcol = M1.num_col();
     size_t numrow = M1.num_row();
     for (size_t j = 0; j < numcol; j++)
-#pragma ivdep
         for (size_t i = 0; i < numrow; i++) M2.elem(i, j) *= M1.elem(i, j);
     return std::move(M2);
 }
@@ -493,7 +463,6 @@ Matrix<D> hadmd(Matrix<D> &&M1, const Matrix<D> &M2) {
     size_t numcol = M1.num_col();
     size_t numrow = M1.num_row();
     for (size_t j = 0; j < numcol; j++)
-#pragma ivdep
         for (size_t i = 0; i < numrow; i++) M1.elem(i, j) *= M2.elem(i, j);
     return std::move(M1);
 }
@@ -504,4 +473,4 @@ Matrix<D> hadmd(Matrix<D> &&M1, Matrix<D> &&M2) {
     return hadmd(M1, std::move(M2));
 }
 
-#endif
+#endif

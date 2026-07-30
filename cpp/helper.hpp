@@ -38,11 +38,7 @@ typedef std::chrono::high_resolution_clock Clock;
 #include <algorithm>
 #include <memory>
 #include <iostream>
-#ifdef INTEL_MKL //do we use Intel mkL special funcs? doesn't seem to have much impact on perf.
-#include <mkl.h>
-#else
 #include <cblas.h>
-#endif
 
 #ifdef ROCM_HIP
 #include "hipbackend.hpp"
@@ -178,7 +174,6 @@ class Profiler {
 #define TIC(profilerlogger) Profiler *profilerlogger = new Profiler(std::string(__FUNCTION__) + ", " + std::string(__FILE__) + ":" + std::to_string(__LINE__)); profilerlogger->start()
 #define TOC(profilerlogger) delete profilerlogger
 
-#ifndef INTEL_MKL
 //CBLAS declarations
 extern "C"
 {
@@ -194,7 +189,6 @@ extern "C"
     void sgetri_(int *N, float *A, int *lda, int *IPIV, float *WORK, int *lwork, int *INFO);
     void dgetri_(int *N, double *A, int *lda, int *IPIV, double *WORK, int *lwork, int *INFO);
 }
-#endif
 
 //overloading CBLAS interface for different types. 
 inline void gemv(CBLAS_TRANSPOSE transM, int m, int n, float alpha, float *A, int lda, float *x, int ldx, float beta, float *y, int ldy){
@@ -305,16 +299,4 @@ inline void getri_(int *n, int *a, int *lda, int *ipiv, int *work, int *lwork, i
     std::cout << "getri not implemented for int!" << std::endl;
 }
 
-#ifdef INTEL_MKL
-inline void omatadd(char transA, char transB, int m, int n, float alpha, float *A, int lda, float beta, float *B, int ldb, float *C, int ldc){
-    mkl_somatadd('C',transA, transB, m, n, alpha, A, lda, beta, B, ldb, C, ldc);
-}
-inline void omatadd(char transA, char transB, int m, int n, double alpha, double *A, int lda, double beta, double *B, int ldb, double *C, int ldc){
-    mkl_domatadd('C',transA, transB, m, n, alpha, A, lda, beta, B, ldb, C, ldc);
-}
-inline void omatadd(char transA, char transB, int m, int n, int alpha, int *A, int lda, int beta, int *B, int ldb, int *C, int ldc){
-    std::cout<<"mkl_omatadd: int1 not implemented"<<std::endl;
-}
-#endif
-
-#endif
+#endif
