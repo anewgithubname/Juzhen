@@ -11,6 +11,7 @@ add_definitions(-DBENCHMARKSERVER="DONOTKNOW")
 option(NVIDIA_CUDA "Build with NVIDIA CUDA backend" ON)
 option(ROCM_HIP "Build with AMD ROCm/HIP backend (scaffold)" OFF)
 option(APPLE_SILICON "Build with Apple Silicon backend" OFF)
+option(BLAS_FREE "Build without an external BLAS; CPU gemm/gemv use the handwritten kernels in cpp/cpulinalg.hpp" OFF)
 set(ROCM_OFFLOAD_ARCH "" CACHE STRING "ROCm offload architecture, e.g. gfx1151")
 
 set(HAS_CONCEPTS ON)
@@ -111,13 +112,20 @@ else()
     project(animated_octo_sniffle LANGUAGES CXX)
 endif()
 
-if(UNIX) # if we are on linux, look for any BLAS
+if(BLAS_FREE) # no external BLAS: handwritten kernels, nothing to find or link
+    message("BUILD WITHOUT EXTERNAL BLAS (handwritten gemm/gemv)!")
+    add_definitions(-DJUZHEN_NO_BLAS)
+    set(BLAS_LIBRARIES "")
+    set(OpenBLAS_LIBRARIES "")
+    set(OpenBLAS_INCLUDE_DIRS "")
+elseif(UNIX) # if we are on linux, look for any BLAS
     find_package(BLAS REQUIRED)
     message("OpenBLAS found: ${OpenBLAS_LIBRARIES}")
+    set(OpenBLAS_INCLUDE_DIRS "external/OpenBLAS/include")
 else() # if we are on windows, use the provided OpenBLAS library
     set(OpenBLAS_LIBRARIES "${PROJECT_SOURCE_DIR}/external/OpenBLAS/lib/libopenblas.lib")
+    set(OpenBLAS_INCLUDE_DIRS "external/OpenBLAS/include")
 endif()
-set(OpenBLAS_INCLUDE_DIRS "external/OpenBLAS/include")
 
 set(spdlog_INCLUDE_DIRS "${PROJECT_SOURCE_DIR}/external/spdlog/include")
 
@@ -230,7 +238,7 @@ macro(GENERATE_PROJ TARGETNAME FILE)
         endif()
     endif()
 
-    if(WIN32) # if we are on Windows, we need to copy the dll to the build folder
+    if(WIN32 AND NOT BLAS_FREE) # if we are on Windows, we need to copy the dll to the build folder
         add_custom_command(TARGET ${TARGETNAME} POST_BUILD # Adds a post-build event to MyTest
             COMMAND ${CMAKE_COMMAND} -E copy_if_different # which executes "cmake - E copy_if_different..."
             "${PROJECT_SOURCE_DIR}/external/OpenBLAS/bin/libopenblas.dll" # <--this is in-file
@@ -298,6 +306,7 @@ GENERATE_PROJ(benchmarkCoreOps tests/benchmarkCoreOps.cu)
 GENERATE_PROJ(benchmarkTrainingStep tests/benchmarkTrainingStep.cu)
 GENERATE_PROJ(testElementwiseReduceTorchDump tests/testElementwiseReduceTorchDump.cu)
 GENERATE_PROJ(testCheckpointResume tests/testCheckpointResume.cu)
+GENERATE_PROJ(testCpuLinalg tests/testCpuLinalg.cu)
 # GENERATE_PROJ(wintest examples/demo_gui.cu)
 
 enable_testing()
@@ -369,3 +378,8 @@ set_tests_properties(elementwise_reduce_torch_compare PROPERTIES
     FIXTURES_REQUIRED elementwise_reduce_dump LABELS "unit;pytorch" SKIP_RETURN_CODE 77)
 add_test(NAME checkpoint_resume_consistency COMMAND testCheckpointResume)
 set_tests_properties(checkpoint_resume_consistency PROPERTIES LABELS "unit;checkpoint")
+
+# Handwritten gemm/gemv parity: vs a naive double-precision reference always,
+# and additionally vs cblas when the build links an external BLAS.
+add_test(NAME cpu_linalg COMMAND testCpuLinalg)
+set_tests_properties(cpu_linalg PROPERTIES LABELS "unit")

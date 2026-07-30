@@ -3,7 +3,9 @@
  * @brief a side by side comparison between juzhen and Eigen
  */
 
-#define EIGEN_USE_BLAS
+#ifndef JUZHEN_NO_BLAS
+#define EIGEN_USE_BLAS  // route Eigen through the same BLAS as juzhen
+#endif
 #define EIGEN_NO_CUDA
 
 #include "../cpp/juzhen.hpp"

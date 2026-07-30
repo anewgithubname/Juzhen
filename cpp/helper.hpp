@@ -38,7 +38,14 @@ typedef std::chrono::high_resolution_clock Clock;
 #include <algorithm>
 #include <memory>
 #include <iostream>
+#ifdef JUZHEN_NO_BLAS
+#include "cpulinalg.hpp"
+// Minimal CBLAS-compatible transpose enum for the call sites in
+// core.hpp/matrix.hpp/hipmatrix.cpp; values match cblas.h.
+enum CBLAS_TRANSPOSE { CblasNoTrans = 111, CblasTrans = 112, CblasConjTrans = 113 };
+#else
 #include <cblas.h>
+#endif
 
 #ifdef ROCM_HIP
 #include "hipbackend.hpp"
@@ -177,12 +184,20 @@ class Profiler {
 //overloading CBLAS interface for different types.
 inline void gemv(CBLAS_TRANSPOSE transM, int m, int n, float alpha, float *A, int lda, float *x, int ldx, float beta, float *y, int ldy){
     STATIC_TIC;
+#ifdef JUZHEN_NO_BLAS
+    jz::gemv(transM == CblasTrans, m, n, alpha, A, lda, x, ldx, beta, y, ldy);
+#else
     cblas_sgemv(CblasColMajor, transM, m, n, alpha, A, lda, x, ldx, beta, y, ldy);
+#endif
     STATIC_TOC;
 }
 
 inline void gemv(CBLAS_TRANSPOSE transM, int m, int n, float alpha, double *A, int lda, double *x, int ldx, float beta, double *y, int ldy){
+#ifdef JUZHEN_NO_BLAS
+    jz::gemv(transM == CblasTrans, m, n, (double)alpha, (const double*)A, lda, (const double*)x, ldx, (double)beta, y, ldy);
+#else
     cblas_dgemv(CblasColMajor, transM, m, n, alpha, A, lda, x, ldx, beta, y, ldy);
+#endif
 }
 
 inline void gemv(CBLAS_TRANSPOSE transM, int m, int n, float alpha, int *A, int lda, int *x, int ldx, float beta, int *y, int ldy){
@@ -213,18 +228,28 @@ inline void gemv(CBLAS_TRANSPOSE transM, int m, int n, float alpha, ROCMfloat *A
 #endif
 }
 
-inline void gemm(CBLAS_TRANSPOSE transA, CBLAS_TRANSPOSE transB, int nr, int nc, int nk, 
+inline void gemm(CBLAS_TRANSPOSE transA, CBLAS_TRANSPOSE transB, int nr, int nc, int nk,
             float alpha, float *A, int lda, float *B, int ldb, float beta, float *C, int ldc){
     STATIC_TIC;
+#ifdef JUZHEN_NO_BLAS
+    jz::gemm(transA == CblasTrans, transB == CblasTrans,
+             nr, nc, nk, alpha, A, lda, B, ldb, beta, C, ldc);
+#else
     cblas_sgemm(CblasColMajor, transA, transB,
                 nr, nc, nk, alpha, A, lda, B, ldb, beta, C, ldc);
+#endif
     STATIC_TOC;
 }
 
-inline void gemm(CBLAS_TRANSPOSE transA, CBLAS_TRANSPOSE transB, int nr, int nc, int nk, 
+inline void gemm(CBLAS_TRANSPOSE transA, CBLAS_TRANSPOSE transB, int nr, int nc, int nk,
             float alpha, double *A, int lda, double *B, int ldb, float beta, double *C, int ldc){
+#ifdef JUZHEN_NO_BLAS
+    jz::gemm(transA == CblasTrans, transB == CblasTrans,
+             nr, nc, nk, (double)alpha, (const double*)A, lda, (const double*)B, ldb, (double)beta, C, ldc);
+#else
     cblas_dgemm(CblasColMajor, transA, transB,
                 nr, nc, nk, alpha, A, lda, B, ldb, beta, C, ldc);
+#endif
 }
 inline void gemm(CBLAS_TRANSPOSE transA, CBLAS_TRANSPOSE transB, int nr, int nc, int nk, 
             float alpha, int *A, int lda, int *B, int ldb, float beta, int *C, int ldc){

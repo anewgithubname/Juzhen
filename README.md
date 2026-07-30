@@ -42,10 +42,15 @@ logM 2 by 2
 
 ## Prerequisites
 
-Install CBLAS and LAPACK:
-- **Ubuntu/Debian**: `sudo apt install libopenblas-dev liblapack-dev libboost-dev`
-- **macOS**: BLAS/LAPACK ship with Xcode (Accelerate framework).
+Install CBLAS:
+- **Ubuntu/Debian**: `sudo apt install libopenblas-dev libboost-dev`
+- **macOS**: BLAS ships with Xcode (Accelerate framework).
 - **Windows**: download precompiled binaries from [OpenBLAS](https://github.com/xianyi/OpenBLAS/releases).
+
+Alternatively, configure with `-DBLAS_FREE=ON` to build without any external
+BLAS: CPU `gemm`/`gemv` then use the handwritten kernels in
+`cpp/cpulinalg.hpp`. Slower than OpenBLAS, but dependency-free and validated
+against it by the `cpu_linalg` test.
 
 For CUDA builds you also need:
 - [CUDA Toolkit](https://developer.nvidia.com/cuda-toolkit) (12.x recommended)
