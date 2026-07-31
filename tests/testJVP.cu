@@ -36,7 +36,8 @@ float dot(const Matrix<float>& A, const Matrix<float>& B) {
 
 float fro(const Matrix<float>& A) { return std::sqrt(dot(A, A)); }
 
-int check_network(list<Layer<float>*> nn, int d_in, int nb, const char* name) {
+int check_network(list<Layer<float>*> nn, int d_in, int nb, const char* name,
+                  float eps = 1e-2f) {
     auto x = Matrix<float>::randn(d_in, nb);
     auto u = Matrix<float>::randn(d_in, nb); // input tangent direction
 
@@ -49,7 +50,6 @@ int check_network(list<Layer<float>*> nn, int d_in, int nb, const char* name) {
     const float adj_err = std::abs(lhs - rhs) / (std::abs(lhs) + 1e-12f);
 
     // (b) central finite differences along u.
-    const float eps = 1e-2f;
     Matrix<float> fp = forward(nn, x + eps * u);
     Matrix<float> fm = forward(nn, x - eps * u);
     auto fd = (fp - fm) / (2.0 * eps);
@@ -107,6 +107,24 @@ int compute() {
     G.W() = Matrix<float>::randn(2, 108) * 0.5f; G.b() = Matrix<float>::randn(2, 1) * 0.2f;
     list<Layer<float>*> tnet = { &G, &ct };
     if (check_network(tnet, 2 * 4 * 4, nb, "convtrans+linear")) return 1;
+
+    // ── transformer (causal, multi-head) ────────────────────────────────
+    // Default 1/sqrt(dim) weight init is already well-scaled. Input width
+    // is d_model, "batch" is seq_len * batch sequences of tokens.
+    const int d_model = 6, d_kk = 8, d_ff = 10, seq_len = 5, batch = 3, heads = 2;
+    TransformerLayer<float> tf(d_model, d_kk, d_ff, seq_len, batch, heads);
+    // Smaller FD step: the LN/softmax composition has enough curvature that
+    // eps=1e-2 second-order error swamps the tolerance (the adjoint check
+    // is exact regardless; central-diff error shrinks as O(eps^2)).
+    list<Layer<float>*> tfnet = { &tf };
+    if (check_network(tfnet, d_model, seq_len * batch, "transformer", 2e-3f)) return 1;
+
+    // ── transformer -> linear head (mixed composition) ──────────────────
+    LinearLayer<float> head(2, d_model, seq_len * batch);
+    head.W() = Matrix<float>::randn(2, d_model) * 0.5f;
+    head.b() = Matrix<float>::randn(2, 1) * 0.2f;
+    list<Layer<float>*> tfhead = { &head, &tf };
+    if (check_network(tfhead, d_model, seq_len * batch, "transformer+linear", 2e-3f)) return 1;
 
     cout << "All JVP tests passed." << endl;
     return 0;

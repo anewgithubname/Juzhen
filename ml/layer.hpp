@@ -2687,6 +2687,20 @@ namespace Juzhen
 			return dx;
 		}
 
+		// Tangent (JVP) through the normalization at the point cached by
+		// forward(): returns d LN(x) along dx. The standardization operator
+		// P(v) = inv .* (v - mean(v) - xhat .* mean(xhat .* v)) is symmetric,
+		// so this mirrors backward() — but gamma multiplies on the outside
+		// (J = diag(gamma) P) instead of the inside (J^T = P diag(gamma)).
+		Matrix<D> jvp(const Matrix<D>& dx) const {
+			const float invdim = 1.0f / (float)dim;
+			auto m1 = sum(dx, 0) * invdim;                       // (1,N)
+			auto m2 = sum(hadmd(dx, cached_xhat), 0) * invdim;   // (1,N)
+			auto dxhat = hadmd(ones_d1 * cached_inv,
+				dx - ones_d1 * m1 - hadmd(cached_xhat, ones_d1 * m2));
+			return hadmd(gamma * ones_1N, dxhat);
+		}
+
 		void set_gamma(const Matrix<D>& g) { gamma = g; }
 		void set_beta(const Matrix<D>& b)  { beta = b; }
 		const Matrix<D>& get_gamma() const { return gamma; }
@@ -3013,9 +3027,70 @@ namespace Juzhen
 			return Matrix<D>::ones(1, 1);
 		}
 
-		Matrix<D> jvp(const Matrix<D>&, const Matrix<D>&) override {
-			LOG_ERROR("jvp is not implemented for TransformerLayer: attention is bilinear in its input, so the tangent needs product-rule terms (dQ*K^T + Q*dK^T), a softmax tangent A .* (dS - rowsum(A .* dS)), and LayerNorm tangents.");
-			ERROR_OUT;
+		// Tangent (JVP) of the whole block at the point cached by eval().
+		// Pre-norm structure means the tangent follows the same residual
+		// wiring as the forward pass; the bias terms (bo, b1, b2, beta)
+		// are constants and contribute nothing.
+		Matrix<D> jvp(const Matrix<D>&, const Matrix<D>& tangent) override {
+#ifdef APPLE_SILICON
+			if constexpr (std::is_same_v<D, MPSfloat>) {
+				LOG_ERROR("TransformerLayer jvp is not implemented on the Metal backend: its fused attention stores cached_A in a packed batch layout that the generic per-block tangent below cannot read.");
+				ERROR_OUT;
+			} else
+#endif
+			{
+				const float scale = 1.0f / sqrtf((float)d_h);
+
+				// 1. LN1 tangent, then projection tangents.
+				auto dx1 = ln1.jvp(tangent);                 // (d_model, N)
+				auto dQ = Wq * dx1;
+				auto dK = Wk * dx1;
+				auto dV = Wv * dx1;
+
+				// 2. Attention tangent per (head, sequence) block. Attention is
+				//    bilinear in (Q, K, V), so the score tangent needs both
+				//    product-rule terms:
+				//        dS = (dQ^T K + Q^T dK) * scale
+				//        dA = A .* (dS - rowsum(A .* dS))    (softmax JVP; the
+				//             softmax Jacobian diag(A) - A A^T is symmetric, so
+				//             this is the same operator backward() applies)
+				//        dH = dV * A^T + V * dA^T
+				//    Masked score entries need no special handling: their
+				//    softmax weights are exactly zero, which zeroes their
+				//    contribution to both dA and the row sums.
+				Matrix<D> dH("jvp_dH", d_k, seq_len * batchN);
+				for (int hh = 0; hh < num_heads; ++hh) {
+					const int r0 = hh * d_h;
+					for (int b = 0; b < batchN; ++b) {
+						const int c0 = b * seq_len;
+						const int ablk = hh * batchN + b;
+						auto Qi = cached_Q.slice(r0, r0 + d_h, c0, c0 + seq_len);
+						auto Ki = cached_K.slice(r0, r0 + d_h, c0, c0 + seq_len);
+						auto Vi = cached_V.slice(r0, r0 + d_h, c0, c0 + seq_len);
+						auto Ai = cached_A.slice(0, seq_len, ablk * seq_len, (ablk + 1) * seq_len);
+						auto dQi = dQ.slice(r0, r0 + d_h, c0, c0 + seq_len);
+						auto dKi = dK.slice(r0, r0 + d_h, c0, c0 + seq_len);
+						auto dVi = dV.slice(r0, r0 + d_h, c0, c0 + seq_len);
+
+						auto dSi = (dQi.T() * Ki + Qi.T() * dKi) * scale;   // (seq, seq)
+						auto row_sum = sum(hadmd(Ai, dSi), 1);              // (seq, 1)
+						auto dAi = hadmd(Ai, dSi - row_sum * ones_1seq);
+						auto dHi = dVi * Ai.T() + Vi * dAi.T();
+						dH.slice(r0, r0 + d_h, c0, c0 + seq_len, dHi);
+					}
+				}
+
+				// 3. Output projection + residual 1.
+				auto dR = tangent + Wo * dH;
+
+				// 4. LN2 + FFN tangent.
+				auto dx2 = ln2.jvp(dR);
+				auto dF1 = hadmd(d_relu(Matrix<D>(cached_F1)), W1 * dx2);
+				auto dF = W2 * dF1;
+
+				// 5. Residual 2.
+				return dR + dF;
+			}
 		}
 
 		Matrix<D> backward(const Matrix<D>& input, Matrix<D>&& upstream_grad) override {
