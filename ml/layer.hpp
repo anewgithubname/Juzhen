@@ -79,6 +79,17 @@ namespace Juzhen
 			return d_tanh(weights * input + bias * Matrix<D>::ones(1, input.num_col()));
 		}
 
+		// Forward-mode directional derivative (JVP): returns J_layer(input) * tangent,
+		// the output tangent of this layer when its input moves along `tangent`.
+		// The default covers every fully-connected layer, where grad() is the
+		// elementwise activation derivative s'(W*input + b):
+		//     d/de s(W*(input + e*tangent) + b) |_{e=0} = s'(...) .* (W*tangent)
+		// (the bias is constant, so it contributes no tangent). Layers whose
+		// grad() means something else (conv, losses, transformer) must override.
+		virtual Matrix<D> jvp(const Matrix<D>& input, const Matrix<D>& tangent) {
+			return hadmd(grad(input), weights * tangent);
+		}
+
 		// Full backward pass for this layer: computes weight updates and returns
 		// the gradient to propagate to the previous layer.
 		// Default implementation covers all fully-connected layers.
@@ -155,6 +166,11 @@ namespace Juzhen
 			return Matrix<D>::ones(Layer<D>::weights.num_row(), input.num_col());
 		}
 
+		// A linear map is its own linearization; skip the hadmd-with-ones.
+		Matrix<D> jvp(const Matrix<D>&, const Matrix<D>& tangent) override {
+			return Layer<D>::weights * tangent;
+		}
+
 		void eval(const Matrix<D>& input) override {
 			// TODO: each time make a new matrix, not efficient
 			Layer<D>::val = Layer<D>::weights * input + Layer<D>::bias * Matrix<D>::ones(1, input.num_col());
@@ -199,8 +215,13 @@ namespace Juzhen
 			return 2.0 * (input - output) / Layer<D>::nb;
 		}
 
+		Matrix<D> jvp(const Matrix<D>&, const Matrix<D>&) override {
+			LOG_ERROR("jvp is not defined for loss heads: their grad() is the loss gradient, not an activation derivative. Call jvp on the network list without the loss layer.");
+			ERROR_OUT;
+		}
+
 		void eval(const Matrix<D>& input) override {
-			// square -> sum over features -> sum over batch 
+			// square -> sum over features -> sum over batch
 			Layer<D>::val = sum(sum(square(output - input), 0), 1) / Layer<D>::nb;
 		}
 	};
@@ -240,6 +261,11 @@ namespace Juzhen
 			auto E = exp(std::move(shifted));
 			auto Z = oneK1 * sum(E, 0);
 			return - (output - E / std::move(Z)) / Layer<D>::nb;
+		}
+
+		Matrix<D> jvp(const Matrix<D>&, const Matrix<D>&) override {
+			LOG_ERROR("jvp is not defined for loss heads: their grad() is the loss gradient, not an activation derivative. Call jvp on the network list without the loss layer.");
+			ERROR_OUT;
 		}
 
 		void eval(const Matrix<D>& input) override {
@@ -288,6 +314,11 @@ namespace Juzhen
 			ERROR_OUT;
 		}
 
+		Matrix<D> jvp(const Matrix<D>&, const Matrix<D>&) override {
+			LOG_ERROR("you cannot differentiate zero-one layer!");
+			ERROR_OUT;
+		}
+
 		void eval(const Matrix<D>& input) override {
 			// compute test accuracy
 			auto pred = predict_one_hot(input);
@@ -308,6 +339,26 @@ namespace Juzhen
 			neuralnet.pop_back();
 			return forward(neuralnet, output);
 		}
+	}
+
+	// Forward-mode directional derivative (JVP) of a whole network:
+	// returns J(input) * tangent, the tangent of the network output when the
+	// input moves along `tangent`. The tangent pass is fused with a primal
+	// pass (layers with activation masks read them from val, which must match
+	// the linearization point), so afterwards the last layer's value() holds
+	// the primal output. Weights are never touched — suitable for pretrained
+	// networks. Pass the list you would pass to forward() for inference,
+	// i.e. without loss heads.
+	template <class D>
+	Matrix<D> jvp(std::list<Layer<D>*> neuralnet, const Matrix<D>& input, const Matrix<D>& tangent) {
+		if (neuralnet.empty()) {
+			return Matrix<D>(tangent);
+		}
+		auto* layer = neuralnet.back();
+		neuralnet.pop_back();
+		layer->eval(input);
+		auto tangent_out = layer->jvp(input, tangent);
+		return jvp(neuralnet, layer->value(), tangent_out);
 	}
 
 	// updating the parameters in neural network.
@@ -728,6 +779,25 @@ namespace Juzhen
 
 			return dx;
 		}
+
+		// JVP: convolution is linear in its input, so the input-tangent rule is
+		// the forward convolution itself without the bias (constants have zero
+		// tangent), masked by the activation pattern cached in val by eval().
+		Matrix<D> jvp(const Matrix<D>&, const Matrix<D>& tangent) override {
+			const float alpha = 1.0f, beta = 0.0f;
+
+			Matrix<D> out("conv_jvp", C_out * H_out * W_out, batchN);
+			CUDNN_CHECK(cudnnConvolutionForward(
+				cudnn, &alpha,
+				x_desc, ptr(tangent),
+				w_desc, ptr(this->weights),
+				conv_desc, fwd_algo, d_workspace, workspace_bytes,
+				&beta, y_desc, ptr(out)));
+
+			if (use_relu)
+				return hadmd(d_relu(Matrix<D>(this->val)), std::move(out));
+			return out;
+		}
 #undef CUDNN_CHECK
 	};
 
@@ -935,6 +1005,24 @@ namespace Juzhen
 
 			return dx;
 		}
+
+		// JVP: transposed convolution is linear in its input — mirror eval()
+		// without the bias, then apply the cached activation mask.
+		Matrix<D> jvp(const Matrix<D>&, const Matrix<D>& tangent) override {
+			const float alpha = 1.0f, beta = 0.0f;
+
+			Matrix<D> out("convtrans_jvp", C_out * H_out * W_out, batchN);
+			CUDNN_CHECK(cudnnConvolutionBackwardData(
+				cudnn, &alpha,
+				w_desc, ptr(this->weights),
+				x_desc, ptr(tangent),
+				conv_desc, fwd_deconv_algo, d_workspace, workspace_bytes,
+				&beta, y_desc, ptr(out)));
+
+			if (use_relu)
+				return hadmd(d_relu(Matrix<D>(this->val)), std::move(out));
+			return out;
+		}
 #undef CUDNN_CHECK
 	};
 
@@ -1023,12 +1111,12 @@ namespace Juzhen
 			return t2d;
 		}
 
-		Matrix<D> unpack_output_add_bias(const Matrix<D>& y2d) const {
+		Matrix<D> unpack_output_add_bias(const Matrix<D>& y2d, bool with_bias = true) const {
 			const int P = H_out * W_out;
 			Matrix<D> out("conv_out", C_out * P, batchN);
 			for (int n = 0; n < batchN; ++n) {
 				for (int co = 0; co < C_out; ++co) {
-					const float b = this->bias.elem(co, 0);
+					const float b = with_bias ? this->bias.elem(co, 0) : 0.0f;
 					for (int oh = 0; oh < H_out; ++oh) {
 						for (int ow = 0; ow < W_out; ++ow) {
 							const int patch_col = n * P + oh * W_out + ow;
@@ -1248,6 +1336,29 @@ namespace Juzhen
 			}
 		}
 
+		// JVP: convolution is linear in its input — mirror eval() with a zero
+		// bias (constants have zero tangent), then apply the cached mask.
+		Matrix<D> jvp(const Matrix<D>&, const Matrix<D>& tangent) override {
+			auto wh = this->weights.to_host();
+			auto w2d_h = flatten_weights_2d(wh);
+
+			const int K = C_in * kH * kW;
+			const int P = H_out * W_out;
+			Matrix<D> col("conv_im2col", K, P * batchN);
+			mpsIm2col(ptr(tangent), ptr(col), batchN, C_in, H_in, W_in,
+			          kH, kW, pad_h, pad_w, stride_h, stride_w, H_out, W_out);
+
+			Matrix<D> w2d(w2d_h);
+			Matrix<D> y2d = w2d * col;
+			Matrix<D> out("conv_jvp", C_out * P, batchN);
+			Matrix<D> zero_bias = Matrix<D>::zeros(C_out, 1);
+			mpsConv2dOutputAddBias(ptr(y2d), ptr(zero_bias), ptr(out), batchN, C_out, H_out, W_out);
+
+			if (use_relu)
+				return hadmd(d_relu(Matrix<D>(this->val)), std::move(out));
+			return out;
+		}
+
 		Matrix<D> grad(const Matrix<D>&) const override {
 			return Matrix<D>::ones(1, 1);
 		}
@@ -1388,6 +1499,25 @@ namespace Juzhen
 			}
 		}
 
+		// JVP: transposed convolution is linear in its input — mirror eval()
+		// up to (but not including) the bias add, then apply the cached mask.
+		Matrix<D> jvp(const Matrix<D>&, const Matrix<D>& tangent) override {
+			const int P_in = H_in * W_in;
+			Matrix<D> x2d("deconv_x2d", C_in, batchN * P_in);
+			mpsPackFeatureMap2D(ptr(tangent), ptr(x2d), batchN, C_in, P_in);
+
+			Matrix<D> w2d = flatten_weights_2d();
+			Matrix<D> patches = w2d * x2d;
+
+			Matrix<D> out("convtrans_jvp", C_out * H_out * W_out, batchN);
+			mpsCol2im(ptr(patches), ptr(out), batchN, C_out, H_out, W_out,
+			          kH, kW, pad_h, pad_w, stride_h, stride_w, H_in, W_in);
+
+			if (use_relu)
+				return hadmd(d_relu(Matrix<D>(this->val)), std::move(out));
+			return out;
+		}
+
 		Matrix<D> grad(const Matrix<D>&) const override {
 			return Matrix<D>::ones(1, 1);
 		}
@@ -1504,6 +1634,34 @@ namespace Juzhen
 			// 4. Optional ReLU
 			if (use_relu)
 				this->val = relu(Matrix<D>(this->val));
+		}
+
+		// JVP: convolution is linear in its input — mirror eval() with a zero
+		// bias (constants have zero tangent), then apply the cached mask.
+		Matrix<D> jvp(const Matrix<D>&, const Matrix<D>& tangent) override {
+			const int K = C_in * kH * kW;
+			const int P = H_out * W_out;
+
+			Matrix<D> col("conv_col", K, P * batchN);
+			RocmIm2col(ptr(tangent), ptr(col),
+			           C_in, H_in, W_in, kH, kW,
+			           pad_h, pad_w, stride_h, stride_w,
+			           H_out, W_out, batchN);
+
+			Matrix<D> y2d("conv_y2d", C_out, P * batchN);
+			RocmGemm(ptr(this->weights), ptr(col), ptr(y2d),
+			         C_out, P * batchN, K,
+			         true, false,
+			         K, K, C_out);
+
+			Matrix<D> out("conv_jvp", C_out * P, batchN);
+			Matrix<D> zero_bias = Matrix<D>::zeros(C_out, 1);
+			RocmConvForwardReshapeBias(ptr(y2d), ptr(out), ptr(zero_bias),
+			                            C_out, P, batchN);
+
+			if (use_relu)
+				return hadmd(d_relu(Matrix<D>(this->val)), std::move(out));
+			return out;
 		}
 
 		Matrix<D> grad(const Matrix<D>&) const override {
@@ -1629,6 +1787,32 @@ namespace Juzhen
 
 			if (use_relu)
 				this->val = relu(Matrix<D>(this->val));
+		}
+
+		// JVP: transposed convolution is linear in its input — mirror eval()
+		// with a zero bias, then apply the cached mask.
+		Matrix<D> jvp(const Matrix<D>&, const Matrix<D>& tangent) override {
+			const int P_in = H_in * W_in;
+			const int patch_rows = C_out * kH * kW;
+
+			Matrix<D> x2d("deconv_x2d", C_in, P_in * batchN);
+			RocmConvTransReshape(ptr(tangent), ptr(x2d), C_in, P_in, batchN, 0);
+
+			Matrix<D> patches("deconv_patches", patch_rows, P_in * batchN);
+			RocmGemm(ptr(this->weights), ptr(x2d), ptr(patches),
+			         patch_rows, P_in * batchN, C_in,
+			         false, false,
+			         patch_rows, C_in, patch_rows);
+
+			Matrix<D> out("convtrans_jvp", C_out * H_out * W_out, batchN);
+			Matrix<D> zero_bias = Matrix<D>::zeros(C_out, 1);
+			RocmConvTransScatter(ptr(patches), ptr(out), ptr(zero_bias),
+			                      C_out, H_out, W_out, H_in, W_in,
+			                      kH, kW, pad_h, pad_w, stride_h, stride_w, batchN);
+
+			if (use_relu)
+				return hadmd(d_relu(Matrix<D>(this->val)), std::move(out));
+			return out;
 		}
 
 		Matrix<D> grad(const Matrix<D>&) const override {
@@ -1770,12 +1954,12 @@ namespace Juzhen
 			return t2d;
 		}
 
-		Matrix<D> unpack_output_add_bias(const Matrix<D>& y2d) const {
+		Matrix<D> unpack_output_add_bias(const Matrix<D>& y2d, bool with_bias = true) const {
 			const int P = H_out * W_out;
 			Matrix<D> out("conv_out", C_out * P, batchN);
 			for (int n = 0; n < batchN; ++n) {
 				for (int co = 0; co < C_out; ++co) {
-					const float b = this->bias.elem(co, 0);
+					const float b = with_bias ? this->bias.elem(co, 0) : 0.0f;
 					for (int oh = 0; oh < H_out; ++oh) {
 						for (int ow = 0; ow < W_out; ++ow) {
 							const int patch_col = n * P + oh * W_out + ow;
@@ -1866,6 +2050,18 @@ namespace Juzhen
 			}
 		}
 
+		// JVP: convolution is linear in its input, so the input-tangent rule is
+		// the forward convolution itself without the bias (constants have zero
+		// tangent), masked by the activation pattern cached in val by eval().
+		Matrix<D> jvp(const Matrix<D>&, const Matrix<D>& tangent) override {
+			const Matrix<D> col = make_im2col(tangent);
+			const Matrix<D> w2d = flatten_weights_2d(this->weights);
+			Matrix<D> out = unpack_output_add_bias(w2d * col, /*with_bias=*/false);
+			if (use_relu)
+				return hadmd(d_relu(Matrix<D>(this->val)), std::move(out));
+			return out;
+		}
+
 		Matrix<D> grad(const Matrix<D>&) const override {
 			return Matrix<D>::ones(1, 1);
 		}
@@ -1944,13 +2140,13 @@ namespace Juzhen
 			return w2d;
 		}
 
-		Matrix<D> unpack_forward_from_patches(const Matrix<D>& patches) const {
+		Matrix<D> unpack_forward_from_patches(const Matrix<D>& patches, bool with_bias = true) const {
 			Matrix<D> out("convtrans_out", C_out * H_out * W_out, batchN);
 			out.zeros();
 
 			for (int n = 0; n < batchN; ++n) {
 				for (int co = 0; co < C_out; ++co) {
-					const float b = this->bias.elem(co, 0);
+					const float b = with_bias ? this->bias.elem(co, 0) : 0.0f;
 					for (int oh = 0; oh < H_out; ++oh) {
 						for (int ow = 0; ow < W_out; ++ow) {
 							out.elem(idx_chw(co, oh, ow, H_out, W_out), n) = b;
@@ -2074,6 +2270,17 @@ namespace Juzhen
 			if (use_relu) {
 				this->val = relu(Matrix<D>(this->val));
 			}
+		}
+
+		// JVP: transposed convolution is linear in its input — mirror eval()
+		// without the bias, then apply the cached activation mask.
+		Matrix<D> jvp(const Matrix<D>&, const Matrix<D>& tangent) override {
+			const Matrix<D> x2d = pack_input_2d(tangent);
+			const Matrix<D> w2d = flatten_weights_2d(this->weights);
+			Matrix<D> out = unpack_forward_from_patches(w2d * x2d, /*with_bias=*/false);
+			if (use_relu)
+				return hadmd(d_relu(Matrix<D>(this->val)), std::move(out));
+			return out;
 		}
 
 		Matrix<D> grad(const Matrix<D>&) const override {
@@ -2480,6 +2687,20 @@ namespace Juzhen
 			return dx;
 		}
 
+		// Tangent (JVP) through the normalization at the point cached by
+		// forward(): returns d LN(x) along dx. The standardization operator
+		// P(v) = inv .* (v - mean(v) - xhat .* mean(xhat .* v)) is symmetric,
+		// so this mirrors backward() — but gamma multiplies on the outside
+		// (J = diag(gamma) P) instead of the inside (J^T = P diag(gamma)).
+		Matrix<D> jvp(const Matrix<D>& dx) const {
+			const float invdim = 1.0f / (float)dim;
+			auto m1 = sum(dx, 0) * invdim;                       // (1,N)
+			auto m2 = sum(hadmd(dx, cached_xhat), 0) * invdim;   // (1,N)
+			auto dxhat = hadmd(ones_d1 * cached_inv,
+				dx - ones_d1 * m1 - hadmd(cached_xhat, ones_d1 * m2));
+			return hadmd(gamma * ones_1N, dxhat);
+		}
+
 		void set_gamma(const Matrix<D>& g) { gamma = g; }
 		void set_beta(const Matrix<D>& b)  { beta = b; }
 		const Matrix<D>& get_gamma() const { return gamma; }
@@ -2804,6 +3025,156 @@ namespace Juzhen
 
 		Matrix<D> grad(const Matrix<D>&) const override {
 			return Matrix<D>::ones(1, 1);
+		}
+
+		// Tangent (JVP) of the whole block at the point cached by eval().
+		// Pre-norm structure means the tangent follows the same residual
+		// wiring as the forward pass; the bias terms (bo, b1, b2, beta)
+		// are constants and contribute nothing.
+		Matrix<D> jvp(const Matrix<D>&, const Matrix<D>& tangent) override {
+#ifdef APPLE_SILICON
+			if constexpr (std::is_same_v<D, MPSfloat>) {
+				LOG_ERROR("TransformerLayer jvp is not implemented on the Metal backend: its fused attention stores cached_A in a packed batch layout that the generic per-block tangent below cannot read.");
+				ERROR_OUT;
+			} else
+#endif
+			{
+				const float scale = 1.0f / sqrtf((float)d_h);
+
+				// 1. LN1 tangent, then projection tangents.
+				auto dx1 = ln1.jvp(tangent);                 // (d_model, N)
+				auto dQ = Wq * dx1;
+				auto dK = Wk * dx1;
+				auto dV = Wv * dx1;
+
+				// 2. Attention tangent per (head, sequence) block. Attention is
+				//    bilinear in (Q, K, V), so the score tangent needs both
+				//    product-rule terms:
+				//        dS = (dQ^T K + Q^T dK) * scale
+				//        dA = A .* (dS - rowsum(A .* dS))    (softmax JVP; the
+				//             softmax Jacobian diag(A) - A A^T is symmetric, so
+				//             this is the same operator backward() applies)
+				//        dH = dV * A^T + V * dA^T
+				//    Masked score entries need no special handling: their
+				//    softmax weights are exactly zero, which zeroes their
+				//    contribution to both dA and the row sums.
+				Matrix<D> dH("jvp_dH", d_k, seq_len * batchN);
+#ifdef CUDA
+				if constexpr (std::is_same_v<D, CUDAfloat>) {
+					// Batched tangent pass, mirroring backward(): the per-block
+					// slice loop below costs ~15 kernel launches per (head,
+					// sequence) block; here it is 4 strided-batched GEMM calls
+					// per head plus one fused softmax kernel.
+					const float one = 1.0f, zero = 0.0f;
+					const long long stride_qkv = (long long)d_k * (long long)seq_len;
+					const long long stride_attn = (long long)seq_len * (long long)seq_len;
+					const long long head_attn = stride_attn * (long long)batchN;
+
+					const float* q_ptr = reinterpret_cast<const float*>(cached_Q.data());
+					const float* k_ptr = reinterpret_cast<const float*>(cached_K.data());
+					const float* v_ptr = reinterpret_cast<const float*>(cached_V.data());
+					const float* a_ptr = reinterpret_cast<const float*>(cached_A.data());
+					const float* dq_ptr = reinterpret_cast<const float*>(dQ.data());
+					const float* dk_ptr = reinterpret_cast<const float*>(dK.data());
+					const float* dv_ptr = reinterpret_cast<const float*>(dV.data());
+					float* dst_ptr = const_cast<float*>(reinterpret_cast<const float*>(attn_dAiT_scratch.data()));
+					const float* da_ptr = reinterpret_cast<const float*>(attn_dS_scratch.data());
+					float* dh_ptr = const_cast<float*>(reinterpret_cast<const float*>(dH.data()));
+
+					// dS_h^T = K_h^T dQ_h + dK_h^T Q_h (the un-scaled score
+					// tangent, stored transposed: that is the input layout the
+					// softmax kernel expects, and scale folds into the kernel
+					// because the softmax JVP is linear in dS).
+					for (int hh = 0; hh < num_heads; ++hh) {
+						CuBLASErrorCheck(cublasSgemmStridedBatched(
+							Matrix<CUDAfloat>::global_handle,
+							CUBLAS_OP_T, CUBLAS_OP_N,
+							seq_len, seq_len, d_h,
+							&one,
+							k_ptr + hh * d_h, d_k, stride_qkv,
+							dq_ptr + hh * d_h, d_k, stride_qkv,
+							&zero,
+							dst_ptr + hh * head_attn, seq_len, stride_attn,
+							batchN));
+
+						CuBLASErrorCheck(cublasSgemmStridedBatched(
+							Matrix<CUDAfloat>::global_handle,
+							CUBLAS_OP_T, CUBLAS_OP_N,
+							seq_len, seq_len, d_h,
+							&one,
+							dk_ptr + hh * d_h, d_k, stride_qkv,
+							q_ptr + hh * d_h, d_k, stride_qkv,
+							&one,
+							dst_ptr + hh * head_attn, seq_len, stride_attn,
+							batchN));
+					}
+
+					// dA = A .* (scale*dS - rowsum(A .* scale*dS)). The softmax
+					// Jacobian diag(A) - A A^T is symmetric, so the backward
+					// kernel computes exactly the JVP when fed dS^T.
+					cuda_softmax_backward_rows(
+						a_ptr, dst_ptr,
+						const_cast<float*>(da_ptr),
+						seq_len, batchN * num_heads, scale);
+
+					// dH_h = dV_h * A_h^T + V_h * dA_h^T
+					for (int hh = 0; hh < num_heads; ++hh) {
+						CuBLASErrorCheck(cublasSgemmStridedBatched(
+							Matrix<CUDAfloat>::global_handle,
+							CUBLAS_OP_N, CUBLAS_OP_T,
+							d_h, seq_len, seq_len,
+							&one,
+							dv_ptr + hh * d_h, d_k, stride_qkv,
+							a_ptr + hh * head_attn, seq_len, stride_attn,
+							&zero,
+							dh_ptr + hh * d_h, d_k, stride_qkv,
+							batchN));
+
+						CuBLASErrorCheck(cublasSgemmStridedBatched(
+							Matrix<CUDAfloat>::global_handle,
+							CUBLAS_OP_N, CUBLAS_OP_T,
+							d_h, seq_len, seq_len,
+							&one,
+							v_ptr + hh * d_h, d_k, stride_qkv,
+							da_ptr + hh * head_attn, seq_len, stride_attn,
+							&one,
+							dh_ptr + hh * d_h, d_k, stride_qkv,
+							batchN));
+					}
+				} else
+#endif
+				for (int hh = 0; hh < num_heads; ++hh) {
+					const int r0 = hh * d_h;
+					for (int b = 0; b < batchN; ++b) {
+						const int c0 = b * seq_len;
+						const int ablk = hh * batchN + b;
+						auto Qi = cached_Q.slice(r0, r0 + d_h, c0, c0 + seq_len);
+						auto Ki = cached_K.slice(r0, r0 + d_h, c0, c0 + seq_len);
+						auto Vi = cached_V.slice(r0, r0 + d_h, c0, c0 + seq_len);
+						auto Ai = cached_A.slice(0, seq_len, ablk * seq_len, (ablk + 1) * seq_len);
+						auto dQi = dQ.slice(r0, r0 + d_h, c0, c0 + seq_len);
+						auto dKi = dK.slice(r0, r0 + d_h, c0, c0 + seq_len);
+						auto dVi = dV.slice(r0, r0 + d_h, c0, c0 + seq_len);
+
+						auto dSi = (dQi.T() * Ki + Qi.T() * dKi) * scale;   // (seq, seq)
+						auto row_sum = sum(hadmd(Ai, dSi), 1);              // (seq, 1)
+						auto dAi = hadmd(Ai, dSi - row_sum * ones_1seq);
+						auto dHi = dVi * Ai.T() + Vi * dAi.T();
+						dH.slice(r0, r0 + d_h, c0, c0 + seq_len, dHi);
+					}
+				}
+
+				// 3. Output projection + residual 1.
+				auto dR = tangent + Wo * dH;
+
+				// 4. LN2 + FFN tangent.
+				auto dx2 = ln2.jvp(dR);
+				auto dF1 = hadmd(d_relu(Matrix<D>(cached_F1)), W1 * dx2);
+				auto dF = W2 * dF1;
+
+				// 5. Residual 2.
+				return dR + dF;
+			}
 		}
 
 		Matrix<D> backward(const Matrix<D>& input, Matrix<D>&& upstream_grad) override {

@@ -314,6 +314,7 @@ GENERATE_PROJ(benchmarkTrainingStep tests/benchmarkTrainingStep.cu)
 GENERATE_PROJ(testElementwiseReduceTorchDump tests/testElementwiseReduceTorchDump.cu)
 GENERATE_PROJ(testCheckpointResume tests/testCheckpointResume.cu)
 GENERATE_PROJ(testCpuLinalg tests/testCpuLinalg.cu)
+GENERATE_PROJ(testJVP tests/testJVP.cu)
 # GENERATE_PROJ(wintest examples/demo_gui.cu)
 
 enable_testing()
@@ -390,3 +391,10 @@ set_tests_properties(checkpoint_resume_consistency PROPERTIES LABELS "unit;check
 # and additionally vs cblas when the build links an external BLAS.
 add_test(NAME cpu_linalg COMMAND testCpuLinalg)
 set_tests_properties(cpu_linalg PROPERTIES LABELS "unit")
+
+# Forward-mode (JVP) correctness: adjoint consistency vs backprop + finite
+# differences on MLP / transformer / CNN+MLP / conv-transpose networks, plus
+# CPU<->CUDA parity of the JVP itself in CUDA builds. Runs on CPU and CUDA
+# backends; skips (77) on MPS/ROCm.
+add_test(NAME jvp_correctness COMMAND testJVP)
+set_tests_properties(jvp_correctness PROPERTIES LABELS "unit" SKIP_RETURN_CODE 77)
