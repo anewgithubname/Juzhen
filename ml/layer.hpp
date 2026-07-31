@@ -3059,6 +3059,90 @@ namespace Juzhen
 				//    softmax weights are exactly zero, which zeroes their
 				//    contribution to both dA and the row sums.
 				Matrix<D> dH("jvp_dH", d_k, seq_len * batchN);
+#ifdef CUDA
+				if constexpr (std::is_same_v<D, CUDAfloat>) {
+					// Batched tangent pass, mirroring backward(): the per-block
+					// slice loop below costs ~15 kernel launches per (head,
+					// sequence) block; here it is 4 strided-batched GEMM calls
+					// per head plus one fused softmax kernel.
+					const float one = 1.0f, zero = 0.0f;
+					const long long stride_qkv = (long long)d_k * (long long)seq_len;
+					const long long stride_attn = (long long)seq_len * (long long)seq_len;
+					const long long head_attn = stride_attn * (long long)batchN;
+
+					const float* q_ptr = reinterpret_cast<const float*>(cached_Q.data());
+					const float* k_ptr = reinterpret_cast<const float*>(cached_K.data());
+					const float* v_ptr = reinterpret_cast<const float*>(cached_V.data());
+					const float* a_ptr = reinterpret_cast<const float*>(cached_A.data());
+					const float* dq_ptr = reinterpret_cast<const float*>(dQ.data());
+					const float* dk_ptr = reinterpret_cast<const float*>(dK.data());
+					const float* dv_ptr = reinterpret_cast<const float*>(dV.data());
+					float* dst_ptr = const_cast<float*>(reinterpret_cast<const float*>(attn_dAiT_scratch.data()));
+					const float* da_ptr = reinterpret_cast<const float*>(attn_dS_scratch.data());
+					float* dh_ptr = const_cast<float*>(reinterpret_cast<const float*>(dH.data()));
+
+					// dS_h^T = K_h^T dQ_h + dK_h^T Q_h (the un-scaled score
+					// tangent, stored transposed: that is the input layout the
+					// softmax kernel expects, and scale folds into the kernel
+					// because the softmax JVP is linear in dS).
+					for (int hh = 0; hh < num_heads; ++hh) {
+						CuBLASErrorCheck(cublasSgemmStridedBatched(
+							Matrix<CUDAfloat>::global_handle,
+							CUBLAS_OP_T, CUBLAS_OP_N,
+							seq_len, seq_len, d_h,
+							&one,
+							k_ptr + hh * d_h, d_k, stride_qkv,
+							dq_ptr + hh * d_h, d_k, stride_qkv,
+							&zero,
+							dst_ptr + hh * head_attn, seq_len, stride_attn,
+							batchN));
+
+						CuBLASErrorCheck(cublasSgemmStridedBatched(
+							Matrix<CUDAfloat>::global_handle,
+							CUBLAS_OP_T, CUBLAS_OP_N,
+							seq_len, seq_len, d_h,
+							&one,
+							dk_ptr + hh * d_h, d_k, stride_qkv,
+							q_ptr + hh * d_h, d_k, stride_qkv,
+							&one,
+							dst_ptr + hh * head_attn, seq_len, stride_attn,
+							batchN));
+					}
+
+					// dA = A .* (scale*dS - rowsum(A .* scale*dS)). The softmax
+					// Jacobian diag(A) - A A^T is symmetric, so the backward
+					// kernel computes exactly the JVP when fed dS^T.
+					cuda_softmax_backward_rows(
+						a_ptr, dst_ptr,
+						const_cast<float*>(da_ptr),
+						seq_len, batchN * num_heads, scale);
+
+					// dH_h = dV_h * A_h^T + V_h * dA_h^T
+					for (int hh = 0; hh < num_heads; ++hh) {
+						CuBLASErrorCheck(cublasSgemmStridedBatched(
+							Matrix<CUDAfloat>::global_handle,
+							CUBLAS_OP_N, CUBLAS_OP_T,
+							d_h, seq_len, seq_len,
+							&one,
+							dv_ptr + hh * d_h, d_k, stride_qkv,
+							a_ptr + hh * head_attn, seq_len, stride_attn,
+							&zero,
+							dh_ptr + hh * d_h, d_k, stride_qkv,
+							batchN));
+
+						CuBLASErrorCheck(cublasSgemmStridedBatched(
+							Matrix<CUDAfloat>::global_handle,
+							CUBLAS_OP_N, CUBLAS_OP_T,
+							d_h, seq_len, seq_len,
+							&one,
+							v_ptr + hh * d_h, d_k, stride_qkv,
+							da_ptr + hh * head_attn, seq_len, stride_attn,
+							&one,
+							dh_ptr + hh * d_h, d_k, stride_qkv,
+							batchN));
+					}
+				} else
+#endif
 				for (int hh = 0; hh < num_heads; ++hh) {
 					const int r0 = hh * d_h;
 					for (int b = 0; b < batchN; ++b) {
