@@ -87,6 +87,10 @@ inline void Memory<CUDAfloat>::_free(CUDAfloat* ptr) {
 __global__ void copyKernel(float* d_out, float* d_in, size_t numElements,
                            size_t numrow, size_t rowstart, size_t rowend,
                            size_t colstart, size_t colend, bool direction);
+__global__ void copyDexKernel(float* d_out, float* d_in, size_t* d_rowidx,
+                               size_t* d_colidx, size_t num_rows_out,
+                               size_t num_cols_out, size_t numrow_in,
+                               bool transposed);
 __global__ void addKernel(float* d_out, float s1, float a, size_t numElements);
 
 template <>
@@ -227,6 +231,9 @@ class Matrix<CUDAfloat> {
         return slice(rstart, rend, 0, num_col(), M);
     }
     // Matrix<float> rows(idxlist rlist) const { return to_host().rows(rlist); }
+    Matrix<CUDAfloat> rows(idxlist rlist) const {
+        return slice(rlist, seq(num_col()));
+    }
     Matrix<CUDAfloat> columns(size_t cstart, size_t cend) const {
         return slice(0, num_row(), cstart, cend);
     }
@@ -235,6 +242,34 @@ class Matrix<CUDAfloat> {
     }
     // Matrix<float> columns(idxlist clist) const { return
     // to_host().columns(clist); }
+    Matrix<CUDAfloat> columns(idxlist clist) const {
+        return slice(seq(num_row()), clist);
+    }
+
+    Matrix<CUDAfloat> slice(const idxlist& rowidx, const idxlist& colidx) const {
+        size_t num_rows_out = rowidx.size();
+        size_t num_cols_out = colidx.size();
+        size_t numElem = num_rows_out * num_cols_out;
+
+        // upload index arrays to device
+        size_t* d_rowidx;
+        size_t* d_colidx;
+        cudaMalloc(&d_rowidx, num_rows_out * sizeof(size_t));
+        cudaMalloc(&d_colidx, num_cols_out * sizeof(size_t));
+        cudaMemcpy(d_rowidx, rowidx.data(), num_rows_out * sizeof(size_t),
+                   cudaMemcpyHostToDevice);
+        cudaMemcpy(d_colidx, colidx.data(), num_cols_out * sizeof(size_t),
+                   cudaMemcpyHostToDevice);
+
+        Matrix<CUDAfloat> M("submatrix", num_rows_out, num_cols_out, 0);
+        copyDexKernel<<<cudaConfig(numElem)>>>(
+            (float*)M.elements.get(), (float*)elements.get(), d_rowidx,
+            d_colidx, num_rows_out, num_cols_out, numrow, transpose);
+
+        cudaFree(d_rowidx);
+        cudaFree(d_colidx);
+        return M;
+    }
 
     // our friends
     friend Matrix<CUDAfloat> sum(const Matrix<CUDAfloat>& M, int dim);

@@ -89,6 +89,26 @@ __global__ void copyKernel(float *d_out, float *d_in, size_t numElements,
     }
 }
 
+// gather kernel: copy elements selected by index lists (cpdex)
+__global__ void copyDexKernel(float *d_out, float *d_in, size_t *d_rowidx,
+                               size_t *d_colidx, size_t num_rows_out,
+                               size_t num_cols_out, size_t numrow_in,
+                               bool transposed) {
+    size_t k = blockDim.x * blockIdx.x + threadIdx.x;
+    size_t numElem = num_rows_out * num_cols_out;
+
+    if (k < numElem) {
+        size_t i = k % num_rows_out;  // output row
+        size_t j = k / num_rows_out;  // output col
+        // logical (r, c) -> physical index:
+        //   non-transposed: r + c * numrow
+        //   transposed:     c + r * numrow  (physical row = logical col)
+        size_t phys_r = transposed ? d_colidx[j] : d_rowidx[i];
+        size_t phys_c = transposed ? d_rowidx[i] : d_colidx[j];
+        d_out[k] = d_in[phys_r + phys_c * numrow_in];
+    }
+}
+
 __global__ void inplaceExpKernel(float *vec, size_t numElements) {
     size_t i = blockDim.x * blockIdx.x + threadIdx.x;
 
