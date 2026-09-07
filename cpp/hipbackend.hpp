@@ -3,8 +3,14 @@
 
 #include <cstddef>
 #include <cstdint>
+#include <stdexcept>
+#include <string>
 
 namespace Juzhen {
+inline void RocmCheck(int rc) {
+    if (rc != 0) throw std::runtime_error("ROCm fused operation failed (code " + std::to_string(rc) + ")");
+}
+
 
 // Phase-2 ROCm vertical slice API: memory, RNG, GEMM, and elementwise ops.
 bool RocmRuntimeAvailable();
@@ -19,7 +25,26 @@ int RocmRandUniform(float* dst_device, std::size_t count, std::uint64_t seed);
 int RocmRandNormal(float* dst_device, std::size_t count, float mean, float stddev,
                    std::uint64_t seed);
 
+
+int Rocm_layernorm_forward(const float* x, const float* gamma, const float* beta,
+    float* y, float* xhat, float* inv_std, int dim, int N);
+int Rocm_layernorm_backward(const float* dy, const float* gamma, const float* xhat,
+    const float* inv_std, float* dx, int dim, int N);
+int Rocm_add_bias(float* y, const float* b, int rows, size_t total);
+int Rocm_adam_update(float* g, float* m, float* v, float alpha, float beta1,
+    float beta2, float eps, float bc1, float bc2, size_t n);
+
 int RocmFill(float* dst_device, std::size_t count, float value);
+int RocmCausalMask(float* scores, int seq_len, bool transpose, float value);
+// Attention blocks are column-major (seq, seq), concatenated head then batch.
+int RocmSoftmaxRows(const float* scores, float* out, int seq, int blocks, bool causal);
+// da_transposed contains dL/dA^T; output includes the attention scale.
+int RocmSoftmaxBackwardRows(const float* a, const float* da_transposed,
+                           float* ds, int seq, int blocks, float scale);
+int RocmGemmStridedBatched(bool transA, bool transB, int m, int n, int k,
+                          float alpha, const float* a, int lda, long long strideA,
+                          const float* b, int ldb, long long strideB, float beta,
+                          float* c, int ldc, long long strideC, int batches);
 int RocmExpInplace(float* dst_device, std::size_t count);
 int RocmLogInplace(float* dst_device, std::size_t count);
 int RocmAxpby(float* out_device, const float* a_device, const float* b_device,

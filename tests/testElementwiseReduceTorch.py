@@ -31,5 +31,8 @@ def main():
     checks=[(elem_l,ew,"elementwise(const Matrix&)"),(elem_r,ew,"elementwise(Matrix&&)"),
             (red_l0,sum0,"reduce lvalue dim=0 k=1"),(red_l1,sum1,"reduce lvalue dim=1 k=1"),
             (red_r0,stats0,"reduce rvalue->const& dim=0 k=2"),(red_r1,stats1,"reduce rvalue->const& dim=1 k=2")]
-    return 0 if all(compare(*item) for item in checks) else 1
+    # Evaluate every check even after a failure, so both axes and all
+    # ownership variants remain visible in the test report.
+    results=[compare(*item) for item in checks]
+    return 0 if all(results) else 1
 if __name__=="__main__": sys.exit(main())

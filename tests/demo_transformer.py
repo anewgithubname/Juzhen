@@ -86,7 +86,7 @@ class TransformerBlock(nn.Module):
     Heads split d_k into contiguous d_h = d_k/num_heads chunks and each
     attends independently with 1/sqrt(d_h) scaling; Wo mixes them."""
 
-    def __init__(self, d_model: int, d_k: int, d_ff: int, seq_len: int, num_heads: int):
+    def __init__(self, d_model: int, d_k: int, d_ff: int, seq_len: int, num_heads: int, causal: bool = True):
         super().__init__()
         assert d_k % num_heads == 0, "num_heads must divide d_k"
         self.ln1 = nn.LayerNorm(d_model)  # eps=1e-5, same as layer.hpp
@@ -101,6 +101,7 @@ class TransformerBlock(nn.Module):
         self.d_h = d_k // num_heads
         self.scale = 1.0 / math.sqrt(self.d_h)
         self.seq_len = seq_len
+        self.causal = causal
 
     def forward(self, x: torch.Tensor) -> torch.Tensor:
         batch = x.shape[0] // self.seq_len
@@ -113,7 +114,8 @@ class TransformerBlock(nn.Module):
         q, k, v = heads(self.Wq(x1)), heads(self.Wk(x1)), heads(self.Wv(x1))
         scores = torch.matmul(q, k.transpose(-2, -1)) * self.scale  # (B, H, S, S)
         mask = torch.triu(torch.ones(self.seq_len, self.seq_len, device=x.device), diagonal=1).bool()
-        scores = scores.masked_fill(mask, -1e9)
+        if self.causal:
+            scores = scores.masked_fill(mask, -1e9)
         a = torch.softmax(scores, dim=-1)
         attn = torch.matmul(a, v).transpose(1, 2).reshape(batch, self.seq_len, -1)
         r = h + self.Wo(attn)

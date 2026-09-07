@@ -55,6 +55,51 @@ int CheckFinite(const M& m, const char* name) {
 int compute() {
     int ret = 0;
 
+    // Non-square matrices expose accidental raw-buffer arithmetic across
+    // transpose views. Exercise both layouts and every ownership overload.
+    M layout_a("layout_a", {{1, -2, 3}, {4, 5, -6}});
+    M layout_b("layout_b", {{7, 8, -9}, {10, -11, 12}});
+    for (bool ta : {false, true}) for (bool tb : {false, true}) {
+        auto make = [](const M& h, bool trans) {
+            if (!trans) return CM(h);
+            M physical("transposed", h.num_col(), h.num_row());
+            for (size_t r = 0; r < h.num_row(); ++r)
+                for (size_t c = 0; c < h.num_col(); ++c)
+                    physical.elem(c, r) = h.elem(r, c);
+            return CM(physical).T();
+        };
+        auto a = make(layout_a, ta), b = make(layout_b, tb);
+        auto check = [&](const CM& got, const M& expected, const char* label) {
+            auto h = got.to_host();
+            ret += CheckFinite(h, label);
+            ret += CheckClose(h, expected, label);
+        };
+        const auto expected_add = layout_a * 0.75f - layout_b * 0.25f;
+        check(static_cast<const CM&>(a).add(b, 0.75f, -0.25f), expected_add, "layout add");
+        auto inplace = CM(a);
+        inplace.add(b, 0.75f, -0.25f);
+        check(inplace, expected_add, "layout inplace add");
+        auto expected_product = hadmd(layout_a, layout_b);
+        check(hadmd(a, b), expected_product, "layout hadamard ll");
+        check(hadmd(CM(a), b), expected_product, "layout hadamard rl");
+        check(hadmd(a, CM(b)), expected_product, "layout hadamard lr");
+        check(hadmd(CM(a), CM(b)), expected_product, "layout hadamard rr");
+
+        auto stats = [] __GPU_CPU__(float* src, float* dst, int n, int) {
+            float sum = 0, maximum = src[0];
+            for (int i = 0; i < n; ++i) {
+                sum += src[i];
+                maximum = maximum > src[i] ? maximum : src[i];
+            }
+            dst[0] = sum; dst[1] = maximum;
+        };
+        check(reduce(stats, a, 0, 2), M("axis0", {{5, 3, -3}, {4, 5, 3}}), "reduce layout axis0");
+        check(reduce(stats, CM(a), 1, 2), M("axis1", {{2, 3}, {3, 5}}), "reduce layout axis1");
+
+        // Dirty the memory pool before the next reduction uses scratch space.
+        auto dirty = CM::ones(3, 2) * 123.0f;
+    }
+
     M A("A", {{1.25f, 2.50f, 3.75f},
                {4.25f, 5.50f, 6.75f},
                {7.25f, 8.50f, 9.75f}});

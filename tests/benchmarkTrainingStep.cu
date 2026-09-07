@@ -8,6 +8,13 @@
 #include <iostream>
 #include <numeric>
 #include <vector>
+#include <stdexcept>
+#ifdef ROCM_HIP
+#include <hip/hip_runtime.h>
+static void hip_check(hipError_t rc) {
+    if (rc != hipSuccess) throw std::runtime_error(hipGetErrorString(rc));
+}
+#endif
 using namespace Juzhen;
 
 #if defined(CUDA)
@@ -32,6 +39,13 @@ template<class F> static double one_step_ms(F&& f) {
     CudaErrorCheck(cudaEventRecord(a)); f(); CudaErrorCheck(cudaEventRecord(b));
     CudaErrorCheck(cudaEventSynchronize(b)); float ms=0; CudaErrorCheck(cudaEventElapsedTime(&ms,a,b));
     CudaErrorCheck(cudaEventDestroy(a)); CudaErrorCheck(cudaEventDestroy(b)); return ms;
+#elif defined(ROCM_HIP)
+    hipEvent_t a, b;
+    hip_check(hipEventCreate(&a)); hip_check(hipEventCreate(&b));
+    hip_check(hipEventRecord(a)); f(); hip_check(hipEventRecord(b));
+    hip_check(hipEventSynchronize(b)); float ms = 0;
+    hip_check(hipEventElapsedTime(&ms, a, b));
+    hip_check(hipEventDestroy(a)); hip_check(hipEventDestroy(b)); return ms;
 #else
     auto a=std::chrono::steady_clock::now(); f(); auto b=std::chrono::steady_clock::now();
     return std::chrono::duration<double,std::milli>(b-a).count();
@@ -47,6 +61,10 @@ int compute() {
     constexpr int d=128, dk=128, ff=512, seq=64, batch=2, heads=4;
     const int warmup=env_count("JUZHEN_BENCH_WARMUP",3), iterations=env_count("JUZHEN_BENCH_ITERS",20);
     global_rand_gen.seed(42);
+#if defined(ROCM_HIP)
+    size_t free_before=0,total=0;
+    hip_check(hipMemGetInfo(&free_before,&total));
+#endif
 #if defined(CUDA)
     GPUSampler sampler(42); size_t free_before=0,total=0; CudaErrorCheck(cudaMemGetInfo(&free_before,&total));
 #endif
@@ -60,12 +78,23 @@ int compute() {
         (void)dx;
     };
     for(int i=0;i<warmup;++i) step();
+#if defined(ROCM_HIP)
+    hip_check(hipDeviceSynchronize()); size_t min_free=0;
+    hip_check(hipMemGetInfo(&min_free,&total));
+#endif
 #if defined(CUDA)
     CudaErrorCheck(cudaDeviceSynchronize()); size_t min_free=0; CudaErrorCheck(cudaMemGetInfo(&min_free,&total));
 #endif
     std::vector<double> samples; samples.reserve(iterations);
+    double wall_total_ms = 0;
     for(int i=0;i<iterations;++i) {
+        const auto wall_start = std::chrono::steady_clock::now();
         samples.push_back(one_step_ms(step));
+        wall_total_ms += std::chrono::duration<double,std::milli>(
+            std::chrono::steady_clock::now() - wall_start).count();
+#if defined(ROCM_HIP)
+        size_t now=0; hip_check(hipMemGetInfo(&now,&total)); min_free=std::min(min_free,now);
+#endif
 #if defined(CUDA)
         size_t now=0; CudaErrorCheck(cudaMemGetInfo(&now,&total)); min_free=std::min(min_free,now);
 #endif
@@ -73,8 +102,9 @@ int compute() {
     const double mean=std::accumulate(samples.begin(),samples.end(),0.0)/samples.size();
     const double p50=percentile(samples,0.50), p95=percentile(samples,0.95);
     double peak_mb=0.0;
-#if defined(CUDA)
-    peak_mb=static_cast<double>(free_before-min_free)/(1024.0*1024.0);
+#if defined(CUDA) || defined(ROCM_HIP)
+    // Device-wide samples between steps, not a per-process allocation peak.
+    peak_mb=(static_cast<double>(free_before)-static_cast<double>(min_free))/(1024.0*1024.0);
 #endif
     const double tokens_per_second=seq*batch*1000.0/mean;
     std::cout << "End-to-end Transformer training step\n"
@@ -82,9 +112,10 @@ int compute() {
               << " warmup="<<warmup<<" iterations="<<iterations<<"\n"
               << std::fixed<<std::setprecision(3)
               << "mean_ms="<<mean<<" p50_ms="<<p50<<" p95_ms="<<p95
-              << " tokens_per_second="<<tokens_per_second<<" peak_device_mb="<<peak_mb<<"\n"
+              << " tokens_per_second="<<tokens_per_second<<" sampled_device_delta_mb="<<peak_mb<<"\n"
               << "RESULT backend="<<backend_name<<" mean_ms="<<mean<<" p50_ms="<<p50
               << " p95_ms="<<p95<<" tokens_per_second="<<tokens_per_second
-              << " peak_device_mb="<<peak_mb<<"\n";
+              << " sampled_device_delta_mb="<<peak_mb
+              << " wall_mean_ms="<<wall_total_ms/iterations<<"\n";
     return 0;
 }

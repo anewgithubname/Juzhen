@@ -197,8 +197,9 @@ Matrix<ROCMfloat> reduce(Function func, const Matrix<ROCMfloat>& M, int dim,
             return result;
         }
     } else {
-        Matrix<ROCMfloat> t("tzeros", M.numcol, M.numrow);
-        t += M.transpose ? M : M.T();
+        // Materialize the transpose: raw-buffer addition neither permutes
+        // elements nor initializes the destination's recycled device memory.
+        auto t = (M.transpose ? M : M.T()).slice(0, M.numcol, 0, M.numrow);
 
         Matrix<ROCMfloat> result("resM", k, t.numcol);
         rocm_reduce_kernel<<<rocmConfig(t.numcol)>>>(

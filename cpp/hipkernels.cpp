@@ -30,10 +30,143 @@ bool RocmRuntimeAvailable() {
 namespace {
 
 constexpr int kThreadsPerBlock = 256;
+	__global__ void layernorm_forward_kernel(
+		const float* x, const float* gamma, const float* beta,
+		float* y, float* xhat, float* inv_std, int dim, int N) {
+		int c = blockIdx.x * blockDim.x + threadIdx.x;
+		if (c >= N) return;
+		const float* xc = x + (size_t)c * dim;
+
+		float mu = 0.0f;
+		for (int i = 0; i < dim; ++i) mu += xc[i];
+		mu /= dim;
+
+		float var = 0.0f;
+		for (int i = 0; i < dim; ++i) {
+			const float d = xc[i] - mu;
+			var += d * d;
+		}
+		var /= dim;
+
+		const float inv = rsqrtf(var + 1e-5f);
+		inv_std[c] = inv;
+		for (int i = 0; i < dim; ++i) {
+			const float xh = (xc[i] - mu) * inv;
+			xhat[(size_t)c * dim + i] = xh;
+			y[(size_t)c * dim + i] = gamma[i] * xh + beta[i];
+		}
+	}
+
+	// Fused LayerNorm input-gradient for one column (dxhat = dy ⊙ gamma):
+	//   dx = inv_std ⊙ (dxhat - mean(dxhat) - xhat ⊙ mean(dxhat ⊙ xhat))
+	__global__ void layernorm_backward_kernel(
+		const float* dy, const float* gamma,
+		const float* xhat, const float* inv_std,
+		float* dx, int dim, int N) {
+		int c = blockIdx.x * blockDim.x + threadIdx.x;
+		if (c >= N) return;
+		const size_t c0 = (size_t)c * dim;
+
+		float m1 = 0.0f, m2 = 0.0f;
+		for (int i = 0; i < dim; ++i) {
+			const float dxh = gamma[i] * dy[c0 + i];
+			m1 += dxh;
+			m2 += dxh * xhat[c0 + i];
+		}
+		m1 /= dim;
+		m2 /= dim;
+
+		const float inv = inv_std[c];
+		for (int i = 0; i < dim; ++i) {
+			const float dxh = gamma[i] * dy[c0 + i];
+			dx[c0 + i] = inv * (dxh - m1 - xhat[c0 + i] * m2);
+		}
+	}
+
+	// y[i, c] += b[i] for every column: broadcast bias add, replacing the
+	// "+ b * ones(1, N)" idiom (an outer-product GEMM plus a full temporary).
+	__global__ void add_bias_kernel(float* y, const float* b, int rows, size_t total) {
+		size_t idx = (size_t)blockIdx.x * blockDim.x + threadIdx.x;
+		if (idx >= total) return;
+		y[idx] += b[idx % rows];
+	}
+
+
+__global__ void adam_update_kernel(float* g, float* m, float* v,
+                                   float alpha, float beta1, float beta2,
+                                   float eps, float bc1, float bc2, size_t n) {
+    size_t i = (size_t)blockIdx.x * blockDim.x + threadIdx.x;
+    if (i >= n) return;
+    const float gi = g[i];
+    const float mi = beta1 * m[i] + (1.0f - beta1) * gi;
+    const float vi = beta2 * v[i] + (1.0f - beta2) * gi * gi;
+    m[i] = mi;
+    v[i] = vi;
+    g[i] = alpha * (mi * bc1) / (sqrtf(vi * bc2) + eps);
+}
+
+// One block cooperates on a query row. Shared-memory reductions do not
+// assume a particular AMD wavefront size and support non-power-of-two seq.
+__global__ void SoftmaxRowsKernel(const float* x, float* y, int seq, bool causal) {
+    __shared__ float work[kThreadsPerBlock];
+    const int t = threadIdx.x, row = blockIdx.x % seq;
+    const size_t base = static_cast<size_t>(blockIdx.x / seq) * seq * seq;
+    float mx = -INFINITY;
+    for (int key = t; key < seq; key += blockDim.x)
+        if (!causal || key <= row) mx = fmaxf(mx, x[base + row + size_t(key)*seq]);
+    work[t] = mx; __syncthreads();
+    for (int s = blockDim.x/2; s; s /= 2) {
+        if (t < s) work[t] = fmaxf(work[t], work[t+s]);
+        __syncthreads();
+    }
+    mx = work[0];
+    float sum = 0;
+    for (int key = t; key < seq; key += blockDim.x) {
+        const size_t i = base + row + size_t(key)*seq;
+        const float e = causal && key > row ? 0.0f : expf(x[i] - mx);
+        y[i] = e; sum += e;
+    }
+    __syncthreads(); work[t] = sum; __syncthreads();
+    for (int s = blockDim.x/2; s; s /= 2) {
+        if (t < s) work[t] += work[t+s];
+        __syncthreads();
+    }
+    const float inv = 1.0f / work[0];
+    for (int key = t; key < seq; key += blockDim.x)
+        y[base + row + size_t(key)*seq] *= inv;
+}
+
+__global__ void SoftmaxBackwardRowsKernel(const float* a, const float* dat,
+                                         float* ds, int seq, float scale) {
+    __shared__ float work[kThreadsPerBlock];
+    const int t = threadIdx.x, row = blockIdx.x % seq;
+    const size_t base = static_cast<size_t>(blockIdx.x / seq) * seq * seq;
+    float sum = 0;
+    for (int key = t; key < seq; key += blockDim.x)
+        sum += a[base + row + size_t(key)*seq] * dat[base + key + size_t(row)*seq];
+    work[t] = sum; __syncthreads();
+    for (int s = blockDim.x/2; s; s /= 2) {
+        if (t < s) work[t] += work[t+s];
+        __syncthreads();
+    }
+    sum = work[0];
+    for (int key = t; key < seq; key += blockDim.x) {
+        const size_t i = base + row + size_t(key)*seq;
+        ds[i] = a[i] * (dat[base + key + size_t(row)*seq] - sum) * scale;
+    }
+}
 
 __global__ void FillKernel(float* out, std::size_t n, float value) {
     const std::size_t idx = static_cast<std::size_t>(blockIdx.x) * blockDim.x + threadIdx.x;
     if (idx < n) out[idx] = value;
+}
+
+__global__ void CausalMaskKernel(float* scores, int seq_len, bool transpose, float value) {
+    const std::size_t i = static_cast<std::size_t>(blockIdx.x) * blockDim.x + threadIdx.x;
+    if (i >= static_cast<std::size_t>(seq_len) * seq_len) return;
+    const int row = transpose ? i / seq_len : i % seq_len;
+    const int col = transpose ? i % seq_len : i / seq_len;
+    if (col > row) scores[i] = value;
 }
 
 __global__ void ExpKernel(float* out, std::size_t n) {
@@ -617,6 +750,86 @@ int RocmFill(float* dst_device, std::size_t count, float value) {
     (void)count;
     (void)value;
     LOG_ERROR("ROCm runtime headers not found; RocmFill is unavailable.");
+    return -1;
+#endif
+}
+
+#if JUZHEN_ROCM_KERNELS_AVAILABLE
+	int Rocm_layernorm_forward(
+		const float* x, const float* gamma, const float* beta,
+		float* y, float* xhat, float* inv_std, int dim, int N) {
+		const int threads = 128;
+		const int blocks = (N + threads - 1) / threads;
+		layernorm_forward_kernel<<<blocks, threads>>>(x, gamma, beta, y, xhat, inv_std, dim, N);
+		return static_cast<int>(hipGetLastError());
+	}
+
+	int Rocm_layernorm_backward(
+		const float* dy, const float* gamma,
+		const float* xhat, const float* inv_std,
+		float* dx, int dim, int N) {
+		const int threads = 128;
+		const int blocks = (N + threads - 1) / threads;
+		layernorm_backward_kernel<<<blocks, threads>>>(dy, gamma, xhat, inv_std, dx, dim, N);
+		return static_cast<int>(hipGetLastError());
+	}
+
+	int Rocm_add_bias(float* y, const float* b, int rows, size_t total) {
+		const int threads = 256;
+		const int blocks = (int)((total + threads - 1) / threads);
+		add_bias_kernel<<<blocks, threads>>>(y, b, rows, total);
+		return static_cast<int>(hipGetLastError());
+	}
+int Rocm_adam_update(float* g, float* m, float* v, float alpha, float beta1,
+                     float beta2, float eps, float bc1, float bc2, size_t n) {
+    adam_update_kernel<<<(n+255)/256,256>>>(g,m,v,alpha,beta1,beta2,eps,bc1,bc2,n);
+    return static_cast<int>(hipGetLastError());
+}
+
+#else
+
+int Rocm_layernorm_forward(const float* x, const float* gamma, const float* beta,
+    float* y, float* xhat, float* inv_std, int dim, int N) { return -1; }
+int Rocm_layernorm_backward(const float* dy, const float* gamma, const float* xhat,
+    const float* inv_std, float* dx, int dim, int N) { return -1; }
+int Rocm_add_bias(float* y, const float* b, int rows, size_t total) { return -1; }
+int Rocm_adam_update(float* g, float* m, float* v, float alpha, float beta1,
+    float beta2, float eps, float bc1, float bc2, size_t n) { return -1; }
+
+#endif
+
+int RocmSoftmaxRows(const float* scores, float* out, int seq, int blocks, bool causal) {
+#if JUZHEN_ROCM_KERNELS_AVAILABLE
+    if (!scores || !out || seq <= 0 || blocks <= 0) return -1;
+    hipLaunchKernelGGL(SoftmaxRowsKernel, dim3(seq*blocks), dim3(kThreadsPerBlock),
+                      0, 0, scores, out, seq, causal);
+    return HipToInt(hipGetLastError());
+#else
+    return -1;
+#endif
+}
+
+int RocmSoftmaxBackwardRows(const float* a, const float* dat, float* ds,
+                            int seq, int blocks, float scale) {
+#if JUZHEN_ROCM_KERNELS_AVAILABLE
+    if (!a || !dat || !ds || seq <= 0 || blocks <= 0) return -1;
+    hipLaunchKernelGGL(SoftmaxBackwardRowsKernel, dim3(seq*blocks), dim3(kThreadsPerBlock),
+                      0, 0, a, dat, ds, seq, scale);
+    return HipToInt(hipGetLastError());
+#else
+    return -1;
+#endif
+}
+
+int RocmCausalMask(float* scores, int seq_len, bool transpose, float value) {
+#if JUZHEN_ROCM_KERNELS_AVAILABLE
+    if (seq_len <= 0) return 0;
+    hipLaunchKernelGGL(CausalMaskKernel,
+                       dim3(BlocksFor(static_cast<std::size_t>(seq_len) * seq_len)),
+                       dim3(kThreadsPerBlock), 0, 0, scores, seq_len, transpose, value);
+    return HipToInt(hipGetLastError());
+#else
+    (void)scores; (void)seq_len; (void)transpose; (void)value;
     return -1;
 #endif
 }

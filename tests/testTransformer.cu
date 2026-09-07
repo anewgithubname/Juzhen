@@ -132,9 +132,11 @@ int compute() {
         auto x_h = Matrix<float>::randn(d_model, seq * batch) * 0.5f;
         auto g_h = Matrix<float>::randn(d_model, seq * batch) * 0.5f;
 
+        // A 1e-3 perturbation has large truncation error for low-variance
+        // LayerNorm inputs. Use a smaller step without relaxing tolerances.
         ret += check_input_gradient_fd<BackendT>(
             "TransformerLayer dx", tf, x_h, g_h,
-            1e-3f, 5e-2f, 5e-2f);
+            1e-4f, 5e-2f, 5e-2f);
     }
 
     // ── Test 3: repeated forward gives same result (determinism) ──────

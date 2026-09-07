@@ -1,6 +1,6 @@
 /**
  * @file testJVP.cu
- * @brief Forward-mode (JVP) correctness on the CPU and CUDA backends.
+ * @brief Forward-mode (JVP) correctness on the CPU, CUDA and ROCm backends.
  *
  * Two independent checks per network:
  *   (a) adjoint consistency against the existing backprop:
@@ -10,10 +10,10 @@
  *   (b) central finite differences along u (looser: fp32 + ReLU kinks).
  *
  * The templated networks (MLP: tanh -> relu -> linear, and the transformer)
- * run on the CPU backend in every build and additionally on CUDAfloat in
- * CUDA builds; the conv / conv-transpose networks use whichever ConvLayer
- * the build provides (im2col on CPU, cuDNN on CUDA). CUDA builds also check
- * CPU<->GPU parity of the JVP itself on networks with identical weights.
+ * run on CPU and additionally on the selected CUDA/ROCm backend; convolution
+ * networks use the build's native backend. CPU/GPU parity uses identical
+ * parameters, inputs and tangents for MLP and Transformer networks, including
+ * causal/bidirectional attention and sequence lengths 1, 5 and 257.
  */
 
 #include "../ml/layer.hpp"
@@ -23,9 +23,9 @@
 using namespace Juzhen;
 using namespace std;
 
-#if defined(APPLE_SILICON) || defined(ROCM_HIP)
+#if defined(APPLE_SILICON)
 int compute() {
-    cout << "testJVP covers the CPU and CUDA backends only; skipping." << endl;
+    cout << "testJVP covers the CPU, CUDA and ROCm backends only; skipping." << endl;
     return 77; // ctest SKIP_RETURN_CODE
 }
 #else
@@ -121,6 +121,8 @@ int run_transformer(const string& tag) {
 #define JVP_HAVE_CONV 1
 #ifdef CUDA
 using ConvD = CUDAfloat;
+#elif defined(ROCM_HIP)
+using ConvD = ROCMfloat;
 #else
 using ConvD = float;
 #endif
@@ -153,26 +155,31 @@ int run_conv(const string& tag) {
 }
 #endif // conv available
 
+#if defined(CUDA) || defined(ROCM_HIP)
 #ifdef CUDA
+using GpuD = CUDAfloat;
+#else
+using GpuD = ROCMfloat;
+#endif
 // Copy every trainable tensor of a CPU layer into its GPU twin.
 template <class LSrc, class LDst>
 void copy_params(LSrc& src, LDst& dst) {
     auto ps = src.checkpoint_parameters();
     auto pd = dst.checkpoint_parameters();
     for (size_t i = 0; i < ps.size(); ++i)
-        *pd[i].second = Matrix<CUDAfloat>(*ps[i].second);
+        *pd[i].second = Matrix<GpuD>(*ps[i].second);
 }
 
-int check_parity(list<Layer<float>*> cnn, list<Layer<CUDAfloat>*> gnn,
+int check_parity(list<Layer<float>*> cnn, list<Layer<GpuD>*> gnn,
                  int d_in, int nb, const string& name) {
     auto x = Matrix<float>::randn(d_in, nb);
     auto u = Matrix<float>::randn(d_in, nb);
     auto Jc = jvp(cnn, x, u);
-    auto Jg = jvp(gnn, Matrix<CUDAfloat>(x), Matrix<CUDAfloat>(u)).to_host();
+    auto Jg = jvp(gnn, Matrix<GpuD>(x), Matrix<GpuD>(u)).to_host();
     const float err = fro(Jc - Jg) / (fro(Jc) + 1e-12f);
-    cout << name << ": cpu-vs-cuda rel err = " << err << endl;
+    cout << name << ": cpu-vs-gpu rel err = " << err << endl;
     if (!(err < 1e-4f)) {
-        cout << name << " FAILED the CPU/CUDA parity check." << endl;
+        cout << name << " FAILED the CPU/GPU parity check." << endl;
         return 1;
     }
     return 0;
@@ -188,19 +195,40 @@ int run_parity() {
     c0.W() = Matrix<float>::randn(8, 6) * 0.7f; c0.b() = Matrix<float>::randn(8, 1) * 0.2f;
     c1.W() = Matrix<float>::randn(7, 8) * 0.7f; c1.b() = Matrix<float>::randn(7, 1) * 0.2f;
     c2.W() = Matrix<float>::randn(3, 7) * 0.7f; c2.b() = Matrix<float>::randn(3, 1) * 0.2f;
-    Layer<CUDAfloat> g0(8, 6, nb);
-    ReluLayer<CUDAfloat> g1(7, 8, nb);
-    LinearLayer<CUDAfloat> g2(3, 7, nb);
+    Layer<GpuD> g0(8, 6, nb);
+    ReluLayer<GpuD> g1(7, 8, nb);
+    LinearLayer<GpuD> g2(3, 7, nb);
     copy_params(c0, g0); copy_params(c1, g1); copy_params(c2, g2);
     if (check_parity({ &c2, &c1, &c0 }, { &g2, &g1, &g0 }, 6, nb, "parity:mlp")) return 1;
 
     const int d_model = 6, d_kk = 8, d_ff = 10, seq_len = 5, batch = 3, heads = 2;
-    TransformerLayer<float> tc(d_model, d_kk, d_ff, seq_len, batch, heads);
-    TransformerLayer<CUDAfloat> tg(d_model, d_kk, d_ff, seq_len, batch, heads);
-    copy_params(tc, tg);
-    return check_parity({ &tc }, { &tg }, d_model, seq_len * batch, "parity:transformer");
+    int rc = 0;
+    for (int seq : {1, seq_len, 257}) {
+        for (bool causal : {true, false}) {
+            TransformerLayer<float> tc(d_model, d_kk, d_ff, seq, batch, heads, causal);
+            TransformerLayer<GpuD> tg(d_model, d_kk, d_ff, seq, batch, heads, causal);
+            copy_params(tc, tg);
+            rc |= check_parity({ &tc }, { &tg }, d_model, seq * batch,
+                "parity:transformer:seq=" + std::to_string(seq) + (causal ? ":causal" : ":bidirectional"));
+            // Reuse one forward cache for different directions. This catches
+            // stale accumulation or accidental writes to forward activations.
+            auto x = Matrix<float>::randn(d_model, seq * batch);
+            auto gx = Matrix<GpuD>(x);
+            tc.eval(x); tg.eval(gx);
+            for (int direction = 0; direction < 2; ++direction) {
+                auto u = Matrix<float>::randn(d_model, seq * batch);
+                auto expected = tc.jvp(x, u);
+                auto actual = tg.jvp(gx, Matrix<GpuD>(u)).to_host();
+                const float err = fro(expected - actual) / (fro(expected) + 1e-12f);
+                cout << "cached-jvp:seq=" << seq << ":causal=" << causal
+                     << ":direction=" << direction << ": cpu-vs-gpu rel err = " << err << endl;
+                if (!(err < 1e-4f)) rc |= 1;
+            }
+        }
+    }
+    return rc;
 }
-#endif // CUDA
+#endif // CUDA or ROCm parity
 
 } // namespace
 
@@ -212,10 +240,10 @@ int compute() {
     int rc = 0;
 
     // Templated layers always have a CPU (float) instantiation, even in
-    // CUDA builds — so every build exercises the generic JVP path.
+    // GPU builds — so every build exercises the generic JVP path.
     rc |= run_mlp<float>("cpu");
     rc |= run_transformer<float>("cpu");
-#if defined(JVP_HAVE_CONV) && !defined(CUDA)
+#if defined(JVP_HAVE_CONV) && !defined(CUDA) && !defined(ROCM_HIP)
     rc |= run_conv("cpu");
 #endif
 
@@ -225,6 +253,13 @@ int compute() {
 #ifdef JVP_HAVE_CONV
     rc |= run_conv("cuda");
 #endif
+    rc |= run_parity();
+#endif
+
+#ifdef ROCM_HIP
+    rc |= run_mlp<ROCMfloat>("rocm");
+    rc |= run_transformer<ROCMfloat>("rocm");
+    rc |= run_conv("rocm");
     rc |= run_parity();
 #endif
 
