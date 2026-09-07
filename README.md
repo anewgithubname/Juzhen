@@ -13,6 +13,7 @@ Developed under C++20. Supports NVIDIA CUDA 12.x (with cuDNN), Apple Silicon (th
 - Neural-network layers including convolution, transposed convolution and pre-LayerNorm Transformers.
 - Forward-mode Jacobian-vector products (JVP) on CPU, CUDA and ROCm. The JVP correctness suite does not yet cover Metal.
 - AMD Transformer forward, backward and JVP paths with batched attention GEMM and fused HIP operations. See the [implementation and validation notes](docs/amd-transformer-optimization.md).
+- [Training checkpoints](docs/checkpoint-resume.md) restore model parameters, Adam state, training progress and the host RNG. CPU and AMD tests include restarting in a new process.
 - A [CPU linear assignment solver](docs/cpu-assignment.md) using the Hungarian shortest-augmenting-path algorithm, with rectangular and min/max matching support.
 - [Reproducible CPU/AMD benchmarks](docs/amd-cpu-benchmark.md), including CPU thread-count comparisons and numerical output checks.
 
@@ -211,9 +212,14 @@ consistency. Coverage includes causal/bidirectional attention and short/long
 sequences. Assignment tests use exhaustive small-problem references and larger
 known optima.
 
+Checkpoint tests exercise CPU or the selected CUDA/ROCm backend, including all
+Transformer parameters and Adam states, invalid-file handling and continuation
+in a separate process. See [checkpoint usage and limits](docs/checkpoint-resume.md),
+especially the distinction between host and device random-number state.
+
 Backend coverage is not identical: `testTransformerParity`, detailed cuDNN
 convolution tests and diffusion-score tests still have CUDA-only paths;
-`checkpoint_resume_consistency` uses CPU tensors in a ROCm build. Some older
+Some older
 tests return success after printing a skip message, so a passing CTest summary
 alone does not establish that every test exercised the GPU. See the linked
 validation notes for the checks actually run.

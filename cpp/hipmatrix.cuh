@@ -141,8 +141,8 @@ class Matrix<ROCMfloat> {
     friend Matrix<ROCMfloat> elemwise(Function func, Matrix<ROCMfloat>&& M);
 
     friend std::ostream& operator<<(std::ostream& os, const Matrix<ROCMfloat>& M);
-    friend void write<ROCMfloat>(FILE* fp, const Matrix<ROCMfloat>& M);
-    friend void read<ROCMfloat>(FILE* fp, Matrix<ROCMfloat>& M);
+    friend void write(FILE* fp, const Matrix<ROCMfloat>& M);
+    friend void read(FILE* fp, Matrix<ROCMfloat>& M);
 };
 
 Matrix<ROCMfloat> sum(const Matrix<ROCMfloat>& M, int dim);
@@ -249,5 +249,9 @@ Matrix<ROCMfloat> elemwise(Function func, Matrix<ROCMfloat>&& M) {
 }
 
 #endif // __HIPCC__
+
+// Device I/O overloads must be visible to callers of generic checkpoint code.
+void write(FILE* fp, const Matrix<ROCMfloat>& M);
+void read(FILE* fp, Matrix<ROCMfloat>& M);
 
 #endif

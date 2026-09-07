@@ -37,8 +37,8 @@
 | ID | 修改建议 | 状态 | 验收标准 | 备注 |
 |---|---|---|---|---|
 | REL-001 | 修复 `returning reference to local variable` 等生命周期警告 | 已完成 | CPU/CUDA clean rebuild 不再报告已识别的生命周期警告；相关路径有回归测试 | 五个缓存加载器改为按值返回；移除 Transformer forward 未使用变量 |
-| REL-002 | 实现完整 checkpoint 保存与恢复 | 已完成 | 可恢复模型、optimizer、epoch/step、随机数状态和数据位置 | 所有层通过统一虚接口声明 checkpoint schema；Transformer 覆盖全部 13 个参数和 13 组 Adam；格式带版本、名称校验、尾部标记和原子替换 |
-| REL-003 | 增加 checkpoint 一致性测试 | 已完成 | 连续训练与中断恢复训练在规定容差内得到一致结果 | `checkpoint_resume_consistency` 覆盖 CPU/CUDA 的 Linear 网络和 Transformer block，参数及 Adam 状态最大绝对误差均为 0 |
+| REL-002 | 实现 checkpoint 保存与恢复 | 已完成（设备 RNG 除外） | 恢复模型、optimizer、epoch/step、CPU 随机数状态和数据位置计数 | Transformer 覆盖全部 13 个参数和 13 组 Adam；验证文件后再更新模型；安全替换旧文件；设备 RNG、数据迭代器和调度器的限制见 [续训说明](checkpoint-resume.md) |
+| REL-003 | 增加 checkpoint 一致性测试 | 已完成 | 连续训练与中断恢复训练在规定容差内得到一致结果 | 2026-09-07 CPU/AMD 各 3 项测试通过，含独立进程恢复，参数及 Adam 最大绝对误差均为 0；保留 CUDA 路径，本轮未在 NVIDIA 硬件验证 |
 | REL-004 | 增加 loss、梯度和参数的 NaN/Inf 检测 | 待处理 | 异常发生时立即给出位置、step、张量信息，并保留诊断材料 | 检测应可配置关闭 |
 | REL-005 | 增加长时间稳定性测试 | 待处理 | 单卡连续运行预定时长，无显存/主存持续增长，无异常退出 | 首个目标建议为 2 小时 |
 

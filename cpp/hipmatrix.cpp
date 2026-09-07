@@ -275,7 +275,7 @@ const Matrix<ROCMfloat> Matrix<ROCMfloat>::T() const {
 Matrix<float> Matrix<ROCMfloat>::to_host() const {
     Matrix<float> H(name.c_str(), numrow, numcol);
     H.transpose = transpose;
-    Juzhen::RocmMemcpyD2H(H.elements.get(), reinterpret_cast<const float*>(elements.get()), numrow * numcol);
+    Juzhen::RocmCheck(Juzhen::RocmMemcpyD2H(H.elements.get(), reinterpret_cast<const float*>(elements.get()), numrow * numcol));
     return H;
 }
 
@@ -753,20 +753,20 @@ std::ostream& operator<<(std::ostream& os, const Matrix<ROCMfloat>& M) {
     return os;
 }
 
-template <>
 void write(FILE* fp, const Matrix<ROCMfloat>& M) {
     write(fp, M.to_host());
 }
 
-template <>
 void read(FILE* fp, Matrix<ROCMfloat>& M) {
     Matrix<float> tmp("tmp", M.num_row(), M.num_col());
     read(fp, tmp);
-    M.numrow = tmp.numrow;
-    M.numcol = tmp.numcol;
-    M.transpose = tmp.transpose;
-    Juzhen::RocmMemcpyH2D(reinterpret_cast<float*>(M.elements.get()), tmp.elements.get(),
-                          tmp.num_row() * tmp.num_col());
+    if(ferror(fp) || feof(fp)) return;
+    const bool transposed=tmp.get_transpose();
+    Matrix<ROCMfloat> restored("checkpoint", transposed?tmp.num_col():tmp.num_row(),
+                              transposed?tmp.num_row():tmp.num_col(), transposed);
+    Juzhen::RocmCheck(Juzhen::RocmMemcpyH2D(reinterpret_cast<float*>(restored.elements.get()),
+                                        tmp.data(), tmp.num_row() * tmp.num_col()));
+    M=std::move(restored);
 }
 
 #endif

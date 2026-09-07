@@ -421,6 +421,14 @@ set_tests_properties(elementwise_reduce_torch_compare PROPERTIES
     FIXTURES_REQUIRED elementwise_reduce_dump LABELS "unit;pytorch" SKIP_RETURN_CODE 77)
 add_test(NAME checkpoint_resume_consistency COMMAND testCheckpointResume)
 set_tests_properties(checkpoint_resume_consistency PROPERTIES LABELS "unit;checkpoint")
+add_test(NAME checkpoint_restart_prepare COMMAND testCheckpointResume)
+set_tests_properties(checkpoint_restart_prepare PROPERTIES
+    ENVIRONMENT "JUZHEN_CHECKPOINT_PHASE=prepare"
+    FIXTURES_SETUP checkpoint_restart LABELS "unit;checkpoint")
+add_test(NAME checkpoint_restart_resume COMMAND testCheckpointResume)
+set_tests_properties(checkpoint_restart_resume PROPERTIES
+    ENVIRONMENT "JUZHEN_CHECKPOINT_PHASE=resume"
+    FIXTURES_REQUIRED checkpoint_restart LABELS "unit;checkpoint")
 
 # Handwritten gemm/gemv parity: vs a naive double-precision reference always,
 # and additionally vs cblas when the build links an external BLAS.
