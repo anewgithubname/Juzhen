@@ -7,6 +7,15 @@ Juzhen is a set of C++ APIs for matrix operations. It provides a higher-level in
 
 Developed under C++20. Supports NVIDIA CUDA 12.x (with cuDNN), Apple Silicon (through Metal Performance Shaders) and ROCm.
 
+## Features
+
+- CPU matrix operations with BLAS, plus CUDA, ROCm/HIP and Metal backends.
+- Neural-network layers including convolution, transposed convolution and pre-LayerNorm Transformers.
+- Forward-mode Jacobian-vector products (JVP) on CPU, CUDA and ROCm. The JVP correctness suite does not yet cover Metal.
+- AMD Transformer forward, backward and JVP paths with batched attention GEMM and fused HIP operations. See the [implementation and validation notes](docs/amd-transformer-optimization.md).
+- A [CPU linear assignment solver](docs/cpu-assignment.md) using the Hungarian shortest-augmenting-path algorithm, with rectangular and min/max matching support.
+- [Reproducible CPU/AMD benchmarks](docs/amd-cpu-benchmark.md), including CPU thread-count comparisons and numerical output checks.
+
 ## Example
 
 Matrix operations on CPU:
@@ -40,12 +49,39 @@ logM 2 by 2
 0.981484 1.28033
 ```
 
+For AMD GPUs, use `Matrix<ROCMfloat>` in a ROCm build in the same way as
+`Matrix<CUDAfloat>` above. Use `.to_host()` when a CPU matrix is needed.
+
+### CPU linear assignment
+
+```c++
+#include "ml/assignment.hpp"
+
+int compute() {
+    Matrix<float> costs("costs", {{4, 1, 3}, {2, 0, 5}, {3, 2, 2}});
+    Juzhen::LinearAssignmentSolver solver; // reuse for subsequent problems
+    auto result = solver.solve(costs);
+    // result.row_to_col == {1, 0, 2}; result.cost == 5
+    return 0;
+}
+```
+
+The solver runs on CPU in every build. It accepts finite costs, supports
+`solve(costs, true)` for maximization, and marks unmatched rectangular entries
+with `-1`. Use a separate solver instance per concurrent thread.
+
 ## Prerequisites
 
-Install CBLAS:
+Initialize the repository's submodules before configuring:
+
+```bash
+git submodule update --init --recursive
+```
+
+CMake also fetches FTXUI on the first configuration. Install CBLAS:
 - **Ubuntu/Debian**: `sudo apt install libopenblas-dev libboost-dev`
 - **macOS**: BLAS ships with Xcode (Accelerate framework).
-- **Windows**: download precompiled binaries from [OpenBLAS](https://github.com/xianyi/OpenBLAS/releases).
+- **Windows**: the current CMake configuration uses the bundled `external/OpenBLAS` library and copies its DLL beside the executables.
 
 Alternatively, configure with `-DBLAS_FREE=ON` to build without any external
 BLAS: CPU `gemm`/`gemv` then use the handwritten kernels in
@@ -56,6 +92,10 @@ For CUDA builds you also need:
 - [CUDA Toolkit](https://developer.nvidia.com/cuda-toolkit) (12.x recommended)
 - [cuDNN](https://developer.nvidia.com/cudnn) (required for convolutional layers)
 
+For AMD builds, install a HIP-capable C++ compiler, the HIP runtime, hipBLAS
+and rocRAND, and configure the ROCm installation prefix and target GPU
+architecture. GPU availability depends on the installed driver and runtime.
+
 ## Building with CMake
 
 Use separate build directories per backend.
@@ -63,41 +103,71 @@ Use separate build directories per backend.
 ### Apple Silicon (Metal) build
 
 ```bash
-cmake -S . -B build -DAPPLE_SILICON=ON -DNVIDIA_CUDA=OFF
+cmake -S . -B build -DAPPLE_SILICON=ON -DNVIDIA_CUDA=OFF -DROCM_HIP=OFF -DCMAKE_BUILD_TYPE=Release
 cmake --build build -j
 ```
 
 ### CPU-only build
 
 ```bash
-cmake -S . -B build_cpu -DAPPLE_SILICON=OFF -DNVIDIA_CUDA=OFF
+cmake -S . -B build_cpu -DAPPLE_SILICON=OFF -DNVIDIA_CUDA=OFF -DROCM_HIP=OFF -DCMAKE_BUILD_TYPE=Release
 cmake --build build_cpu -j
 ```
 
 ### NVIDIA CUDA build
 
 ```bash
-cmake -S . -B build_cuda -DNVIDIA_CUDA=ON
+cmake -S . -B build_cuda -DNVIDIA_CUDA=ON -DROCM_HIP=OFF -DAPPLE_SILICON=OFF -DCMAKE_BUILD_TYPE=Release
 cmake --build build_cuda -j
 ```
 
 This enables CUDA and automatically searches for cuDNN (in standard paths and the active conda environment). Convolutional layers (`ConvLayer`, `ConvTransLayer`) require cuDNN.
 
-### AMD ROCm/HIP build 
+### AMD ROCm/HIP build
+
+Example configuration for a Linux ROCm installation in `/opt/rocm` and a
+`gfx1151` GPU. Adjust the compiler path, prefix and architecture for your system:
 
 ```bash
-cmake -S . -B build_rocm -DROCM_HIP=ON -DNVIDIA_CUDA=OFF -DAPPLE_SILICON=OFF
+cmake -S . -B build_rocm -DROCM_HIP=ON -DNVIDIA_CUDA=OFF -DAPPLE_SILICON=OFF \
+  -DCMAKE_BUILD_TYPE=Release -DCMAKE_CXX_COMPILER=/opt/rocm/bin/hipcc \
+  -DCMAKE_PREFIX_PATH=/opt/rocm -DROCM_OFFLOAD_ARCH=gfx1151
 cmake --build build_rocm -j
 ```
+
+The AMD tests and benchmarks in the linked reports were run on **Windows,
+ROCm 7.1, Radeon 8060S (`gfx1151`)**, with AMD Clang and Visual Studio 2022
+Build Tools. For that environment, use PowerShell with the x64 Visual Studio
+developer environment initialized, and CMake/Ninja on PATH:
+
+```powershell
+$rocmRoot = "$env:ProgramFiles/AMD/ROCm/7.1"
+$env:PATH = "$rocmRoot/bin;" + $env:PATH
+New-Item -ItemType Directory -Force build_rocm | Out-Null
+@'
+set(CMAKE_CXX_USING_LINKER_DEFAULT "-fuse-ld=lld")
+set(CMAKE_POLICY_DEFAULT_CMP0091 NEW CACHE STRING "Consistent MSVC runtime")
+'@ | Set-Content -Encoding ascii build_rocm/compiler-rules.cmake
+cmake -S . -B build_rocm -G Ninja -DROCM_HIP=ON -DNVIDIA_CUDA=OFF -DAPPLE_SILICON=OFF `
+  -DCMAKE_BUILD_TYPE=Release "-DCMAKE_CXX_COMPILER=$rocmRoot/bin/clang++.exe" `
+  "-DCMAKE_PREFIX_PATH=$rocmRoot" -DROCM_OFFLOAD_ARCH=gfx1151 "-DCMAKE_CXX_FLAGS=" `
+  "-DCMAKE_USER_MAKE_RULES_OVERRIDE=$PWD/build_rocm/compiler-rules.cmake"
+cmake --build build_rocm --target testTransformer testTransformerRef testTransformerTorchDump testJVP testAssignment
+```
+
+The local rules file selects the linker accepted by this AMD Clang setup and
+keeps dependency runtime settings consistent. This is the configuration tested
+here, not a claim of validation on every Windows AMD device or SDK version.
 
 ### CMake options
 
 | Option | Default | Description |
 |---|---|---|
-| `NVIDIA_CUDA` | OFF | NVIDIA CUDA backend |
+| `NVIDIA_CUDA` | ON | NVIDIA CUDA backend |
 | `ROCM_HIP` | OFF | AMD ROCm/HIP backend |
 | `APPLE_SILICON` | OFF | Apple Metal backend |
-| `JUZHEN_ENABLE_FTXUI` | ON | Build with FTXUI terminal-UI |
+| `BLAS_FREE` | OFF | Use handwritten CPU GEMM/GEMV without an external BLAS |
+| `ROCM_OFFLOAD_ARCH` | empty | Target AMD architecture, e.g. `gfx1151` |
 
 Only one GPU backend may be enabled at a time.
 
@@ -121,6 +191,50 @@ Only one GPU backend may be enabled at a time.
 # after building a backend, run tests in that build directory
 ctest --test-dir build --output-on-failure
 ```
+
+For the AMD Transformer, JVP and CPU assignment checks:
+
+```bash
+cmake --build build_rocm --target testTransformer testTransformerRef testTransformerTorchDump testJVP testAssignment
+cmake -E make_directory res
+ctest --test-dir build_rocm --output-on-failure -R '^(test11|test13|test14|test15|transformer_.*|jvp_correctness|assignment_correctness)$'
+```
+
+The PyTorch comparisons need `python3` on PATH with NumPy and PyTorch installed
+(CPU PyTorch is sufficient). Test fixtures generate the required dump files.
+The dump programs expect the repository's `res` directory to exist; create it
+before running them. Missing Python packages cause these comparisons to skip.
+
+AMD checks cover Transformer outputs, input gradients, three steps of parameter
+and Adam-state updates, and JVP CPU parity, finite differences and adjoint
+consistency. Coverage includes causal/bidirectional attention and short/long
+sequences. Assignment tests use exhaustive small-problem references and larger
+known optima.
+
+Backend coverage is not identical: `testTransformerParity`, detailed cuDNN
+convolution tests and diffusion-score tests still have CUDA-only paths;
+`checkpoint_resume_consistency` uses CPU tensors in a ROCm build. Some older
+tests return success after printing a skip message, so a passing CTest summary
+alone does not establish that every test exercised the GPU. See the linked
+validation notes for the checks actually run.
+
+### Benchmarks
+
+```bash
+cmake --build build_cpu --target benchmarkCpuGpu benchmarkAssignment
+cmake --build build_rocm --target benchmarkCpuGpu benchmarkRocmJVP benchmarkRocmJVPGeneric
+python3 tests/benchmarkCpuGpu.py --cpu build_cpu/benchmarkCpuGpu --gpu build_rocm/benchmarkCpuGpu --output res/cpu_gpu_benchmark
+./build_cpu/benchmarkAssignment
+```
+
+On Windows, append `.exe` to executable paths. The CPU/GPU comparison rotates
+execution order, checks outputs, tests multiple CPU thread counts and waits for
+GPU completion. Initial input transfers are outside the timed region. Results
+depend on workload, build, device and CPU thread configuration.
+
+- [CPU/AMD benchmark methodology and measurements](docs/amd-cpu-benchmark.md)
+- [Transformer and JVP optimizations and benchmarks](docs/amd-transformer-optimization.md)
+- [CPU assignment API, tests and n≤512 benchmarks](docs/cpu-assignment.md)
 
 ## Examples
 
@@ -182,7 +296,7 @@ CNN_MNIST_EPOCHS=10 CNN_MNIST_SEED=43 ./build_cuda/demo_cnn_mnist
 ## Supported Platforms
 - Linux (CPU / NVIDIA GPU / AMD GPU via ROCm)
 - macOS (CPU / Apple Silicon via Metal)
-- Windows (CPU / NVIDIA GPU — requires Visual Studio 2019+)
+- Windows (CPU / NVIDIA GPU; AMD ROCm 7.1 was also tested on Radeon 8060S with Visual Studio 2022 Build Tools and AMD Clang)
 
 ## `std::move` Semantics
 Consider the following examples:
