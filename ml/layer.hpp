@@ -2533,6 +2533,50 @@ namespace Juzhen
 		}
 	}
 
+	// Fused LayerNorm tangent. Unlike the reverse-mode kernel above, gamma
+	// multiplies after the symmetric standardization Jacobian:
+	//   dy = gamma * inv * (dx - mean(dx) - xhat * mean(xhat * dx)).
+	// One block owns a token/column so the two reductions are parallel across
+	// the feature dimension instead of being serialized in a single thread.
+	__global__ void layernorm_jvp_kernel(
+		const float* dx, const float* gamma,
+		const float* xhat, const float* inv_std,
+		float* dy, int dim, int N) {
+		const int c = blockIdx.x;
+		if (c >= N) return;
+		const int tid = threadIdx.x;
+		const size_t c0 = (size_t)c * dim;
+
+		extern __shared__ float reductions[];
+		float* reduce_dx = reductions;
+		float* reduce_xhat_dx = reductions + blockDim.x;
+		float s1 = 0.0f, s2 = 0.0f;
+		for (int i = tid; i < dim; i += blockDim.x) {
+			const float d = dx[c0 + i];
+			s1 += d;
+			s2 += d * xhat[c0 + i];
+		}
+		reduce_dx[tid] = s1;
+		reduce_xhat_dx[tid] = s2;
+		__syncthreads();
+
+		for (int offset = blockDim.x / 2; offset > 0; offset >>= 1) {
+			if (tid < offset) {
+				reduce_dx[tid] += reduce_dx[tid + offset];
+				reduce_xhat_dx[tid] += reduce_xhat_dx[tid + offset];
+			}
+			__syncthreads();
+		}
+
+		const float m1 = reduce_dx[0] / dim;
+		const float m2 = reduce_xhat_dx[0] / dim;
+		const float inv = inv_std[c];
+		for (int i = tid; i < dim; i += blockDim.x) {
+			dy[c0 + i] = gamma[i] * inv *
+				(dx[c0 + i] - m1 - xhat[c0 + i] * m2);
+		}
+	}
+
 	// y[i, c] += b[i] for every column: broadcast bias add, replacing the
 	// "+ b * ones(1, N)" idiom (an outer-product GEMM plus a full temporary).
 	__global__ void add_bias_kernel(float* y, const float* b, int rows, size_t total) {
@@ -2557,6 +2601,18 @@ namespace Juzhen
 		const int threads = 128;
 		const int blocks = (N + threads - 1) / threads;
 		layernorm_backward_kernel<<<blocks, threads>>>(dy, gamma, xhat, inv_std, dx, dim, N);
+		CudaErrorCheck(cudaGetLastError());
+	}
+
+	inline void cuda_layernorm_jvp(
+		const float* dx, const float* gamma,
+		const float* xhat, const float* inv_std,
+		float* dy, int dim, int N) {
+		int threads = 32;
+		while (threads < dim && threads < 256) threads <<= 1;
+		const size_t shared_bytes = 2 * threads * sizeof(float);
+		layernorm_jvp_kernel<<<N, threads, shared_bytes>>>(
+			dx, gamma, xhat, inv_std, dy, dim, N);
 		CudaErrorCheck(cudaGetLastError());
 	}
 
@@ -2726,6 +2782,21 @@ namespace Juzhen
 		// so this mirrors backward() — but gamma multiplies on the outside
 		// (J = diag(gamma) P) instead of the inside (J^T = P diag(gamma)).
 		Matrix<D> jvp(const Matrix<D>& dx) const {
+#ifdef CUDA
+			if constexpr (std::is_same_v<D, CUDAfloat>) {
+				if (!dx.get_transpose()) {
+					Matrix<D> dy("ln_jvp", dim, dx.num_col());
+					cuda_layernorm_jvp(
+						reinterpret_cast<const float*>(dx.data()),
+						reinterpret_cast<const float*>(gamma.data()),
+						reinterpret_cast<const float*>(cached_xhat.data()),
+						reinterpret_cast<const float*>(cached_inv.data()),
+						const_cast<float*>(reinterpret_cast<const float*>(dy.data())),
+						dim, (int)dx.num_col());
+					return dy;
+				}
+			}
+#endif
 			const float invdim = 1.0f / (float)dim;
 			auto m1 = sum(dx, 0) * invdim;                       // (1,N)
 			auto m2 = sum(hadmd(dx, cached_xhat), 0) * invdim;   // (1,N)

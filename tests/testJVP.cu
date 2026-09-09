@@ -230,6 +230,89 @@ int run_parity() {
 }
 #endif // CUDA or ROCm parity
 
+#ifdef CUDA
+// Compare the CUDA fast path and transposed fallback with an independent
+// double-precision directional derivative, including nonuniform gamma and
+// small variance. Exercise partial warps and dimensions above the block size.
+int check_cuda_layernorm_jvp() {
+    double worst_relative = 0.0;
+    for (int dim : {1, 6, 31, 32, 33, 128, 255, 256, 257, 513, 1024}) {
+        constexpr int tokens = 3;
+        for (int pattern = 0; pattern < 3; ++pattern) {
+            Matrix<float> x("ln_x", dim, tokens), u("ln_u", dim, tokens);
+            Matrix<float> gamma("ln_gamma", dim, 1), beta("ln_beta", dim, 1);
+            for (int r = 0; r < dim; ++r) {
+                gamma.elem(r, 0) = 0.3f + std::sin(0.37f * r);
+                beta.elem(r, 0) = std::cos(0.23f * r);
+                for (int c = 0; c < tokens; ++c) {
+                    float z = std::sin(0.17f * r + 0.31f * c);
+                    x.elem(r, c) = pattern == 0 ? z : (pattern == 1 ? 1.0f : 1.0f + 1e-4f * z);
+                    u.elem(r, c) = std::cos(0.13f * r - 0.29f * c);
+                }
+            }
+            LayerNorm<CUDAfloat> layer(dim, tokens);
+            layer.set_gamma(Matrix<CUDAfloat>(gamma));
+            layer.set_beta(Matrix<CUDAfloat>(beta));
+            layer.forward(Matrix<CUDAfloat>(x));
+            const Matrix<CUDAfloat> cached_xhat(layer.cached_xhat), cached_inv(layer.cached_inv);
+            for (bool transposed : {false, true}) {
+                Matrix<float> storage("ln_direction", tokens, dim);
+                for (int r = 0; r < dim; ++r) for (int c = 0; c < tokens; ++c)
+                    storage.elem(c, r) = u.elem(r, c);
+                auto direction = transposed ? Matrix<CUDAfloat>(storage).T() : Matrix<CUDAfloat>(u);
+                auto actual = layer.jvp(direction).to_host();
+                auto negative = layer.jvp(-0.5f * direction).to_host();
+                double error2 = 0, reference2 = 0, max_error = 0;
+                for (int c = 0; c < tokens; ++c) {
+                    double mean = 0, variance = 0, du_mean = 0, xhat_du_mean = 0;
+                    for (int r = 0; r < dim; ++r) mean += x.elem(r, c);
+                    mean /= dim;
+                    for (int r = 0; r < dim; ++r) {
+                        double centered = double(x.elem(r, c)) - mean;
+                        variance += centered * centered;
+                    }
+                    double inv = 1.0 / std::sqrt(variance / dim + 1e-5);
+                    for (int r = 0; r < dim; ++r) {
+                        du_mean += u.elem(r, c);
+                        xhat_du_mean += (double(x.elem(r, c)) - mean) * inv * u.elem(r, c);
+                    }
+                    du_mean /= dim; xhat_du_mean /= dim;
+                    for (int r = 0; r < dim; ++r) {
+                        double expected = gamma.elem(r, 0) * inv * (u.elem(r, c) - du_mean -
+                            (double(x.elem(r, c)) - mean) * inv * xhat_du_mean);
+                        double error = double(actual.elem(r, c)) - expected;
+                        if (!std::isfinite(error) || !std::isfinite(negative.elem(r, c))) return 1;
+                        error2 += error * error; reference2 += expected * expected;
+                        max_error = std::max(max_error, std::abs(error));
+                        if (std::abs(negative.elem(r, c) + 0.5 * actual.elem(r, c)) >
+                            1e-5 * (1.0 + std::abs(actual.elem(r, c)))) return 1;
+                    }
+                }
+                double relative = std::sqrt(error2 / std::max(reference2, 1e-30));
+                if (!(relative < 2e-4 || max_error < 2e-5)) {
+                    cout << "LayerNorm JVP FAILED dim=" << dim << " pattern=" << pattern
+                         << " transposed=" << transposed << " rel=" << relative
+                         << " max_abs=" << max_error << endl;
+                    return 1;
+                }
+                if (reference2 > 1e-20) worst_relative = std::max(worst_relative, relative);
+                if (fro(direction.to_host() - u) != 0.0f ||
+                    fro(layer.cached_xhat - cached_xhat) != 0.0f ||
+                    fro(layer.cached_inv - cached_inv) != 0.0f ||
+                    fro(layer.get_gamma().to_host() - gamma) != 0.0f ||
+                    fro(layer.get_beta().to_host() - beta) != 0.0f) {
+                    cout << "LayerNorm JVP modified its direction, cache or parameters." << endl;
+                    return 1;
+                }
+            }
+        }
+    }
+    cout << "CUDA LayerNorm JVP dimensions/layouts/variance/cache passed; max relative error = "
+         << worst_relative << endl;
+    return 0;
+}
+#endif
+
 } // namespace
 
 int compute() {
@@ -254,6 +337,7 @@ int compute() {
     rc |= run_conv("cuda");
 #endif
     rc |= run_parity();
+    rc |= check_cuda_layernorm_jvp();
 #endif
 
 #ifdef ROCM_HIP
