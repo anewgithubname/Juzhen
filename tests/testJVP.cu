@@ -19,6 +19,7 @@
 #include "../ml/layer.hpp"
 #include <cmath>
 #include <iostream>
+#include <utility>
 
 using namespace Juzhen;
 using namespace std;
@@ -230,6 +231,33 @@ int run_parity() {
 }
 #endif // CUDA or ROCm parity
 
+// Invalid tangents must fail before a fused kernel can read out of bounds.
+// Also cover extra rows/columns, which may otherwise silently use wrong strides.
+template <class D>
+int check_layernorm_jvp_dimensions(const char* backend) {
+    constexpr int dim = 6, tokens = 3;
+    LayerNorm<D> layer(dim, tokens);
+    layer.forward(Matrix<D>::ones(dim, tokens));
+    for (const auto shape : {std::pair{5, 3}, std::pair{7, 3},
+                             std::pair{6, 2}, std::pair{6, 4}}) {
+        for (bool transposed : {false, true}) {
+            auto direction = transposed ? Matrix<D>::ones(shape.second, shape.first).T()
+                                        : Matrix<D>::ones(shape.first, shape.second);
+            try {
+                layer.jvp(direction);
+                cout << backend << " LayerNorm JVP accepted invalid shape "
+                     << shape.first << "x" << shape.second
+                     << " transposed=" << transposed << endl;
+                return 1;
+            } catch (const std::invalid_argument&) {
+                // Expected for both the fused path and generic fallback.
+            }
+        }
+    }
+    cout << backend << " LayerNorm JVP invalid dimensions correctly rejected." << endl;
+    return 0;
+}
+
 #ifdef CUDA
 // Compare the CUDA fast path and transposed fallback with an independent
 // double-precision directional derivative, including nonuniform gamma and
@@ -324,6 +352,7 @@ int compute() {
 
     // Templated layers always have a CPU (float) instantiation, even in
     // GPU builds — so every build exercises the generic JVP path.
+    rc |= check_layernorm_jvp_dimensions<float>("cpu");
     rc |= run_mlp<float>("cpu");
     rc |= run_transformer<float>("cpu");
 #if defined(JVP_HAVE_CONV) && !defined(CUDA) && !defined(ROCM_HIP)
@@ -331,6 +360,7 @@ int compute() {
 #endif
 
 #ifdef CUDA
+    rc |= check_layernorm_jvp_dimensions<CUDAfloat>("cuda");
     rc |= run_mlp<CUDAfloat>("cuda");
     rc |= run_transformer<CUDAfloat>("cuda");
 #ifdef JVP_HAVE_CONV
@@ -341,6 +371,7 @@ int compute() {
 #endif
 
 #ifdef ROCM_HIP
+    rc |= check_layernorm_jvp_dimensions<ROCMfloat>("rocm");
     rc |= run_mlp<ROCMfloat>("rocm");
     rc |= run_transformer<ROCMfloat>("rocm");
     rc |= run_conv("rocm");

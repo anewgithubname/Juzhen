@@ -2782,6 +2782,14 @@ namespace Juzhen
 		// so this mirrors backward() — but gamma multiplies on the outside
 		// (J = diag(gamma) P) instead of the inside (J^T = P diag(gamma)).
 		Matrix<D> jvp(const Matrix<D>& dx) const {
+			// Validate before the fused kernel bypasses Matrix's shape checks.
+			if (dx.num_row() != (size_t)dim ||
+				dx.num_col() != cached_xhat.num_col() ||
+				cached_xhat.num_row() != (size_t)dim ||
+				cached_inv.num_row() != 1 || cached_inv.num_col() != dx.num_col() ||
+				gamma.num_row() != (size_t)dim || gamma.num_col() != 1) {
+				throw std::invalid_argument("LayerNorm JVP dimensions are not compatible");
+			}
 #ifdef CUDA
 			if constexpr (std::is_same_v<D, CUDAfloat>) {
 				if (!dx.get_transpose()) {
