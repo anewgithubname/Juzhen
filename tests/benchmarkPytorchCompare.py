@@ -22,7 +22,7 @@ def parity(dump_exe, root):
     dump_path=os.path.join(root,"res","transformer_torch_dump.bin")
     parity_script=os.path.join(root,"tests","testTransformerTorch.py")
     output=run([sys.executable,parity_script,dump_path])
-    errors=re.findall(r"max_abs=([0-9.eE+-]+)",output)
+    errors=re.findall(r"\[PASS\] (?:forward|backward \(dx\)) vs PyTorch: max_abs=([0-9.eE+-]+)",output)
     if len(errors) != 2:
         raise RuntimeError("could not parse parity metrics from testTransformerTorch.py")
     return float(errors[0]),float(errors[1])

@@ -12,6 +12,15 @@
 
 #ifdef ROCM_HIP
 
+namespace {
+// Match physical storage while preserving the matrix's logical values.
+Matrix<ROCMfloat> MatchLayout(const Matrix<ROCMfloat>& src, bool transpose) {
+    if (transpose)
+        return src.T().slice(0, src.num_col(), 0, src.num_row()).T();
+    return src.slice(0, src.num_row(), 0, src.num_col());
+}
+}
+
 #if __has_include(<hipblas/hipblas.h>)
 #include <hipblas/hipblas.h>
 #define JUZHEN_ROCM_BLAS_AVAILABLE 1
@@ -152,6 +161,7 @@ Matrix<ROCMfloat> Matrix<ROCMfloat>::dot(const Matrix<ROCMfloat>& B) const {
 }
 
 Matrix<ROCMfloat> Matrix<ROCMfloat>::add(const Matrix<ROCMfloat>& B, float s1, float s2) const {
+    if (transpose != B.transpose) return add(MatchLayout(B, transpose), s1, s2);
     if (num_row() != B.num_row() || num_col() != B.num_col()) {
         throw std::invalid_argument("Matrix dimensions are not compatible");
     }
@@ -171,6 +181,10 @@ Matrix<ROCMfloat> Matrix<ROCMfloat>::add(const Matrix<ROCMfloat>& B, float s1, f
 }
 
 void Matrix<ROCMfloat>::add(const Matrix<ROCMfloat>& B, float s1, float s2) {
+    if (transpose != B.transpose) {
+        add(MatchLayout(B, transpose), s1, s2);
+        return;
+    }
     if (num_row() != B.num_row() || num_col() != B.num_col()) {
         throw std::invalid_argument("Matrix dimensions are not compatible");
     }
@@ -261,7 +275,7 @@ const Matrix<ROCMfloat> Matrix<ROCMfloat>::T() const {
 Matrix<float> Matrix<ROCMfloat>::to_host() const {
     Matrix<float> H(name.c_str(), numrow, numcol);
     H.transpose = transpose;
-    Juzhen::RocmMemcpyD2H(H.elements.get(), reinterpret_cast<const float*>(elements.get()), numrow * numcol);
+    Juzhen::RocmCheck(Juzhen::RocmMemcpyD2H(H.elements.get(), reinterpret_cast<const float*>(elements.get()), numrow * numcol));
     return H;
 }
 
@@ -555,6 +569,10 @@ Matrix<ROCMfloat> sum(const Matrix<ROCMfloat>& M, int dim) {
 }
 
 Matrix<ROCMfloat> hadmd(const Matrix<ROCMfloat>& M1, const Matrix<ROCMfloat>& M2) {
+    if (M1.transpose != M2.transpose) {
+        auto aligned = MatchLayout(M2, M1.transpose);
+        return hadmd(M1, static_cast<const Matrix<ROCMfloat>&>(aligned));
+    }
     if (M1.num_row() != M2.num_row() || M1.num_col() != M2.num_col()) {
         throw std::invalid_argument("Matrix dimensions are not compatible");
     }
@@ -571,6 +589,8 @@ Matrix<ROCMfloat> hadmd(const Matrix<ROCMfloat>& M1, const Matrix<ROCMfloat>& M2
 }
 
 Matrix<ROCMfloat> hadmd(const Matrix<ROCMfloat>& M1, Matrix<ROCMfloat>&& M2) {
+    if (M1.transpose != M2.transpose)
+        return hadmd(MatchLayout(M1, M2.transpose), std::move(M2));
     if (M1.num_row() != M2.num_row() || M1.num_col() != M2.num_col()) {
         throw std::invalid_argument("Matrix dimensions are not compatible");
     }
@@ -585,6 +605,10 @@ Matrix<ROCMfloat> hadmd(const Matrix<ROCMfloat>& M1, Matrix<ROCMfloat>&& M2) {
 }
 
 Matrix<ROCMfloat> hadmd(Matrix<ROCMfloat>&& M1, const Matrix<ROCMfloat>& M2) {
+    if (M1.transpose != M2.transpose) {
+        auto aligned = MatchLayout(M2, M1.transpose);
+        return hadmd(std::move(M1), static_cast<const Matrix<ROCMfloat>&>(aligned));
+    }
     if (M1.num_row() != M2.num_row() || M1.num_col() != M2.num_col()) {
         throw std::invalid_argument("Matrix dimensions are not compatible");
     }
@@ -651,6 +675,23 @@ int Juzhen::RocmGemm(const float* A_device, const float* B_device, float* C_devi
 #endif
 }
 
+int Juzhen::RocmGemmStridedBatched(bool transA, bool transB, int m, int n, int k,
+                                 float alpha, const float* a, int lda, long long strideA,
+                                 const float* b, int ldb, long long strideB, float beta,
+                                 float* c, int ldc, long long strideC, int batches) {
+#if JUZHEN_ROCM_BLAS_AVAILABLE
+    if (!a || !b || !c || m <= 0 || n <= 0 || k <= 0 || batches <= 0) return -1;
+    auto handle = GlobalHipblasHandle();
+    if (!handle) return -1;
+    return static_cast<int>(hipblasSgemmStridedBatched(handle,
+        transA ? HIPBLAS_OP_T : HIPBLAS_OP_N, transB ? HIPBLAS_OP_T : HIPBLAS_OP_N,
+        m, n, k, &alpha, a, lda, strideA, b, ldb, strideB,
+        &beta, c, ldc, strideC, batches));
+#else
+    return -1;
+#endif
+}
+
 int Juzhen::RocmGemmNN(const float* A_device, const float* B_device, float* C_device,
                        int m, int n, int k, float alpha, float beta) {
     return Juzhen::RocmGemm(A_device, B_device, C_device,
@@ -712,20 +753,20 @@ std::ostream& operator<<(std::ostream& os, const Matrix<ROCMfloat>& M) {
     return os;
 }
 
-template <>
 void write(FILE* fp, const Matrix<ROCMfloat>& M) {
     write(fp, M.to_host());
 }
 
-template <>
 void read(FILE* fp, Matrix<ROCMfloat>& M) {
     Matrix<float> tmp("tmp", M.num_row(), M.num_col());
     read(fp, tmp);
-    M.numrow = tmp.numrow;
-    M.numcol = tmp.numcol;
-    M.transpose = tmp.transpose;
-    Juzhen::RocmMemcpyH2D(reinterpret_cast<float*>(M.elements.get()), tmp.elements.get(),
-                          tmp.num_row() * tmp.num_col());
+    if(ferror(fp) || feof(fp)) return;
+    const bool transposed=tmp.get_transpose();
+    Matrix<ROCMfloat> restored("checkpoint", transposed?tmp.num_col():tmp.num_row(),
+                              transposed?tmp.num_row():tmp.num_col(), transposed);
+    Juzhen::RocmCheck(Juzhen::RocmMemcpyH2D(reinterpret_cast<float*>(restored.elements.get()),
+                                        tmp.data(), tmp.num_row() * tmp.num_col()));
+    M=std::move(restored);
 }
 
 #endif

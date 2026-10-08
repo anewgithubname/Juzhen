@@ -409,6 +409,10 @@ void read(FILE *fp, Matrix<CUDAfloat>& M) {
     Matrix<float> tmp("tmp", M.num_row(), M.num_col());
     read(fp, tmp);
 
-    M.numrow = tmp.numrow; M.numcol = tmp.numcol; M.transpose = tmp.transpose;
-    cudaMemcpy(M.elements.get(), tmp.elements.get(), tmp.num_row() * tmp.num_col() * sizeof(float), cudaMemcpyHostToDevice);
+    if (ferror(fp) || feof(fp)) return;
+    // The stored shape can exceed M's allocation. Upload into a fresh buffer,
+    // preserving the file's physical dimensions and transpose flag.
+    Matrix<CUDAfloat> restored(tmp);
+    restored.name = M.name;
+    M = std::move(restored);
 }

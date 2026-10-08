@@ -56,8 +56,10 @@ elseif(ROCM_HIP)
     set(ROCM_BACKEND_LIBS "")
     if(TARGET hip::hipblas)
         list(APPEND ROCM_BACKEND_LIBS hip::hipblas)
+    elseif(TARGET roc::hipblas)
+        list(APPEND ROCM_BACKEND_LIBS roc::hipblas)
     endif()
-    if(NOT TARGET hip::hipblas)
+    if(NOT TARGET hip::hipblas AND NOT TARGET roc::hipblas)
         find_library(HIPBLAS_LIBRARY
             NAMES hipblas libhipblas
             HINTS
@@ -193,6 +195,7 @@ if(NVIDIA_CUDA) # if we are on GPU, we need to include the cuda headers
 elseif(ROCM_HIP)
     # Keep launcher.cu in C++ mode for ROCm scaffold builds.
     set_source_files_properties(cpp/launcher.cu PROPERTIES LANGUAGE CXX)
+    set_source_files_properties(cpp/hipkernels.cpp PROPERTIES COMPILE_FLAGS "-x hip")
     set_target_properties(juzhen PROPERTIES LINKER_LANGUAGE CXX)
     if(CMAKE_CXX_COMPILER_ID MATCHES "Clang" AND ROCM_OFFLOAD_ARCH)
         target_compile_options(juzhen PRIVATE "--offload-arch=${ROCM_OFFLOAD_ARCH}")
@@ -303,6 +306,13 @@ GENERATE_PROJ(demo_discretediffusion examples/demo_discretediffusion.cu)
 GENERATE_PROJ(demo_diffusion_tinystories examples/demo_diffusion_tinystories.cu)
 GENERATE_PROJ(demo_discretediffusion_web examples/demo_discretediffusion_web.cu)
 target_link_libraries(demo_discretediffusion_web Threads::Threads)
+if(WIN32)
+    # cpp-httplib uses Winsock; MinGW needs an explicit link dependency.
+    foreach(web_target IN ITEMS demo_mnist_web demo_zeroflow_web
+            demo_transformer_web demo_tinystories_web demo_discretediffusion_web)
+        target_link_libraries(${web_target} ws2_32)
+    endforeach()
+endif()
 GENERATE_PROJ(demo_arithmetic examples/demo_arithmetic.cu)
 GENERATE_PROJ(demo_word2vec examples/demo_word2vec.cu)
 GENERATE_PROJ(testCNNTrainParity tests/testCNNTrainParity.cu)
@@ -311,13 +321,28 @@ GENERATE_PROJ(testRocmOpsSmoke tests/testRocmOpsSmoke.cu)
 GENERATE_PROJ(testRocmCpuParity tests/testRocmCpuParity.cu)
 GENERATE_PROJ(benchmarkCoreOps tests/benchmarkCoreOps.cu)
 GENERATE_PROJ(benchmarkTrainingStep tests/benchmarkTrainingStep.cu)
+if(NOT NVIDIA_CUDA AND NOT APPLE_SILICON)
+    GENERATE_PROJ(benchmarkCpuGpu tests/benchmarkCpuGpu.cu)
+endif()
+if(ROCM_HIP)
+    GENERATE_PROJ(benchmarkRocmJVP tests/benchmarkRocmJVP.cu)
+    GENERATE_PROJ(benchmarkRocmJVPGeneric tests/benchmarkRocmJVP.cu)
+    target_compile_definitions(benchmarkRocmJVPGeneric PRIVATE JUZHEN_ROCM_GENERIC_JVP)
+    # Same benchmark and timer, with the original attention path for A/B runs.
+    GENERATE_PROJ(benchmarkTrainingStepGeneric tests/benchmarkTrainingStep.cu)
+    target_compile_definitions(benchmarkTrainingStepGeneric PRIVATE JUZHEN_ROCM_GENERIC_ATTENTION)
+endif()
 GENERATE_PROJ(testElementwiseReduceTorchDump tests/testElementwiseReduceTorchDump.cu)
 GENERATE_PROJ(testCheckpointResume tests/testCheckpointResume.cu)
 GENERATE_PROJ(testCpuLinalg tests/testCpuLinalg.cu)
 GENERATE_PROJ(testJVP tests/testJVP.cu)
+GENERATE_PROJ(testAssignment tests/testAssignment.cu)
+GENERATE_PROJ(benchmarkAssignment tests/benchmarkAssignment.cu)
 # GENERATE_PROJ(wintest examples/demo_gui.cu)
 
 enable_testing()
+add_test(NAME assignment_correctness COMMAND testAssignment)
+set_tests_properties(assignment_correctness PROPERTIES LABELS "unit;assignment")
 
 add_test(test0 testbasic)
 add_test(test1 demo)
@@ -339,6 +364,16 @@ add_test(test14 testTransformerTorchDump)
 add_test(test15 python3 ${CMAKE_SOURCE_DIR}/tests/testTransformerTorch.py)
 set_tests_properties(test14 PROPERTIES FIXTURES_SETUP torch_dump)
 set_tests_properties(test15 PROPERTIES FIXTURES_REQUIRED torch_dump SKIP_RETURN_CODE 77)
+foreach(case single bidirectional long)
+    add_test(NAME transformer_${case}_dump COMMAND testTransformerTorchDump)
+    set_tests_properties(transformer_${case}_dump PROPERTIES
+        ENVIRONMENT "JUZHEN_TRANSFORMER_CASE=${case}" FIXTURES_SETUP torch_dump_${case})
+    add_test(NAME transformer_${case}_compare COMMAND python3
+        ${CMAKE_SOURCE_DIR}/tests/testTransformerTorch.py
+        ${CMAKE_SOURCE_DIR}/res/transformer_torch_dump_${case}.bin)
+    set_tests_properties(transformer_${case}_compare PROPERTIES
+        FIXTURES_REQUIRED torch_dump_${case} SKIP_RETURN_CODE 77)
+endforeach()
 add_test(test16 testMPSStackComputedParity)
 add_test(test17 testMPSRandnStability)
 add_test(test18 testMPSRandStability)
@@ -386,6 +421,14 @@ set_tests_properties(elementwise_reduce_torch_compare PROPERTIES
     FIXTURES_REQUIRED elementwise_reduce_dump LABELS "unit;pytorch" SKIP_RETURN_CODE 77)
 add_test(NAME checkpoint_resume_consistency COMMAND testCheckpointResume)
 set_tests_properties(checkpoint_resume_consistency PROPERTIES LABELS "unit;checkpoint")
+add_test(NAME checkpoint_restart_prepare COMMAND testCheckpointResume)
+set_tests_properties(checkpoint_restart_prepare PROPERTIES
+    ENVIRONMENT "JUZHEN_CHECKPOINT_PHASE=prepare"
+    FIXTURES_SETUP checkpoint_restart LABELS "unit;checkpoint")
+add_test(NAME checkpoint_restart_resume COMMAND testCheckpointResume)
+set_tests_properties(checkpoint_restart_resume PROPERTIES
+    ENVIRONMENT "JUZHEN_CHECKPOINT_PHASE=resume"
+    FIXTURES_REQUIRED checkpoint_restart LABELS "unit;checkpoint")
 
 # Handwritten gemm/gemv parity: vs a naive double-precision reference always,
 # and additionally vs cblas when the build links an external BLAS.
@@ -394,7 +437,7 @@ set_tests_properties(cpu_linalg PROPERTIES LABELS "unit")
 
 # Forward-mode (JVP) correctness: adjoint consistency vs backprop + finite
 # differences on MLP / transformer / CNN+MLP / conv-transpose networks, plus
-# CPU<->CUDA parity of the JVP itself in CUDA builds. Runs on CPU and CUDA
-# backends; skips (77) on MPS/ROCm.
+# CPU/GPU parity of the JVP itself in CUDA and ROCm builds. Runs on CPU,
+# CUDA and ROCm backends; skips (77) on MPS.
 add_test(NAME jvp_correctness COMMAND testJVP)
 set_tests_properties(jvp_correctness PROPERTIES LABELS "unit" SKIP_RETURN_CODE 77)

@@ -2533,6 +2533,50 @@ namespace Juzhen
 		}
 	}
 
+	// Fused LayerNorm tangent. Unlike the reverse-mode kernel above, gamma
+	// multiplies after the symmetric standardization Jacobian:
+	//   dy = gamma * inv * (dx - mean(dx) - xhat * mean(xhat * dx)).
+	// One block owns a token/column so the two reductions are parallel across
+	// the feature dimension instead of being serialized in a single thread.
+	__global__ void layernorm_jvp_kernel(
+		const float* dx, const float* gamma,
+		const float* xhat, const float* inv_std,
+		float* dy, int dim, int N) {
+		const int c = blockIdx.x;
+		if (c >= N) return;
+		const int tid = threadIdx.x;
+		const size_t c0 = (size_t)c * dim;
+
+		extern __shared__ float reductions[];
+		float* reduce_dx = reductions;
+		float* reduce_xhat_dx = reductions + blockDim.x;
+		float s1 = 0.0f, s2 = 0.0f;
+		for (int i = tid; i < dim; i += blockDim.x) {
+			const float d = dx[c0 + i];
+			s1 += d;
+			s2 += d * xhat[c0 + i];
+		}
+		reduce_dx[tid] = s1;
+		reduce_xhat_dx[tid] = s2;
+		__syncthreads();
+
+		for (int offset = blockDim.x / 2; offset > 0; offset >>= 1) {
+			if (tid < offset) {
+				reduce_dx[tid] += reduce_dx[tid + offset];
+				reduce_xhat_dx[tid] += reduce_xhat_dx[tid + offset];
+			}
+			__syncthreads();
+		}
+
+		const float m1 = reduce_dx[0] / dim;
+		const float m2 = reduce_xhat_dx[0] / dim;
+		const float inv = inv_std[c];
+		for (int i = tid; i < dim; i += blockDim.x) {
+			dy[c0 + i] = gamma[i] * inv *
+				(dx[c0 + i] - m1 - xhat[c0 + i] * m2);
+		}
+	}
+
 	// y[i, c] += b[i] for every column: broadcast bias add, replacing the
 	// "+ b * ones(1, N)" idiom (an outer-product GEMM plus a full temporary).
 	__global__ void add_bias_kernel(float* y, const float* b, int rows, size_t total) {
@@ -2557,6 +2601,18 @@ namespace Juzhen
 		const int threads = 128;
 		const int blocks = (N + threads - 1) / threads;
 		layernorm_backward_kernel<<<blocks, threads>>>(dy, gamma, xhat, inv_std, dx, dim, N);
+		CudaErrorCheck(cudaGetLastError());
+	}
+
+	inline void cuda_layernorm_jvp(
+		const float* dx, const float* gamma,
+		const float* xhat, const float* inv_std,
+		float* dy, int dim, int N) {
+		int threads = 32;
+		while (threads < dim && threads < 256) threads <<= 1;
+		const size_t shared_bytes = 2 * threads * sizeof(float);
+		layernorm_jvp_kernel<<<N, threads, shared_bytes>>>(
+			dx, gamma, xhat, inv_std, dy, dim, N);
 		CudaErrorCheck(cudaGetLastError());
 	}
 
@@ -2611,6 +2667,25 @@ namespace Juzhen
 				}
 			}
 #endif
+#ifdef ROCM_HIP
+			// Fused kernel (assumes plain column-major input, which is what
+			// TransformerLayer always passes); other backends use the
+			// generic matrix-op formulation below.
+			if constexpr (std::is_same_v<D, ROCMfloat>) {
+				if (!x.get_transpose()) {
+					Matrix<D> y("ln_y", dim, x.num_col());
+					RocmCheck(Rocm_layernorm_forward(
+						reinterpret_cast<const float*>(x.data()),
+						reinterpret_cast<const float*>(gamma.data()),
+						reinterpret_cast<const float*>(beta.data()),
+						const_cast<float*>(reinterpret_cast<const float*>(y.data())),
+						const_cast<float*>(reinterpret_cast<const float*>(cached_xhat.data())),
+						const_cast<float*>(reinterpret_cast<const float*>(cached_inv.data())),
+						dim, (int)x.num_col()));
+					return y;
+				}
+			}
+#endif
 #ifdef APPLE_SILICON
 			// Fused Metal kernel; same restriction (plain non-transposed input)
 			// and same cached xhat/inv_std contract as the CUDA path.
@@ -2657,6 +2732,20 @@ namespace Juzhen
 				}
 			}
 #endif
+#ifdef ROCM_HIP
+			if constexpr (std::is_same_v<D, ROCMfloat>) {
+				if (!dy.get_transpose()) {
+					RocmCheck(Rocm_layernorm_backward(
+						reinterpret_cast<const float*>(dy.data()),
+						reinterpret_cast<const float*>(gamma.data()),
+						reinterpret_cast<const float*>(cached_xhat.data()),
+						reinterpret_cast<const float*>(cached_inv.data()),
+						const_cast<float*>(reinterpret_cast<const float*>(dx.data())),
+						dim, (int)dy.num_col()));
+					fused = true;
+				}
+			}
+#endif
 #ifdef APPLE_SILICON
 			if constexpr (std::is_same_v<D, MPSfloat>) {
 				if (!dy.get_transpose()) {
@@ -2693,6 +2782,29 @@ namespace Juzhen
 		// so this mirrors backward() — but gamma multiplies on the outside
 		// (J = diag(gamma) P) instead of the inside (J^T = P diag(gamma)).
 		Matrix<D> jvp(const Matrix<D>& dx) const {
+			// Validate before the fused kernel bypasses Matrix's shape checks.
+			if (dx.num_row() != (size_t)dim ||
+				dx.num_col() != cached_xhat.num_col() ||
+				cached_xhat.num_row() != (size_t)dim ||
+				cached_inv.num_row() != 1 || cached_inv.num_col() != dx.num_col() ||
+				gamma.num_row() != (size_t)dim || gamma.num_col() != 1) {
+				throw std::invalid_argument("LayerNorm JVP dimensions are not compatible");
+			}
+#ifdef CUDA
+			if constexpr (std::is_same_v<D, CUDAfloat>) {
+				if (!dx.get_transpose()) {
+					Matrix<D> dy("ln_jvp", dim, dx.num_col());
+					cuda_layernorm_jvp(
+						reinterpret_cast<const float*>(dx.data()),
+						reinterpret_cast<const float*>(gamma.data()),
+						reinterpret_cast<const float*>(cached_xhat.data()),
+						reinterpret_cast<const float*>(cached_inv.data()),
+						const_cast<float*>(reinterpret_cast<const float*>(dy.data())),
+						dim, (int)dx.num_col());
+					return dy;
+				}
+			}
+#endif
 			const float invdim = 1.0f / (float)dim;
 			auto m1 = sum(dx, 0) * invdim;                       // (1,N)
 			auto m2 = sum(hadmd(dx, cached_xhat), 0) * invdim;   // (1,N)
@@ -2767,6 +2879,12 @@ namespace Juzhen
 		// Pre-norm LayerNorms: LN1 before attention, LN2 before FFN.
 		LayerNorm<D> ln1, ln2;
 
+#ifdef ROCM_HIP
+        static void check_rocm_attention(int rc) {
+            if (rc != 0) { LOG_ERROR("ROCm attention operation failed: {}", rc); ERROR_OUT; }
+        }
+#endif
+
 		// y += b broadcast over columns. One kernel on CUDA; the generic
 		// backends keep the outer-product formulation.
 		void add_bias(Matrix<D>& y, const Matrix<D>& b) {
@@ -2777,6 +2895,17 @@ namespace Juzhen
 						const_cast<float*>(reinterpret_cast<const float*>(y.data())),
 						reinterpret_cast<const float*>(b.data()),
 						(int)y.num_row(), y.num_row() * y.num_col());
+					return;
+				}
+			}
+#endif
+#ifdef ROCM_HIP
+			if constexpr (std::is_same_v<D, ROCMfloat>) {
+				if (!y.get_transpose()) {
+					RocmCheck(Rocm_add_bias(
+						const_cast<float*>(reinterpret_cast<const float*>(y.data())),
+						reinterpret_cast<const float*>(b.data()),
+						(int)y.num_row(), y.num_row() * y.num_col()));
 					return;
 				}
 			}
@@ -2927,6 +3056,51 @@ namespace Juzhen
 				}
 			} else
 #endif
+#if defined(ROCM_HIP) && !defined(JUZHEN_ROCM_GENERIC_ATTENTION)
+			if constexpr (std::is_same_v<D, ROCMfloat>) {
+				const float zero = 0.0f, one = 1.0f;
+				const long long stride_qkv = (long long)d_k * (long long)seq_len;
+				const long long stride_attn = (long long)seq_len * (long long)seq_len;
+				const long long head_attn = stride_attn * (long long)batchN;
+
+				const float* q_ptr = reinterpret_cast<const float*>(cached_Q.data());
+				const float* k_ptr = reinterpret_cast<const float*>(cached_K.data());
+				const float* v_ptr = reinterpret_cast<const float*>(cached_V.data());
+				float* scores_ptr = const_cast<float*>(reinterpret_cast<const float*>(attn_scores_scratch.data()));
+				const float* a_ptr = reinterpret_cast<const float*>(cached_A.data());
+				float* h_ptr = const_cast<float*>(reinterpret_cast<const float*>(cached_H.data()));
+
+				// scores_h = (Q_h^T K_h) * scale  for each head's d_h-row slice.
+				for (int hh = 0; hh < num_heads; ++hh) {
+					check_rocm_attention(RocmGemmStridedBatched(
+						true, false,
+						seq_len, seq_len, d_h,
+						scale,
+						q_ptr + hh * d_h, d_k, stride_qkv,
+						k_ptr + hh * d_h, d_k, stride_qkv,
+						zero,
+						scores_ptr + hh * head_attn, seq_len, stride_attn,
+						batchN));
+				}
+
+				check_rocm_attention(RocmSoftmaxRows(scores_ptr,
+					const_cast<float*>(reinterpret_cast<const float*>(cached_A.data())),
+					seq_len, batchN * num_heads, causal));
+
+				// H_h = V_h * A_h^T  written into head hh's d_h rows of cached_H.
+				for (int hh = 0; hh < num_heads; ++hh) {
+					check_rocm_attention(RocmGemmStridedBatched(
+						false, true,
+						d_h, seq_len, seq_len,
+						one,
+						v_ptr + hh * d_h, d_k, stride_qkv,
+						a_ptr + hh * head_attn, seq_len, stride_attn,
+						zero,
+						h_ptr + hh * d_h, d_k, stride_qkv,
+						batchN));
+				}
+			} else
+#endif
 #ifdef APPLE_SILICON
 			if constexpr (std::is_same_v<D, MPSfloat>) {
 				// Batched multi-head attention (mirrors the CUDA path): all
@@ -2977,6 +3151,14 @@ namespace Juzhen
 						auto scores = Qi.T() * Ki * scale;
 						// Causal masking: for query row, disallow future keys col > row.
 						if (causal) {
+#ifdef ROCM_HIP
+							if constexpr (std::is_same_v<D, ROCMfloat>) {
+								int rc = RocmCausalMask(
+									const_cast<float*>(reinterpret_cast<const float*>(scores.data())),
+									seq_len, scores.get_transpose(), -1e9f);
+								if (rc != 0) { LOG_ERROR("ROCm causal mask failed: {}", rc); ERROR_OUT; }
+							} else
+#endif
 #ifdef APPLE_SILICON
 							if constexpr (std::is_same_v<D, MPSfloat>) {
 								// GPU mask kernel: stays in the command stream, so
@@ -3143,6 +3325,86 @@ namespace Juzhen
 					}
 				} else
 #endif
+#if defined(ROCM_HIP) && !defined(JUZHEN_ROCM_GENERIC_JVP)
+				if constexpr (std::is_same_v<D, ROCMfloat>) {
+					// Batched tangent pass, mirroring backward(): the per-block
+					// slice loop below costs ~15 kernel launches per (head,
+					// sequence) block; here it is 4 strided-batched GEMM calls
+					// per head plus one fused softmax kernel.
+					const float one = 1.0f, zero = 0.0f;
+					const long long stride_qkv = (long long)d_k * (long long)seq_len;
+					const long long stride_attn = (long long)seq_len * (long long)seq_len;
+					const long long head_attn = stride_attn * (long long)batchN;
+
+					const float* q_ptr = reinterpret_cast<const float*>(cached_Q.data());
+					const float* k_ptr = reinterpret_cast<const float*>(cached_K.data());
+					const float* v_ptr = reinterpret_cast<const float*>(cached_V.data());
+					const float* a_ptr = reinterpret_cast<const float*>(cached_A.data());
+					const float* dq_ptr = reinterpret_cast<const float*>(dQ.data());
+					const float* dk_ptr = reinterpret_cast<const float*>(dK.data());
+					const float* dv_ptr = reinterpret_cast<const float*>(dV.data());
+					float* dst_ptr = const_cast<float*>(reinterpret_cast<const float*>(attn_dAiT_scratch.data()));
+					const float* da_ptr = reinterpret_cast<const float*>(attn_dS_scratch.data());
+					float* dh_ptr = const_cast<float*>(reinterpret_cast<const float*>(dH.data()));
+
+					// dS_h^T = K_h^T dQ_h + dK_h^T Q_h (the un-scaled score
+					// tangent, stored transposed: that is the input layout the
+					// softmax kernel expects, and scale folds into the kernel
+					// because the softmax JVP is linear in dS).
+					for (int hh = 0; hh < num_heads; ++hh) {
+						check_rocm_attention(RocmGemmStridedBatched(
+							true, false,
+							seq_len, seq_len, d_h,
+							one,
+							k_ptr + hh * d_h, d_k, stride_qkv,
+							dq_ptr + hh * d_h, d_k, stride_qkv,
+							zero,
+							dst_ptr + hh * head_attn, seq_len, stride_attn,
+							batchN));
+
+						check_rocm_attention(RocmGemmStridedBatched(
+							true, false,
+							seq_len, seq_len, d_h,
+							one,
+							dk_ptr + hh * d_h, d_k, stride_qkv,
+							q_ptr + hh * d_h, d_k, stride_qkv,
+							one,
+							dst_ptr + hh * head_attn, seq_len, stride_attn,
+							batchN));
+					}
+
+					// dA = A .* (scale*dS - rowsum(A .* scale*dS)). The softmax
+					// Jacobian diag(A) - A A^T is symmetric, so the backward
+					// kernel computes exactly the JVP when fed dS^T.
+					check_rocm_attention(RocmSoftmaxBackwardRows(
+						a_ptr, dst_ptr,
+						const_cast<float*>(da_ptr),
+						seq_len, batchN * num_heads, scale));
+
+					// dH_h = dV_h * A_h^T + V_h * dA_h^T
+					for (int hh = 0; hh < num_heads; ++hh) {
+						check_rocm_attention(RocmGemmStridedBatched(
+							false, true,
+							d_h, seq_len, seq_len,
+							one,
+							dv_ptr + hh * d_h, d_k, stride_qkv,
+							a_ptr + hh * head_attn, seq_len, stride_attn,
+							zero,
+							dh_ptr + hh * d_h, d_k, stride_qkv,
+							batchN));
+
+						check_rocm_attention(RocmGemmStridedBatched(
+							false, true,
+							d_h, seq_len, seq_len,
+							one,
+							v_ptr + hh * d_h, d_k, stride_qkv,
+							da_ptr + hh * head_attn, seq_len, stride_attn,
+							one,
+							dh_ptr + hh * d_h, d_k, stride_qkv,
+							batchN));
+					}
+				} else
+#endif
 				for (int hh = 0; hh < num_heads; ++hh) {
 					const int r0 = hh * d_h;
 					for (int b = 0; b < batchN; ++b) {
@@ -3279,6 +3541,80 @@ namespace Juzhen
 						q_ptr + hh * d_h, d_k, stride_qkv,
 						ds_ptr + hh * head_attn, seq_len, stride_attn,
 						&zero,
+						dk_ptr + hh * d_h, d_k, stride_qkv,
+						batchN));
+				}
+			} else
+#endif
+#if defined(ROCM_HIP) && !defined(JUZHEN_ROCM_GENERIC_ATTENTION)
+			if constexpr (std::is_same_v<D, ROCMfloat>) {
+				const float one = 1.0f;
+				const float zero = 0.0f;
+				const long long stride_qkv = (long long)d_k * (long long)seq_len;
+				const long long stride_attn = (long long)seq_len * (long long)seq_len;
+				const long long head_attn = stride_attn * (long long)batchN;
+
+				const float* dh_ptr = reinterpret_cast<const float*>(dH.data());
+				const float* a_ptr = reinterpret_cast<const float*>(cached_A.data());
+				const float* v_ptr = reinterpret_cast<const float*>(cached_V.data());
+				const float* k_ptr = reinterpret_cast<const float*>(cached_K.data());
+				const float* q_ptr = reinterpret_cast<const float*>(cached_Q.data());
+				float* dv_ptr = const_cast<float*>(reinterpret_cast<const float*>(dV.data()));
+				float* dait_ptr = const_cast<float*>(reinterpret_cast<const float*>(attn_dAiT_scratch.data()));
+				const float* ds_ptr = reinterpret_cast<const float*>(attn_dS_scratch.data());
+				float* dq_ptr = const_cast<float*>(reinterpret_cast<const float*>(dQ.data()));
+				float* dk_ptr = const_cast<float*>(reinterpret_cast<const float*>(dK.data()));
+
+				// dV_h = dH_h * A_h ;  dA_h^T = V_h^T * dH_h   (per head)
+				for (int hh = 0; hh < num_heads; ++hh) {
+					check_rocm_attention(RocmGemmStridedBatched(
+						false, false,
+						d_h, seq_len, seq_len,
+						one,
+						dh_ptr + hh * d_h, d_k, stride_qkv,
+						a_ptr + hh * head_attn, seq_len, stride_attn,
+						zero,
+						dv_ptr + hh * d_h, d_k, stride_qkv,
+						batchN));
+
+					check_rocm_attention(RocmGemmStridedBatched(
+						true, false,
+						seq_len, seq_len, d_h,
+						one,
+						v_ptr + hh * d_h, d_k, stride_qkv,
+						dh_ptr + hh * d_h, d_k, stride_qkv,
+						zero,
+						dait_ptr + hh * head_attn, seq_len, stride_attn,
+						batchN));
+				}
+
+				check_rocm_attention(RocmSoftmaxBackwardRows(
+					reinterpret_cast<const float*>(cached_A.data()),
+					reinterpret_cast<const float*>(attn_dAiT_scratch.data()),
+					const_cast<float*>(reinterpret_cast<const float*>(attn_dS_scratch.data())),
+					seq_len,
+					batchN * num_heads,
+					scale));
+
+				// dQ_h = K_h * dS_h^T ;  dK_h = Q_h * dS_h   (per head)
+				for (int hh = 0; hh < num_heads; ++hh) {
+					check_rocm_attention(RocmGemmStridedBatched(
+						false, true,
+						d_h, seq_len, seq_len,
+						one,
+						k_ptr + hh * d_h, d_k, stride_qkv,
+						ds_ptr + hh * head_attn, seq_len, stride_attn,
+						zero,
+						dq_ptr + hh * d_h, d_k, stride_qkv,
+						batchN));
+
+					check_rocm_attention(RocmGemmStridedBatched(
+						false, false,
+						d_h, seq_len, seq_len,
+						one,
+						q_ptr + hh * d_h, d_k, stride_qkv,
+						ds_ptr + hh * head_attn, seq_len, stride_attn,
+						zero,
 						dk_ptr + hh * d_h, d_k, stride_qkv,
 						batchN));
 				}

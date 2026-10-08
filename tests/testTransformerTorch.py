@@ -4,8 +4,9 @@ Reads the dump written by testTransformerTorchDump (weights, input x, upstream
 gradient g, forward output, input gradient dx), rebuilds the identical block
 with tests/demo_transformer.py's TransformerBlock (pre-LN, multi-head,
 causal, 1/sqrt(d_h) scaling), loads the same weights, and compares the forward
-output and dL/dx numerically. PyTorch runs in float64, so it acts as an exact
-oracle and the reported error is the C++ float32 rounding.
+output and dL/dx numerically, followed by all 13 parameter groups and Adam
+moments over three training steps. PyTorch runs in float64 as a higher
+precision reference. Both causal and bidirectional attention are covered.
 
 Usage:
     <build dir>/testTransformerTorchDump     # writes res/transformer_torch_dump.bin
@@ -55,19 +56,28 @@ def main():
 
     with open(path, "rb") as f:
         magic = f.read(8)
-        if magic != b"JZTFDMP1":
+        if magic != b"JZTFDMP2":
             print(f"Bad magic {magic!r}: rerun testTransformerTorchDump.")
             return 1
-        d_model, d_k, d_ff, seq, batch, heads = struct.unpack("<6i", f.read(24))
+        d_model, d_k, d_ff, seq, batch, heads, causal = struct.unpack("<7i", f.read(28))
         names = ["Wq", "Wk", "Wv", "Wo", "bo", "W1", "b1", "W2", "b2",
                  "ln1_g", "ln1_b", "ln2_g", "ln2_b", "x", "g", "out", "dx"]
         m = {n: read_mat(f) for n in names}
+        training = []
+        extension = f.read(8)
+        if extension != b"JZTRAIN1":
+            raise ValueError("Missing training extension: rebuild and rerun dump")
+        steps, = struct.unpack("<i", f.read(4))
+        for _ in range(steps):
+            training.append([(struct.unpack("<4f", f.read(16)),
+                              read_mat(f), read_mat(f), read_mat(f))
+                             for _ in range(13)])
 
     print(f"config: d_model={d_model} d_k={d_k} d_ff={d_ff} "
           f"seq={seq} batch={batch} heads={heads}")
 
     torch.manual_seed(0)
-    blk = TransformerBlock(d_model, d_k, d_ff, seq, heads).double()
+    blk = TransformerBlock(d_model, d_k, d_ff, seq, heads, causal=bool(causal)).double()
     with torch.no_grad():
         blk.Wq.weight.copy_(torch.from_numpy(m["Wq"]))
         blk.Wk.weight.copy_(torch.from_numpy(m["Wk"]))
@@ -93,6 +103,27 @@ def main():
 
     ok = compare(out.detach().numpy().T, m["out"], "forward vs PyTorch", FWD_TOL)
     ok &= compare(x.grad.numpy().T, m["dx"], "backward (dx) vs PyTorch", BWD_TOL)
+    params = [blk.Wq.weight, blk.Wk.weight, blk.Wv.weight,
+              blk.Wo.weight, blk.Wo.bias, blk.ffn1.weight, blk.ffn1.bias,
+              blk.ffn2.weight, blk.ffn2.bias, blk.ln1.weight, blk.ln1.bias,
+              blk.ln2.weight, blk.ln2.bias]
+    moments = [(torch.zeros_like(p), torch.zeros_like(p)) for p in params]
+    for step, records in enumerate(training, 1):
+        blk.zero_grad(set_to_none=True)
+        (blk(x) * g).sum().backward()
+        with torch.no_grad():
+            for name, p, (mt, vt), (hyper, theta, gm, gv) in zip(
+                    names[:13], params, moments, records):
+                lr, b1, b2, eps = hyper
+                mt.mul_(b1).add_(p.grad, alpha=1-b1)
+                vt.mul_(b2).addcmul_(p.grad, p.grad, value=1-b2)
+                p.addcdiv_(mt / (1-b1**step),
+                          (vt / (1-b2**step)).sqrt() + eps, value=-lr)
+                for label, got, ref in [("parameter", theta, p),
+                                        ("first moment", gm, mt),
+                                        ("second moment", gv, vt)]:
+                    ok &= compare(got, ref.numpy().reshape(got.shape),
+                                  f"step {step} {name} {label}", BWD_TOL)
     return 0 if ok else 1
 
 

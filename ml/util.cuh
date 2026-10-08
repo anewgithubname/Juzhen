@@ -24,6 +24,9 @@
  */
 
 #pragma once
+#ifdef ROCM_HIP
+#include "../cpp/hipbackend.hpp"
+#endif
 
 #include <cmath>        // std::sqrt (float overload) in the fused CPU Adam
 #include <type_traits>  // std::is_same_v guards of the fused Adam paths
@@ -185,6 +188,26 @@ Matrix<T> adam_update(Matrix<T> &&g, adam_state<T> &state){
                 const_cast<float*>(reinterpret_cast<const float*>(v.data())),
                 alpha, beta1, beta2, eps, bc1, bc2, n);
             CudaErrorCheck(cudaGetLastError());
+            iteration++;
+            return std::move(g);
+        }
+    }
+#endif
+#ifdef ROCM_HIP
+    // Callers hand over ownership of g (an rvalue), so its buffer can be
+    // rewritten in place with the update.
+    if constexpr (std::is_same_v<T, ROCMfloat>) {
+        if (!g.get_transpose() && !m.get_transpose() && !v.get_transpose()) {
+            const size_t n = g.num_row() * g.num_col();
+            const float bc1 = 1.0f / (1.0f - powf(beta1, (float)iteration));
+            const float bc2 = 1.0f / (1.0f - powf(beta2, (float)iteration));
+            const int threads = 256;
+            const int blocks = (int)((n + threads - 1) / threads);
+            Juzhen::RocmCheck(Juzhen::Rocm_adam_update(
+                const_cast<float*>(reinterpret_cast<const float*>(g.data())),
+                const_cast<float*>(reinterpret_cast<const float*>(m.data())),
+                const_cast<float*>(reinterpret_cast<const float*>(v.data())),
+                alpha, beta1, beta2, eps, bc1, bc2, n));
             iteration++;
             return std::move(g);
         }
