@@ -98,10 +98,12 @@ namespace Juzhen
 			auto t = hadmd(curr_grad, std::move(upstream_grad));
 			auto gW = t * input.T();
 			auto gb = sum(t, 1);
+			// Propagate through the weights used by eval(), before Adam changes them.
+			auto dx = W().T() * t;
 			if (need_update) {
 				update(std::move(gW), std::move(gb));
 			}
-			return W().T() * t;
+			return dx;
 		}
 
 		// this function will destroy gW and gb

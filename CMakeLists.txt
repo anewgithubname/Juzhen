@@ -441,3 +441,7 @@ set_tests_properties(cpu_linalg PROPERTIES LABELS "unit")
 # CUDA and ROCm backends; skips (77) on MPS.
 add_test(NAME jvp_correctness COMMAND testJVP)
 set_tests_properties(jvp_correctness PROPERTIES LABELS "unit" SKIP_RETURN_CODE 77)
+
+GENERATE_PROJ(testDenseBackward tests/testDenseBackward.cu)
+add_test(NAME dense_backward COMMAND testDenseBackward)
+set_tests_properties(dense_backward PROPERTIES LABELS "unit;gradient")
