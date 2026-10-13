@@ -18,6 +18,10 @@
 #endif
 
 #include <iomanip>
+#include <cstring>
+#include <iostream>
+#include <sstream>
+#include <string>
 
 // InstructionSet.cpp
 // Compile by using: cl /EHsc /W4 InstructionSet.cpp
@@ -256,11 +260,15 @@ std::string getCPUInfo(){
     return trim(CPUBrandString);
 #elif defined(_WIN64)
     return trim(CPUInfo::Brand());
-#else
+#elif defined(__APPLE__)
     char buf[100];
     size_t buflen = 100;
     sysctlbyname("machdep.cpu.brand_string", &buf, &buflen, NULL, 0);
     return std::string(buf);
+#elif defined(__aarch64__)
+    return "ARM64";
+#else
+    return "Unknown CPU";
 #endif
 }
 

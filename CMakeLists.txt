@@ -31,11 +31,16 @@ if(NVIDIA_CUDA)
     message("BUILD WITH CUDA SUPPORT!")
     add_definitions(-DCUDA)
 
-    if(UNIX) 
+    # Preserve compiler/architecture selected by cluster modules or callers.
+    if(UNIX AND NOT DEFINED CMAKE_CUDA_COMPILER
+       AND "$ENV{CUDACXX}" STREQUAL ""
+       AND EXISTS "/usr/local/cuda-12.6/bin/nvcc")
         set(CMAKE_CUDA_COMPILER /usr/local/cuda-12.6/bin/nvcc)
     endif()
     
-    set(CMAKE_CUDA_ARCHITECTURES native)
+    if(NOT DEFINED CMAKE_CUDA_ARCHITECTURES AND "$ENV{CUDAARCHS}" STREQUAL "")
+        set(CMAKE_CUDA_ARCHITECTURES native)
+    endif()
     project(animated_octo_sniffle LANGUAGES CXX CUDA)
     find_package(CUDAToolkit REQUIRED)
 
@@ -154,9 +159,9 @@ target_include_directories(juzhen PUBLIC "external/spdlog/include")
 target_include_directories(juzhen PUBLIC ${OpenBLAS_INCLUDE_DIRS})
 
 if(NVIDIA_CUDA) # if we are on GPU, we need to include the cuda headers
-    target_include_directories(juzhen PUBLIC ${CUDA_INCLUDE_DIRS})
+    target_include_directories(juzhen PUBLIC ${CUDAToolkit_INCLUDE_DIRS})
     target_compile_options(juzhen PRIVATE $<$<COMPILE_LANGUAGE:CUDA>:--extended-lambda>)
-    set(CUDA_EXTRA_LIBS ${CUDA_LIBRARIES} ${CUDA_cublas_LIBRARY} ${CUDA_curand_LIBRARY} ${CUDA_cusolver_LIBRARY})
+    set(CUDA_EXTRA_LIBS CUDA::cudart CUDA::cublas CUDA::curand CUDA::cusolver)
 
     set(CUDNN_SEARCH_INCLUDE_HINTS
         /usr/local/cuda-12.6/include
@@ -218,7 +223,7 @@ macro(GENERATE_PROJ TARGETNAME FILE)
 
     
     if(NVIDIA_CUDA) # if we are on GPU, we need to link the cuda libraries
-        target_include_directories(${TARGETNAME} PUBLIC ${CUDA_INCLUDE_DIRS})
+        target_include_directories(${TARGETNAME} PUBLIC ${CUDAToolkit_INCLUDE_DIRS})
         if(WIN32)
             target_link_libraries(${TARGETNAME} spdlog::spdlog ${BLAS_LIBRARIES} ${OpenBLAS_LIBRARIES} juzhen ${CUDA_EXTRA_LIBS})
         else()
