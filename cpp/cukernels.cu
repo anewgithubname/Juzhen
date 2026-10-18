@@ -89,6 +89,17 @@ __global__ void copyKernel(float *d_out, float *d_in, size_t numElements,
     }
 }
 
+// Indexed copying with a bounded launch and 64-bit grid-stride arithmetic.
+__global__ void copyDexKernel(float* output,const float* input,const size_t* rows,
+                             const size_t* cols,size_t nr,size_t nc,size_t stride,bool transposed){
+    const size_t count=nr*nc;
+    for(size_t k=size_t(blockIdx.x)*blockDim.x+threadIdx.x;k<count;k+=size_t(blockDim.x)*gridDim.x){
+        const size_t i=k%nr,j=k/nr;
+        const size_t row=transposed?cols[j]:rows[i],col=transposed?rows[i]:cols[j];
+        output[k]=input[row+col*stride];
+    }
+}
+
 __global__ void inplaceExpKernel(float *vec, size_t numElements) {
     size_t i = blockDim.x * blockIdx.x + threadIdx.x;
 

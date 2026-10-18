@@ -29,6 +29,9 @@
 #include "helper.hpp"
 #include "memory.hpp"
 
+#include <cstdint>
+#include <cstdio>
+#include <limits>
 #include <sstream>
 #include <fstream>
 #include <cstring>
@@ -481,38 +484,67 @@ Matrix<D> Matrix<D>::eleminv(double l) const {
     return M;
 }
 
-template <class D>
-void read(FILE *f, Matrix<D> &M){
-    // read int variables from the file.
-    size_t numrow = getw(f);
-    size_t numcol = getw(f);
-    size_t transpose = getw(f);
-
-    M.numrow = numrow;
-    M.numcol = numcol;
-    M.transpose = transpose;
-    M.elements.reset(new D[numrow * numcol]);
-    fread(M.elements.get(), sizeof(D), numcol * numrow, f);
+// Helpers for the existing three-native-int matrix format. Keep stream reads
+// composable: validate available payload when seekable, but preserve pipe input.
+namespace matrix_io_detail {
+[[noreturn]] inline void fail(const char* reason) {
+    LOG_ERROR("matrix/data read: {}", reason);
+    ERROR_OUT;
+}
+struct Header { size_t rows,cols;int transpose; };
+inline Header header(FILE* file) {
+    if(!file)fail("null input stream");
+    int fields[3];
+    if(std::fread(fields,sizeof(int),3,file)!=3)fail("incomplete matrix header");
+    if(fields[0]<0 || fields[1]<0 || (fields[2]!=0 && fields[2]!=1))fail("invalid matrix header");
+    return {size_t(fields[0]),size_t(fields[1]),fields[2]};
+}
+template<class D> size_t count(size_t rows,size_t cols) {
+    const size_t limit=std::min(std::numeric_limits<size_t>::max(),size_t(std::numeric_limits<std::ptrdiff_t>::max()))/sizeof(D);
+    if(cols && rows>limit/cols)fail("matrix byte size overflows");
+    return rows*cols;
+}
+inline bool enough_bytes(FILE* file,size_t bytes) {
+    const long position=std::ftell(file);
+    if(position<0)return true; // e.g. a pipe; fread below still checks every item.
+    if(std::fseek(file,0,SEEK_END)!=0){std::clearerr(file);return true;}
+    const long end=std::ftell(file);
+    if(std::fseek(file,position,SEEK_SET)!=0)fail("cannot restore input position");
+    return end>=position && size_t(end-position)>=bytes;
+}
+template<class D> size_t payload(FILE* file,size_t rows,size_t cols) {
+    size_t n=count<D>(rows,cols);
+    if(!enough_bytes(file,n*sizeof(D)))fail("truncated matrix payload");
+    return n;
+}
+struct FileCloser {void operator()(FILE* file)const{if(file)std::fclose(file);}};
 }
 
-/*
- * Read Matrix from a File
- *
- */
+template <class D>
+void read(FILE* file,Matrix<D>& destination) {
+    const auto header=matrix_io_detail::header(file);
+    const size_t n=matrix_io_detail::payload<D>(file,header.rows,header.cols);
+    // Preserve the stream reader's standalone allocation policy. Pool reuse
+    // changes buffer placement and can slow cached reads substantially.
+    std::shared_ptr<D[]> loaded(new D[n]);
+    if(n && std::fread(loaded.get(),sizeof(D),n,file)!=n)matrix_io_detail::fail("incomplete matrix payload");
+    // Publish only after a complete read; the array owner uses delete[].
+    destination.elements=std::move(loaded);
+    destination.numrow=header.rows;
+    destination.numcol=header.cols;
+    destination.transpose=header.transpose;
+}
 
 template <class D>
 Matrix<D> read(std::string filename) {
-    FILE *f = fopen(filename.c_str(), "rb");
-    // read int variables to the file.
-    size_t numrow = getw(f);
-    size_t numcol = getw(f);
-    size_t transpose = getw(f);
-
-    Matrix<D> A(filename.c_str(), numrow, numcol, transpose);
-    int bytesread = fread(A.elements.get(), sizeof(D), numcol * numrow, f);
-    fclose(f);
-
-    return A;
+    std::unique_ptr<FILE,matrix_io_detail::FileCloser> file(std::fopen(filename.c_str(),"rb"));
+    if(!file)matrix_io_detail::fail("cannot open matrix file");
+    const auto header=matrix_io_detail::header(file.get());
+    const size_t n=matrix_io_detail::payload<D>(file.get(),header.rows,header.cols);
+    // Filename reads retain their existing pooled allocation policy.
+    Matrix<D> loaded(filename.c_str(),header.rows,header.cols,header.transpose);
+    if(n && std::fread(loaded.elements.get(),sizeof(D),n,file.get())!=n)matrix_io_detail::fail("incomplete matrix payload");
+    return loaded;
 }
 
 template <class D>
@@ -570,15 +602,18 @@ void writetocsv(const std::string& filename, const MatrixView<T>& M) {
 template <class T>
 Matrix<T> readfromcsv(const std::string& filename, int n, int d) {
     std::cout << "reading from " << filename << std::endl;
-    Matrix<T> ret = Matrix<T>::zeros(n, d);
+    if(n<0 || d<0)matrix_io_detail::fail("negative CSV dimensions");
     std::ifstream file(filename);
+    if(!file)matrix_io_detail::fail("cannot open CSV file");
+    matrix_io_detail::count<T>(size_t(n),size_t(d));
+    Matrix<T> ret = Matrix<T>::zeros(n, d);
     std::string line;
     int i = 0;
-    while (std::getline(file, line)) {
+    while (std::getline(file, line) && i < n) {
         std::stringstream ss(line);
         std::string token;
         int j = 0;
-        while (std::getline(ss, token, ',')) {
+        while (std::getline(ss, token, ',') && j < d) {
             ret.elem(i, j) = std::stof(token);
             j++;
         }

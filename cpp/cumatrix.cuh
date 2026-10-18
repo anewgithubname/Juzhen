@@ -87,6 +87,10 @@ inline void Memory<CUDAfloat>::_free(CUDAfloat* ptr) {
 __global__ void copyKernel(float* d_out, float* d_in, size_t numElements,
                            size_t numrow, size_t rowstart, size_t rowend,
                            size_t colstart, size_t colend, bool direction);
+__global__ void copyDexKernel(float* d_out, const float* d_in, const size_t* d_rowidx,
+                               const size_t* d_colidx, size_t num_rows_out,
+                               size_t num_cols_out, size_t numrow_in,
+                               bool transposed);
 __global__ void addKernel(float* d_out, float s1, float a, size_t numElements);
 
 template <>
@@ -227,6 +231,9 @@ class Matrix<CUDAfloat> {
         return slice(rstart, rend, 0, num_col(), M);
     }
     // Matrix<float> rows(idxlist rlist) const { return to_host().rows(rlist); }
+    Matrix<CUDAfloat> rows(idxlist rlist) const {
+        return slice(rlist, seq(num_col()));
+    }
     Matrix<CUDAfloat> columns(size_t cstart, size_t cend) const {
         return slice(0, num_row(), cstart, cend);
     }
@@ -235,6 +242,34 @@ class Matrix<CUDAfloat> {
     }
     // Matrix<float> columns(idxlist clist) const { return
     // to_host().columns(clist); }
+    Matrix<CUDAfloat> columns(idxlist clist) const {
+        return slice(seq(num_row()), clist);
+    }
+
+    Matrix<CUDAfloat> slice(const idxlist& rowidx,const idxlist& colidx) const {
+        const size_t nr=rowidx.size(),nc=colidx.size();
+        for(size_t row:rowidx)if(row>=num_row())throw std::out_of_range("CUDA gather row index");
+        for(size_t col:colidx)if(col>=num_col())throw std::out_of_range("CUDA gather column index");
+        const size_t limit=std::numeric_limits<size_t>::max();
+        if((nc && nr>limit/nc) || nr*nc>limit/sizeof(float) || nr>limit/sizeof(size_t) || nc>limit/sizeof(size_t))
+            throw std::length_error("CUDA gather size overflows");
+        const size_t count=nr*nc;
+        // No redundant memset, and no zero-block launch for empty selections.
+        auto storage=std::shared_ptr<CUDAfloat[]>(Memory<CUDAfloat>::allocate(count),[](CUDAfloat* p){Memory<CUDAfloat>::free(p);});
+        Matrix<CUDAfloat> result("submatrix",nr,nc,0,std::move(storage));
+        if(!count)return result;
+        auto indices=[](const idxlist& input){
+            size_t* device=nullptr;CudaErrorCheck(cudaMalloc(&device,input.size()*sizeof(size_t)));
+            std::shared_ptr<size_t> owner(device,[](size_t* p){if(p)CudaErrorCheck(cudaFree(p));});
+            CudaErrorCheck(cudaMemcpy(device,input.data(),input.size()*sizeof(size_t),cudaMemcpyHostToDevice));
+            return owner;
+        };
+        auto rows=indices(rowidx),cols=indices(colidx);
+        const unsigned blocks=unsigned(std::min(size_t(4096),(count-1)/256+1));
+        copyDexKernel<<<blocks,256>>>((float*)result.elements.get(),(const float*)elements.get(),rows.get(),cols.get(),nr,nc,numrow,transpose);
+        CudaErrorCheck(cudaGetLastError());
+        return result;
+    }
 
     // our friends
     friend Matrix<CUDAfloat> sum(const Matrix<CUDAfloat>& M, int dim);

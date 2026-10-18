@@ -450,3 +450,14 @@ set_tests_properties(jvp_correctness PROPERTIES LABELS "unit" SKIP_RETURN_CODE 7
 GENERATE_PROJ(testDenseBackward tests/testDenseBackward.cu)
 add_test(NAME dense_backward COMMAND testDenseBackward)
 set_tests_properties(dense_backward PROPERTIES LABELS "unit;gradient")
+
+# Indexed copy and legacy data-file regression tests.
+GENERATE_PROJ(testSecurityIO tests/testSecurityIO.cu)
+GENERATE_PROJ(testGather tests/testGather.cu)
+add_test(NAME indexed_gather COMMAND testGather)
+set_tests_properties(indexed_gather PROPERTIES LABELS "unit;indexing" ENVIRONMENT "NVIDIA_TF32_OVERRIDE=0;NVIDIA_TF32=0")
+set(SECURITY_TEST_OUTPUT "" CACHE PATH "Output directory for file-validation fixtures and results")
+if(SECURITY_TEST_OUTPUT)
+    add_test(NAME security_io COMMAND python3 ${CMAKE_SOURCE_DIR}/tests/testSecurityIO.py $<TARGET_FILE:testSecurityIO> ${SECURITY_TEST_OUTPUT})
+    set_tests_properties(security_io PROPERTIES LABELS "unit;io;security" TIMEOUT 180)
+endif()
