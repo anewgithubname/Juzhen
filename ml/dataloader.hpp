@@ -33,85 +33,36 @@ namespace Juzhen
 {
     template <class D1, class D2>
     class DataLoader {
-        std::string folder;
-        std::string split;
-
-        size_t batch_size;
-        size_t batch_idx;
-
-        size_t n; 
-        size_t d;
-
-        FILE *fp_input;
-        FILE *fp_output;
-
+        size_t batch_size,position=0,n=0,d=0;
+        FILE *fp_input=nullptr,*fp_output=nullptr;
     public:
-        /**
-         * @brief Construct a new Data Loader object
-         * 
-         * @param folder dataset folder
-         * @param split train or test
-         * @param batch_size batch size
-         */
-        DataLoader(std::string folder, std::string split, size_t batch_size): 
-            folder(folder), split(split), batch_size(batch_size), batch_idx(0) {
-        
-            std::string input_file = folder + "/" + split + "_x.matrix";
-            std::string output_file = folder + "/" + split + "_y.matrix";
-            
-            fp_input = fopen(input_file.c_str(), "rb");
-            fp_output = fopen(output_file.c_str(), "rb");
-
-            if (fp_input == NULL || fp_output == NULL) {
-                std::cout << "Error opening file" << std::endl;
-                ERROR_OUT;
-            }
-
-            d = getw(fp_input); 
-            int dout = getw(fp_output);
-            n = getw(fp_input); 
-            int nout = getw(fp_output);
-            
-            int trans1 = getw(fp_input);
-            int trans2 = getw(fp_output);
-            if( trans1 || trans2 ) {
-                std::cout << "Dataset matrix cannot be transposed!" << std::endl;
-                ERROR_OUT;
-            }
+        DataLoader(std::string folder,std::string split,size_t batch_size):batch_size(batch_size) {
+            if(!batch_size)matrix_io_detail::fail("zero DataLoader batch size");
+            fp_input=std::fopen((folder+"/"+split+"_x.matrix").c_str(),"rb");
+            fp_output=std::fopen((folder+"/"+split+"_y.matrix").c_str(),"rb");
+            if(!fp_input || !fp_output)matrix_io_detail::fail("cannot open dataset");
+            const auto input=matrix_io_detail::header(fp_input),output=matrix_io_detail::header(fp_output);
+            if(!input.rows || !input.cols || output.rows!=1 || output.cols!=input.cols || input.transpose || output.transpose)
+                matrix_io_detail::fail("invalid or mismatched dataset shape");
+            d=input.rows;n=input.cols;
+            matrix_io_detail::payload<D1>(fp_input,d,n);
+            matrix_io_detail::payload<D2>(fp_output,1,n);
         }
-
-        ~DataLoader() {
-            fclose(fp_input);
-            fclose(fp_output);
-        }
-
-        std::tuple<Matrix<D1>, Matrix<D2>> next_batch() {
-            // check if at the previous round, we have reached the end of the dataset
-            if (batch_idx*batch_size >= n) {
-                batch_idx = 0;
-                // skip the first 12 bytes
-                fseek(fp_input, 12, SEEK_SET);
-                fseek(fp_output, 12, SEEK_SET);
+        ~DataLoader(){if(fp_input)std::fclose(fp_input);if(fp_output)std::fclose(fp_output);}
+        std::tuple<Matrix<D1>,Matrix<D2>> next_batch(){
+            if(position==n){
+                if(std::fseek(fp_input,3*sizeof(int),SEEK_SET)!=0 || std::fseek(fp_output,3*sizeof(int),SEEK_SET)!=0)
+                    matrix_io_detail::fail("cannot rewind dataset");
+                position=0;
             }
-
-            // how many samples to read
-            size_t samples_to_read = batch_size;
-            if (n - batch_idx*batch_size < batch_size) {
-                samples_to_read = n - batch_idx*batch_size;
-            }
-
-            Matrix<D1> x("input", d, samples_to_read);
-            Matrix<D2> y("output", 1, samples_to_read);
-
-            // read the input
-            fread((D1 *)x.data(), sizeof(D1), samples_to_read * d, fp_input);
-            fread((D2 *)y.data(), sizeof(D2), samples_to_read * 1, fp_output);
-
-            // update the batch index
-            batch_idx++;
-            return {std::move(x), std::move(y)};
+            const size_t take=std::min(batch_size,n-position);
+            Matrix<D1> x("input",d,take);Matrix<D2> y("output",1,take);
+            if(std::fread((D1*)x.data(),sizeof(D1),take*d,fp_input)!=take*d ||
+               std::fread((D2*)y.data(),sizeof(D2),take,fp_output)!=take)
+                matrix_io_detail::fail("incomplete dataset batch");
+            position+=take;
+            return {std::move(x),std::move(y)};
         }
-
     };
 }
-#endif 
+#endif
