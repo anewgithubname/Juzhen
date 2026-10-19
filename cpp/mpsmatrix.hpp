@@ -177,7 +177,13 @@ Matrix<MPSfloat> elemwise(Function func, const Matrix<MPSfloat>& M) {
 }
 template <class Function>
 Matrix<MPSfloat> elemwise(Function func, Matrix<MPSfloat>&& M) {
-    return Matrix<MPSfloat>(elemwise(func, M.to_host()));
+    // The shared Metal buffer is CPU-accessible once pending GPU work ends.
+    // Keep the rvalue's allocation, including its physical transpose layout.
+    mpsSynchronize();
+    auto* values = reinterpret_cast<float*>(M.elements.get());
+    for (size_t i = 0; i < M.numrow * M.numcol; ++i)
+        values[i] = func(values[i]);
+    return std::move(M);
 }
 
 #endif

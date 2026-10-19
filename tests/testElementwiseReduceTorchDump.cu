@@ -47,6 +47,27 @@ int compute() {
     auto elem_r=elemwise(ew,std::move(movable));
     const bool rvalue_reused=before==(const void*)elem_r.data();
 
+#if defined(APPLE_SILICON)
+    // Pending GPU work must finish before the host fallback writes the shared
+    // allocation, and a transposed rvalue must retain its layout and buffer.
+    Matrix<Backend> pending(input_h);
+    auto transposed=pending.T();
+    pending.add(1.0f,1.0f);
+    const void* transposed_before=(const void*)transposed.data();
+    auto transposed_result=elemwise(ew,std::move(transposed));
+    auto transposed_h=host(transposed_result);
+    bool transposed_ok=transposed_before==(const void*)transposed_result.data()
+        && transposed_result.get_transpose()
+        && transposed_h.num_row()==input_h.num_col()
+        && transposed_h.num_col()==input_h.num_row();
+    for(int c=0;c<4;++c) for(int r=0;r<3;++r)
+        transposed_ok &= transposed_h.elem(c,r)==ew(input_h.elem(r,c)+1.0f);
+    if(!transposed_ok) {
+        std::cout<<"[FAIL] transposed elementwise rvalue with pending GPU work\n";
+        return 1;
+    }
+#endif
+
     auto sum_reduce=[] __GPU_CPU__(float* src,float* dst,int n,int) {
         float sum=0.0f; for(int i=0;i<n;++i) sum+=src[i]; dst[0]=sum;
     };

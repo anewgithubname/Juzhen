@@ -308,6 +308,9 @@ kernel void adam_update_kernel(
     constant float& bc2   [[buffer(8)]],
     uint i [[thread_position_in_grid]])
 {
+    // Keep (1 - beta2) intact instead of reassociating the moment update
+    // into a subtraction of nearly equal values under Metal fast math.
+    #pragma clang fp reassociate(off)
     const float gi = g[i];
     const float mi = beta1 * m[i] + (1.0f - beta1) * gi;
     const float vi = beta2 * v[i] + (1.0f - beta2) * gi * gi;
