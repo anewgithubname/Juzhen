@@ -5,7 +5,7 @@
 
 Juzhen is a set of C++ APIs for matrix operations. It provides a higher-level interface for lower-level numerical calculation software like [CBLAS](http://www.netlib.org/blas/) and [CUDA](https://en.wikipedia.org/wiki/CUDA). It supports a Neural Net API similar to the ones used in PyTorch or TensorFlow, including convolutional layers backed by cuDNN and Metal on Apple Silicon.
 
-Developed under C++20. Supports NVIDIA CUDA 12.x (with cuDNN), Apple Silicon (through Metal Performance Shaders) and ROCm.
+Requires a C++20-capable compiler. Supports NVIDIA CUDA 12.x (with cuDNN), Apple Silicon (through Metal Performance Shaders) and ROCm.
 
 ## Features
 

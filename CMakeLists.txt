@@ -14,9 +14,8 @@ option(APPLE_SILICON "Build with Apple Silicon backend" OFF)
 option(BLAS_FREE "Build without an external BLAS; CPU gemm/gemv use the handwritten kernels in cpp/cpulinalg.hpp" OFF)
 set(ROCM_OFFLOAD_ARCH "" CACHE STRING "ROCm offload architecture, e.g. gfx1151")
 
-set(HAS_CONCEPTS ON)
-
 set(CMAKE_CXX_STANDARD 20)
+set(CMAKE_CXX_STANDARD_REQUIRED ON)
 
 include(FetchContent)
  
@@ -45,6 +44,7 @@ if(NVIDIA_CUDA)
     find_package(CUDAToolkit REQUIRED)
 
     set(CMAKE_CUDA_STANDARD 20)
+    set(CMAKE_CUDA_STANDARD_REQUIRED ON)
 
 elseif(ROCM_HIP)
     message("BUILD WITH ROCM/HIP SUPPORT! (scaffold)")
@@ -93,8 +93,7 @@ elseif(APPLE_SILICON)
     message("BUILD WITH APPLE SILICON SUPPORT! ")
     add_definitions(-DAPPLE_SILICON)
     project(animated_octo_sniffle LANGUAGES CXX OBJCXX)
-    set(CMAKE_CXX_STANDARD 20)
-    set(CMAKE_OBJCXX_STANDARD 17)
+    set(CMAKE_OBJCXX_STANDARD 20)
     set(CMAKE_OBJCXX_STANDARD_REQUIRED ON)
 
     # Define shader source and output

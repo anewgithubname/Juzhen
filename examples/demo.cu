@@ -255,7 +255,6 @@ int compute(){
     global_rand_gen.seed(0);
     
     //spdlog::set_level(spdlog::level::debug);
-    //std::cout << __cplusplus << " " << HAS_CONCEPTS << std::endl;
 
     printf("cpu_matrixaccess\n");
     cpu_matrixaccess();

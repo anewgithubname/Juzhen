@@ -197,7 +197,7 @@ int compute()
     GPUSampler sampler(1);
 #endif
 //    spdlog::set_level(spdlog::level::debug);
-    std::cout << __cplusplus << " " << HAS_CONCEPTS << std::endl;
+    std::cout << __cplusplus << std::endl;
 
     int ret = 0;
     ret += test1();

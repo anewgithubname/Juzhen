@@ -26,18 +26,13 @@
 #pragma once
 
 #include "core.hpp"
+#include <concepts>
 
 // operator overloads
-
-#define HAS_CONCEPTS 0
 
 #pragma region Definitions of Concepts
 // The four rules for implementing a matrix class
 // Addable, Scalable, Multiplicable, ElemInvitable
-
-#ifdef HAS_CONCEPTS
-// Needs C++ 20
-#include <concepts>
 
 /**
  * @brief A concept for matrices that can be multiplied
@@ -94,13 +89,6 @@ concept ElemInvitable = requires(const Matrix<D>&& A, const Matrix<D>& B) {
     A.eleminv(1);                         // self reciprocal
     { B.eleminv(1) } -> std::same_as<Matrix<D>>;  // const reciprocal
 };
-#else
-#define Multiplicable typename
-#define Addable typename
-#define ScalarAddable typename
-#define Scalable typename
-#define ElemInvitable typename
-#endif
 #pragma endregion
 
 // definitions of operators
