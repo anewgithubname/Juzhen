@@ -520,3 +520,5 @@ if(BPE_TEST_OUTPUT)
     set_tests_properties(bpe_pipeline PROPERTIES LABELS "unit;llm;pytorch;checkpoint;tokenizer"
         SKIP_RETURN_CODE 77 TIMEOUT 240 ENVIRONMENT "NVIDIA_TF32_OVERRIDE=0;NVIDIA_TF32=0")
 endif()
+
+GENERATE_PROJ(demo_grokking examples/demo_grokking.cu)
