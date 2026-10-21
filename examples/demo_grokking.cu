@@ -1,4 +1,4 @@
-// Modular addition with the native Sequential/Transformer/AdamW interfaces.
+// Modular addition with native Sequential and either a Transformer or an MLP.
 // See docs/grokking.md. Data and checkpoints must stay on the mounted drive.
 #include "../ml/llm.hpp"
 #include "../ml/checkpoint.hpp"
@@ -30,11 +30,14 @@ int integer(const char* key,int fallback){
     double v=number(key,fallback);require(v>=0&&v<=1000000&&std::floor(v)==v,std::string("invalid ")+key);return int(v);
 }
 struct Config {
+    std::string model=env("GROK_MODEL","transformer");
     int p=integer("GROK_P",113),dim=integer("GROK_DIM",128),seed=integer("GROK_SEED",42);
+    int hidden=integer("GROK_HIDDEN",512);
     int steps=integer("GROK_STEPS",20000),every=integer("GROK_EVAL_EVERY",100);
     double fraction=number("GROK_FRACTION",.3),lr=number("GROK_LR",.001),decay=number("GROK_DECAY",1);
     int batch=0;fs::path output=env("GROK_OUTPUT");
     Config(){require(p>=3&&p<=251&&dim>=4&&dim<=512&&dim%4==0&&steps>0&&every>0&&
+        hidden>0&&hidden<=2048&&(model=="transformer"||model=="mlp")&&
         fraction>0&&fraction<1&&lr>0&&decay>=0&&!output.empty(),"invalid grokking configuration");
         batch=int(p*p*fraction);require(batch>0&&batch<p*p,"empty training or heldout split");}
 };
@@ -50,26 +53,32 @@ template<class B> Matrix<float> host(const Matrix<B>& m){
     if constexpr(std::is_same_v<B,float>)return m;else return m.to_host();
 }
 struct Batch {
-    TokenIds<D> x,y;std::vector<int32_t> labels;int count;
+    TokenIds<D> x,y;std::vector<int32_t> labels;int count,stride;Matrix<D> features;
     Batch(const std::vector<int>& pairs,size_t start,const Config& c):
         x(inputs(pairs,start,c)),y(targets(pairs,start,c)),labels(targets(pairs,start,c)),
-        count(int(std::min(size_t(c.batch),pairs.size()-start))){}
+        count(int(std::min(size_t(c.batch),pairs.size()-start))),stride(c.model=="mlp"?1:3){
+        if(c.model=="mlp"){
+            auto h=Matrix<float>::zeros(2*c.p,c.batch);
+            for(int j=0;j<count;++j){h.elem(pairs[start+j]/c.p,j)=1;h.elem(c.p+pairs[start+j]%c.p,j)=1;}
+            features=Matrix<D>(h);
+        }
+    }
     static std::vector<int32_t> inputs(const std::vector<int>& ids,size_t start,const Config& c){
         std::vector<int32_t> x(3*c.batch,0);
         for(int j=0;j<c.batch&&start+j<ids.size();++j){x[3*j]=ids[start+j]/c.p;x[3*j+1]=ids[start+j]%c.p;x[3*j+2]=c.p;}
         return x;
     }
     static std::vector<int32_t> targets(const std::vector<int>& ids,size_t start,const Config& c){
-        std::vector<int32_t> y(3*c.batch,-100);
-        for(int j=0;j<c.batch&&start+j<ids.size();++j)y[3*j+2]=(ids[start+j]/c.p+ids[start+j]%c.p)%c.p;
+        const int stride=c.model=="mlp"?1:3;std::vector<int32_t> y(stride*c.batch,-100);
+        for(int j=0;j<c.batch&&start+j<ids.size();++j)y[stride*(j+1)-1]=(ids[start+j]/c.p+ids[start+j]%c.p)%c.p;
         return y;
     }
 };
 std::vector<int32_t> positions(int batch){std::vector<int32_t> ids;for(int b=0;b<batch;++b)for(int t=0;t<3;++t)ids.push_back(t);return ids;}
-struct Model {
+struct TransformerModel {
     Embedding<D> token,position;TransformerLayer<D> block;LinearLayer<D> head;
     Sequential<D> network;TokenIds<D> position_ids;Matrix<D> input;
-    explicit Model(const Config& c):token(c.p+1,c.dim),position(3,c.dim),
+    explicit TransformerModel(const Config& c):token(c.p+1,c.dim),position(3,c.dim),
         block(c.dim,c.dim,4*c.dim,3,c.batch,4,true),head(c.p,c.dim,3*c.batch),
         network{&head,&block},position_ids(positions(c.batch)){}
     auto parameters(){
@@ -84,6 +93,33 @@ struct Model {
     }
     void backward(Matrix<D>&& dy){auto dx=network.backward(std::move(dy));token.backward(dx);position.backward(dx);}
 };
+// Experiment-local activation; existing ReluLayer combines an affine map with
+// ReLU and currently exposes only the legacy updating backward interface.
+class ReLU : public Layer<D> {
+public:
+    ReLU():Layer<D>(1,1,0){}
+    void eval(const Matrix<D>& x) override{this->val=relu(Matrix<D>(x));}
+    bool supports_backward() const override{return true;}
+    Matrix<D> grad(const Matrix<D>& x) const override{return d_relu(Matrix<D>(x));}
+    Matrix<D> backward(const Matrix<D>& x,Matrix<D>&& dy) override{return hadmd(grad(x),std::move(dy));}
+    Matrix<D> backward_update(const Matrix<D>& x,Matrix<D>&& dy) override{return backward(x,std::move(dy));}
+    Matrix<D> jvp(const Matrix<D>& x,const Matrix<D>& dx) override{return hadmd(grad(x),dx);}
+    std::vector<ParameterRef<D>> parameters() override{return {};}
+    std::vector<std::pair<std::string,Matrix<D>*>> checkpoint_parameters() override{return {};}
+    std::vector<std::pair<std::string,adam_state<D>*>> checkpoint_optimizers() override{return {};}
+};
+struct MLPModel {
+    LinearLayer<D> hidden,head;ReLU activation;Sequential<D> network;
+    explicit MLPModel(const Config& c):hidden(c.hidden,2*c.p,c.batch),head(c.p,c.hidden,c.batch),
+        network{&head,&activation,&hidden}{}
+    auto parameters(){
+        auto refs=hidden.parameters();for(auto& p:refs)p.name="hidden."+p.name;
+        for(auto p:head.parameters()){p.name="head."+p.name;refs.push_back(p);}return refs;
+    }
+    auto layers(){return network.layers();}
+    const Matrix<D>& eval(const Batch& b){return network.eval(b.features);}
+    void backward(Matrix<D>&& dy){network.backward(std::move(dy));}
+};
 // Canonical column-major archive, also readable by scripts/text8_lm.py.
 void archive(const fs::path& path,const std::vector<ParameterRef<D>>& refs,bool gradients=false){
     std::unique_ptr<FILE,decltype(&fclose)> f(fopen(path.c_str(),"wb"),&fclose);require(bool(f),"cannot open archive");
@@ -96,16 +132,17 @@ void archive(const fs::path& path,const std::vector<ParameterRef<D>>& refs,bool 
     }require(fflush(f.get())==0,"archive flush");
 }
 struct Metrics{double loss=0,accuracy=0;};
-Metrics evaluate(Model& model,const std::vector<Batch>& batches){
+template<class Model> Metrics evaluate(Model& model,const std::vector<Batch>& batches){
     TokenCrossEntropy<D> loss;double total=0;size_t correct=0,count=0;
     for(const auto& b:batches){const auto& logits=model.eval(b);loss.eval(logits,b.y);
         const double value=host(loss.value()).elem(0,0);require(std::isfinite(value),"nonfinite loss");total+=value*b.count;
         auto h=host(logits);
-        for(int j=0;j<b.count;++j){int best=0;for(size_t r=1;r<h.num_row();++r)if(h.elem(r,3*j+2)>h.elem(best,3*j+2))best=int(r);
-            correct+=best==b.labels[3*j+2];}count+=b.count;
+        for(int j=0;j<b.count;++j){const int col=b.stride*(j+1)-1;int best=0;
+            for(size_t r=1;r<h.num_row();++r)if(h.elem(r,col)>h.elem(best,col))best=int(r);
+            correct+=best==b.labels[col];}count+=b.count;
     }return {total/count,double(correct)/count};
 }
-void run(const Config& c){
+template<class Model> void run(const Config& c){
     check_storage(c.output);fs::create_directories(c.output);
     require(!fs::exists(c.output/"metrics.csv"),"output already contains a run; choose a new directory");
     std::vector<int> pairs(c.p*c.p);std::iota(pairs.begin(),pairs.end(),0);std::mt19937 split_rng(c.seed);std::shuffle(pairs.begin(),pairs.end(),split_rng);
@@ -117,7 +154,8 @@ void run(const Config& c){
     Model model(c);auto refs=model.parameters();std::mt19937 rng(c.seed);std::normal_distribution<float> normal(0,1);
     for(auto& p:refs){Matrix<float> w("initial",p.value->num_row(),p.value->num_col());
         const bool gamma=p.name.find("gamma")!=std::string::npos,weight=p.decay;
-        const float scale=p.name.starts_with("token.")||p.name.starts_with("position.")?1.f:1.f/std::sqrt(float(w.num_col()));
+        const float scale=p.name.starts_with("token.")||p.name.starts_with("position.")?1.f:
+            std::sqrt((p.name=="hidden.weight"?2.f:1.f)/float(w.num_col()));
         for(size_t j=0;j<w.num_col();++j)for(size_t i=0;i<w.num_row();++i)w.elem(i,j)=gamma?1.f:(weight?normal(rng)*scale:0.f);
         *p.value=Matrix<D>(w);p.decay=true; // Explicit experiment: AdamW decay on every parameter, including LN and bias.
     }
@@ -128,7 +166,8 @@ void run(const Config& c){
     save("initial.ckpt");
     {std::ofstream config(c.output/"config.json");config<<std::setprecision(12)<<"{\"p\":"<<c.p<<",\"dim\":"<<c.dim<<",\"seed\":"<<c.seed<<",\"train_examples\":"<<c.batch
       <<",\"heldout_examples\":"<<heldout.size()<<",\"fraction\":"<<c.fraction<<",\"steps\":"<<c.steps<<",\"eval_every\":"<<c.every
-      <<",\"lr\":"<<c.lr<<",\"weight_decay\":"<<c.decay<<",\"beta1\":0.9,\"beta2\":0.98,\"epsilon\":1e-8,\"decay_all\":true,\"layernorm\":true,\"tied\":false,\"tf32\":\""<<env("NVIDIA_TF32","0")<<"\"}\n";require(bool(config),"cannot save config");}
+      <<",\"lr\":"<<c.lr<<",\"weight_decay\":"<<c.decay<<",\"beta1\":0.9,\"beta2\":0.98,\"epsilon\":1e-8,\"decay_all\":true,\"model\":\""<<c.model
+      <<"\",\"hidden\":"<<c.hidden<<",\"layernorm\":"<<(c.model=="mlp"?"false":"true")<<",\"tied\":false,\"tf32\":\""<<env("NVIDIA_TF32","0")<<"\"}\n";require(bool(config),"cannot save config");}
     std::ofstream metrics(c.output/"metrics.csv");metrics<<"step,train_loss,train_accuracy,heldout_loss,heldout_accuracy,weight_norm,seconds\n";
     auto start=std::chrono::steady_clock::now();bool memorized=false;
     auto report=[&]{
@@ -155,5 +194,5 @@ int compute(){try{global_rand_gen.seed(42);
 #ifdef CUDA
     GPUSampler sampler(42);
 #endif
-    run(Config{});return 0;
+    Config c;if(c.model=="mlp")run<MLPModel>(c);else run<TransformerModel>(c);return 0;
 }catch(const std::exception& e){std::cerr<<e.what()<<'\n';return 1;}}

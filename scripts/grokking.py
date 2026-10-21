@@ -21,9 +21,15 @@ def storage(path):
 
 
 def forward(refs, ids, heads=4):
-    """Independent functional PreLN block, using Torch autograd."""
+    """Independent functional MLP or PreLN block, using Torch autograd."""
     import torch
     import torch.nn.functional as F
+    if 'hidden.weight' in refs:
+        p = refs['head.weight'].shape[0]
+        x = torch.cat([F.one_hot(ids[:, i], p) for i in (0, 1)], dim=-1)
+        x = x.to(refs['hidden.weight'].dtype)
+        h = F.relu(F.linear(x, refs['hidden.weight'], refs['hidden.bias'].flatten()))
+        return F.linear(h, refs['head.weight'], refs['head.bias'].flatten())
     dim = refs['token.embedding'].shape[0]
     h = F.embedding(ids, refs['token.embedding'].T)
     h = h + refs['position.embedding'].T[None, :, :]
@@ -112,7 +118,7 @@ def plot(runs, output):
         rows = list(csv.DictReader((run/'metrics.csv').open()))
         c = json.loads((run/'config.json').read_text())
         values = {key: np.array([float(r[key]) for r in rows]) for key in rows[0]}
-        label = f"weight decay {c['weight_decay']:g}"
+        label = f"{c.get('model', 'transformer')} / decay {c['weight_decay']:g}"
         line, = axes[0].plot(values['step'], values['train_accuracy']*100, '--', label=label+' / train')
         color = line.get_color()
         axes[0].plot(values['step'], values['heldout_accuracy']*100, color=color, label=label+' / held out')
@@ -134,7 +140,7 @@ def plot(runs, output):
         ax.set_xlabel('Optimizer steps')
         ax.grid(alpha=.2)
         ax.legend(fontsize=8)
-    fig.suptitle('Juzhen: modular addition, one PreLN Transformer block')
+    fig.suptitle('Juzhen: modular addition')
     output.parent.mkdir(parents=True, exist_ok=True)
     fig.savefig(output, dpi=180)
     output.with_suffix('.json').write_text(json.dumps(summaries, indent=2)+'\n')

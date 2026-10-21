@@ -1,6 +1,7 @@
 # Native Juzhen grokking experiment
 
 `demo_grokking` learns `(a + b) mod 113` from a fixed subset of ordered pairs.
+`GROK_MODEL=transformer` is the default; `GROK_MODEL=mlp` selects a plain MLP.
 The implementation uses native `Embedding`, `TransformerLayer`, `LinearLayer`,
 `Sequential`, `TokenCrossEntropy`, and `AdamW`. It changes no core training code.
 
@@ -106,3 +107,54 @@ composite values). `config.json` records the resolved settings. Each run saves
 as the existing text8 checker. The program checks that the drive is mounted
 before creating output and before checkpoint writes; it never creates a substitute
 directory beneath an unmounted mount point.
+
+## MLP comparison, 2026-10-21
+
+The MLP has two affine layers: `226 → 512 → 113`, with a ReLU between them,
+for 174,193 trainable parameters. Inputs concatenate the one-hot encodings of
+`a` and `b`. It has no attention, embeddings, positional encoding, LayerNorm,
+skip connections, or other Transformer components. The native `Sequential`
+contains the two existing `LinearLayer` objects and an experiment-local ReLU
+activation. No core layer or optimizer implementation was changed.
+
+The split is byte-for-byte identical to the earlier Transformer experiment.
+Seed, modulus, fraction, full-batch optimizer, all-parameter decay policy,
+learning rate, and 20,000-update budget are also unchanged. Initialization uses
+He normal weights for the hidden affine layer (`sqrt(2/226)` standard deviation),
+normal output weights (`1/sqrt(512)`), and zero biases. Architectures and initial
+parameter arrays differ from the Transformer; this comparison does not isolate
+architecture from initialization or match parameter counts.
+
+| Setting | First recorded train accuracy ≥99% | Heldout accuracy then | First heldout ≥95% | Heldout at step 20,000 |
+| --- | ---: | ---: | ---: | ---: |
+| MLP, decay 1 | Step 300 (100%) | 0% | Step 14,400 | 99.8658% |
+| MLP, decay 0 | Step 300 (100%) | 0% | Not reached | 0% |
+| Transformer, decay 1 | Step 200 (100%) | 0.67% | Step 4,000 | 99.9888% |
+
+The MLP reaches 99% heldout accuracy at step 16,900 and gets 8,927 of 8,939
+heldout pairs right at the end. Its decay-1 run clearly shows delayed
+generalization after training accuracy has already saturated. Both MLP runs
+take about 7.4 seconds in the measured loop on the same RTX 4090; the MLP
+requires more updates to generalize, but each update is substantially cheaper.
+This is one seed and split, not evidence for a general architecture ranking.
+
+Independent Torch autograd checks all four MLP parameter tensors: maximum
+first-gradient error `1.05e-9`, maximum first-update error `2.16e-6`. The checker
+also reproduces final losses and exact accuracies on both complete splits,
+including the zero heldout accuracy of the no-decay control. CPU MLP smoke and
+the original Transformer path are separately checked.
+
+MLP artifacts are under the `mlp/` subdirectory of the result root above.
+Use the same executable and verification/plot commands, with new output paths:
+
+```bash
+GROK_MODEL=mlp GROK_OUTPUT="$run_root/mlp-decay1" NVIDIA_TF32=0 \
+  /tmp/juzhen-grokking-build-cuda/demo_grokking
+GROK_MODEL=mlp GROK_DECAY=0 GROK_OUTPUT="$run_root/mlp-decay0" NVIDIA_TF32=0 \
+  /tmp/juzhen-grokking-build-cuda/demo_grokking
+```
+
+`GROK_HIDDEN` controls MLP hidden width (default 512). For a small CPU smoke run,
+use `GROK_MODEL=mlp GROK_HIDDEN=16 GROK_P=7 GROK_STEPS=3 GROK_EVAL_EVERY=1`.
+`GROK_DIM` applies to the Transformer. Older Transformer archives without a
+`model` field remain readable by the verification and plotting script.
