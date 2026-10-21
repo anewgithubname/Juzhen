@@ -331,7 +331,7 @@ static int check_directional_derivative(const std::string& name,
     freeze(layers);
 
     layer.eval(x);
-    auto dx = layer.backward(x, Matrix<CUDAfloat>(upstream));
+    auto dx = layer.backward_update(x, Matrix<CUDAfloat>(upstream));
     const float lhs = scalar_loss(dx, direction);
 
     auto lp = forward_loss(layer, x + direction * eps, upstream);
@@ -471,7 +471,7 @@ static int check_input_gradient(const std::string& name,
     freeze(layers);
 
     layer.eval(x);
-    auto dx = layer.backward(x, Matrix<CUDAfloat>(upstream));
+    auto dx = layer.backward_update(x, Matrix<CUDAfloat>(upstream));
     auto dx_h = dx.to_host();
 
     auto x_h = x.to_host();

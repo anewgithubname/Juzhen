@@ -483,7 +483,7 @@ int compute() {
             forward(trainnn, X);
             LogisticLayer<FLOAT> loss(N, std::move(Y));
             trainnn.push_front(&loss);
-            backprop(trainnn, X);
+            backward_update(trainnn, X);
             trainnn.pop_front();
 
             if (step % log_every == 0 || step == steps - 1) {

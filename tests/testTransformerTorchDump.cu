@@ -84,7 +84,7 @@ int compute() {
     freeze(layers);   // keep weights fixed: dump must match what ran
     tf.eval(Matrix<BackendT>(x_h));
     auto out_h = as_host(tf.value());
-    auto dx_h  = as_host(tf.backward(Matrix<BackendT>(x_h), Matrix<BackendT>(g_h)));
+    auto dx_h  = as_host(tf.backward_update(Matrix<BackendT>(x_h), Matrix<BackendT>(g_h)));
     unfreeze(layers);
 
     const std::string path =
@@ -125,7 +125,7 @@ int compute() {
     tf.set_lr(1e-4f);
     for (int step = 0; step < steps; ++step) {
         tf.eval(Matrix<BackendT>(x_h));
-        tf.backward(Matrix<BackendT>(x_h), Matrix<BackendT>(g_h));
+        tf.backward_update(Matrix<BackendT>(x_h), Matrix<BackendT>(g_h));
         const auto params = tf.checkpoint_parameters();
         const auto opts = tf.checkpoint_optimizers();
         for (size_t i = 0; i < params.size(); ++i) {

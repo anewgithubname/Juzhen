@@ -461,3 +461,16 @@ if(SECURITY_TEST_OUTPUT)
     add_test(NAME security_io COMMAND python3 ${CMAKE_SOURCE_DIR}/tests/testSecurityIO.py $<TARGET_FILE:testSecurityIO> ${SECURITY_TEST_OUTPUT})
     set_tests_properties(security_io PROPERTIES LABELS "unit;io;security" TIMEOUT 180)
 endif()
+
+# Core training API with separate backward and optimizer steps.
+GENERATE_PROJ(testTrainingAPI tests/testTrainingAPI.cu)
+add_test(NAME training_api COMMAND testTrainingAPI)
+set_tests_properties(training_api PROPERTIES
+    LABELS "unit;gradient;training" TIMEOUT 180
+    ENVIRONMENT "NVIDIA_TF32_OVERRIDE=0;NVIDIA_TF32=0")
+
+GENERATE_PROJ(demo_training examples/demo_training.cu)
+add_test(NAME training_regression_learning COMMAND demo_training)
+set_tests_properties(training_regression_learning PROPERTIES
+    LABELS "unit;training" TIMEOUT 180
+    ENVIRONMENT "NVIDIA_TF32_OVERRIDE=0;NVIDIA_TF32=0")

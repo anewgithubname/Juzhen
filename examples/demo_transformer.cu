@@ -291,7 +291,7 @@ int compute() {
     LinearLayer<FLOAT> best_proj(V, d_model, N);
 
     // Core network as a layer list: front = last layer (proj), back = first
-    // (embed); forward()/backprop() evaluate from back() to front(), so data
+    // (embed); forward()/backward_update() evaluate from back() to front(), so data
     // flows embed -> block[0] -> ... -> block[num_blocks-1] -> proj.
     auto build_net = [&](vector<unique_ptr<TF>>& bl,
                          LinearLayer<FLOAT>& emb, LinearLayer<FLOAT>& pr) {
@@ -379,7 +379,7 @@ int compute() {
         forward(trainnn, X);
         LogisticLayer<FLOAT> loss(N, Matrix<FLOAT>(Y_h));
         trainnn.push_front(&loss);
-        backprop(trainnn, X);
+        backward_update(trainnn, X);
         trainnn.pop_front();
 
         if (step % log_every == 0 || step == steps - 1) {

@@ -183,25 +183,25 @@ public:
     }
 
     void bwd(const Matrix<BackendT>& inp, Matrix<BackendT>&& g) {
-        auto g2 = head.backward(dec1.value(), std::move(g));
-        auto g_cat = dec1.backward(c_cat, std::move(g2));
+        auto g2 = head.backward_update(dec1.value(), std::move(g));
+        auto g_cat = dec1.backward_update(c_cat, std::move(g2));
         const size_t up_sz = 16ULL * d;
         auto g_up = g_cat.rows(0, up_sz);
         auto g_skip = g_cat.rows(up_sz, g_cat.num_row());
-        auto g_e2 = up1.backward(e2, std::move(g_up));
-        auto g_e1 = enc2.backward(e1, std::move(g_e2));
+        auto g_e2 = up1.backward_update(e2, std::move(g_up));
+        auto g_e1 = enc2.backward_update(e1, std::move(g_e2));
         auto g_inp = g_e1 + g_skip;
-        enc1.backward(inp, std::move(g_inp));
+        enc1.backward_update(inp, std::move(g_inp));
     }
 
     BackwardProbe bwd_probe(const Matrix<BackendT>& inp, Matrix<BackendT>&& g) {
         BackwardProbe p;
         p.g_out_rms = matrix_rms_host(g);
 
-        auto g2 = head.backward(dec1.value(), std::move(g));
+        auto g2 = head.backward_update(dec1.value(), std::move(g));
         p.g2_rms = matrix_rms_host(g2);
 
-        auto g_cat = dec1.backward(c_cat, std::move(g2));
+        auto g_cat = dec1.backward_update(c_cat, std::move(g2));
         p.g_cat_rms = matrix_rms_host(g_cat);
 
         const size_t up_sz = 16ULL * d;
@@ -210,16 +210,16 @@ public:
         p.g_up_rms = matrix_rms_host(g_up);
         p.g_skip_rms = matrix_rms_host(g_skip);
 
-        auto g_e2 = up1.backward(e2, std::move(g_up));
+        auto g_e2 = up1.backward_update(e2, std::move(g_up));
         p.g_e2_rms = matrix_rms_host(g_e2);
 
-        auto g_e1 = enc2.backward(e1, std::move(g_e2));
+        auto g_e1 = enc2.backward_update(e1, std::move(g_e2));
         p.g_e1_rms = matrix_rms_host(g_e1);
 
         auto g_inp = g_e1 + g_skip;
         p.g_inp_rms = matrix_rms_host(g_inp);
 
-        enc1.backward(inp, std::move(g_inp));
+        enc1.backward_update(inp, std::move(g_inp));
         return p;
     }
 };

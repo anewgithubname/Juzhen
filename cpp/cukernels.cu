@@ -158,6 +158,7 @@ __global__ void inplaceD_tanhKernel(float *vec, size_t numElements) {
 
 Matrix<CUDAfloat> &fill(Matrix<CUDAfloat> &M, double a) {
     size_t numElem = M.num_row() * M.num_col();
+    if(!numElem)return M; // Empty tensors must not launch a zero-block grid.
     fillKernel<<<cudaConfig(numElem)>>>((float *)M.elements.get(), (float)a,
                                         numElem);
     return M;

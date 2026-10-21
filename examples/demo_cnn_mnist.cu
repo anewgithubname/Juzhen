@@ -284,7 +284,7 @@ int compute() {
                 float cur_loss = item(loss_layer.value());
                 loss_history.push_back(cur_loss);
                 trainnn.push_front(&loss_layer);
-                backprop(trainnn, X_i);
+                backward_update(trainnn, X_i);
                 trainnn.pop_front();
 
                 float elapsed = (float)time_in_ms(t_start, Clock::now()) / 1000.0f;

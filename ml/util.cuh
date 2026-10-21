@@ -28,6 +28,7 @@
 #include "../cpp/hipbackend.hpp"
 #endif
 
+#include <cfloat>       // DBL_MAX used by predict_one_hot
 #include <cmath>        // std::sqrt (float overload) in the fused CPU Adam
 #include <type_traits>  // std::is_same_v guards of the fused Adam paths
 

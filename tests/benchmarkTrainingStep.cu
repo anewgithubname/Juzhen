@@ -74,7 +74,7 @@ int compute() {
     auto step=[&] {
         layer.eval(input);
         auto upstream=Matrix<Backend>(upstream_seed);
-        auto dx=layer.backward(input,std::move(upstream));
+        auto dx=layer.backward_update(input,std::move(upstream));
         (void)dx;
     };
     for(int i=0;i<warmup;++i) step();

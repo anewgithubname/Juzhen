@@ -250,12 +250,12 @@ int compute() {
 
     LossLayer<float> loss_cpu(batch, y_h);
     net_cpu.push_front(&loss_cpu);
-    (void)backprop(net_cpu, x_h);
+    (void)backward_update(net_cpu, x_h);
     net_cpu.pop_front();
 
     LossLayer<MPSfloat> loss_mps(batch, y_m);
     net_mps.push_front(&loss_mps);
-    (void)backprop(net_mps, x_m);
+    (void)backward_update(net_mps, x_m);
     net_mps.pop_front();
 
     compare_matrix(l0_cpu.W(), l0_mps.W().to_host(), "l0.W after step", max_abs, rel_l2);

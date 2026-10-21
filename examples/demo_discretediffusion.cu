@@ -314,7 +314,7 @@ int compute() {
     LinearLayer<FLOAT> best_proj(V, d_model, 1);
 
     // Layer list: front = last layer (proj), back = first (embed); forward()
-    // and backprop() run back()->front(), so data flows embed -> blocks -> proj.
+    // and backward_update() run back()->front(), so data flows embed -> blocks -> proj.
     auto build_net = [&](vector<unique_ptr<TF>>& bl,
                          LinearLayer<FLOAT>& emb, LinearLayer<FLOAT>& pr) {
         list<Layer<FLOAT>*> net;
@@ -438,7 +438,7 @@ int compute() {
         forward(trainnn, X);
         MaskedCELayer<FLOAT> loss(N, Matrix<FLOAT>(Yh), Matrix<FLOAT>(Wh));
         trainnn.push_front(&loss);
-        backprop(trainnn, X);
+        backward_update(trainnn, X);
         trainnn.pop_front();
 
         if (step % log_every == 0 || step == steps - 1) {

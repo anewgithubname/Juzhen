@@ -19,7 +19,7 @@ template<class D> Matrix<float> h(const Matrix<D>& m) { if constexpr(std::is_sam
 static void train_step(LinearLayer<Backend>& a,LinearLayer<Backend>& b) {
     auto xh=Matrix<float>::randn(5,4), gh=Matrix<float>::randn(3,4);
     Matrix<Backend> x(xh); a.eval(x); b.eval(a.value());
-    auto da=b.backward(a.value(),Matrix<Backend>(gh)); a.backward(x,std::move(da));
+    auto da=b.backward_update(a.value(),Matrix<Backend>(gh)); a.backward_update(x,std::move(da));
 }
 static float error(const Matrix<Backend>& a,const Matrix<Backend>& b) {
     auto x=h(a),y=h(b); float e=0;
@@ -33,7 +33,7 @@ static float error(const Matrix<Backend>& a,const Matrix<Backend>& b) {
 }
 static void transformer_step(TransformerLayer<Backend>& layer) {
     auto xh=Matrix<float>::randn(8,8),gh=Matrix<float>::randn(8,8);
-    Matrix<Backend> x(xh); layer.eval(x); layer.backward(x,Matrix<Backend>(gh));
+    Matrix<Backend> x(xh); layer.eval(x); layer.backward_update(x,Matrix<Backend>(gh));
 }
 static float layer_error(Layer<Backend>& a,Layer<Backend>& b) {
     float e=0; auto ap=a.checkpoint_parameters(),bp=b.checkpoint_parameters();

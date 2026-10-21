@@ -290,27 +290,27 @@ public:
     }
 
     void bwd(const Matrix<FLOAT>& inp, Matrix<FLOAT>&& g) {
-        auto g_head = head.backward(dec1.value(), std::move(g));
-        auto g_cat1 = dec1.backward(cat1, std::move(g_head));
+        auto g_head = head.backward_update(dec1.value(), std::move(g));
+        auto g_cat1 = dec1.backward_update(cat1, std::move(g_head));
 
         const size_t skip1_sz = (size_t)ch1 * (size_t)d32;
         auto g_u1   = g_cat1.rows(0, skip1_sz);
         auto g_skip1 = g_cat1.rows(skip1_sz, g_cat1.num_row());
 
-        auto g_d2 = up1.backward(d2_out, std::move(g_u1));
-        auto g_cat2 = dec2.backward(cat2, std::move(g_d2));
+        auto g_d2 = up1.backward_update(d2_out, std::move(g_u1));
+        auto g_cat2 = dec2.backward_update(cat2, std::move(g_d2));
 
         const size_t skip2_sz = (size_t)ch2 * (size_t)d16;
         auto g_u2   = g_cat2.rows(0, skip2_sz);
         auto g_skip2 = g_cat2.rows(skip2_sz, g_cat2.num_row());
 
-        auto g_m  = up2.backward(m_out, std::move(g_u2));
-        auto g_e3 = mid.backward(e3, std::move(g_m));
-        auto g_e2 = enc3.backward(e2, std::move(g_e3));
+        auto g_m  = up2.backward_update(m_out, std::move(g_u2));
+        auto g_e3 = mid.backward_update(e3, std::move(g_m));
+        auto g_e2 = enc3.backward_update(e2, std::move(g_e3));
         g_e2 = g_e2 + g_skip2;
-        auto g_e1 = enc2.backward(e1, std::move(g_e2));
+        auto g_e1 = enc2.backward_update(e1, std::move(g_e2));
         g_e1 = g_e1 + g_skip1;
-        enc1.backward(inp, std::move(g_e1));
+        enc1.backward_update(inp, std::move(g_e1));
     }
 };
 

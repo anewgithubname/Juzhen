@@ -149,7 +149,7 @@ public:
                 forward(trainnn, inp_i);
             }
 
-            backprop(trainnn, inp_i);
+            backward_update(trainnn, inp_i);
             trainnn.pop_front();
 
             if (i % (numbatches) == 0)

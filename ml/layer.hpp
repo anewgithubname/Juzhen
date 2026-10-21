@@ -28,9 +28,13 @@
 
 #include <cfloat>
 #include <type_traits>
+#include <list>
+#include <iterator>
+#include <initializer_list>
 #include "../cpp/core.hpp" 
 #include "../cpp/matrix.hpp"
 #include "./util.cuh"
+#include "parameter.hpp"
 
 #ifdef CUDA
 #include "../cpp/cumatrix.cuh"
@@ -61,6 +65,7 @@ namespace Juzhen
 		bool need_update = true;
 
 		adam_state<D> adamW, adamb;
+		GradientStore<D> parameter_gradients;
 
 	public:
 		
@@ -93,7 +98,7 @@ namespace Juzhen
 		// Full backward pass for this layer: computes weight updates and returns
 		// the gradient to propagate to the previous layer.
 		// Default implementation covers all fully-connected layers.
-		virtual Matrix<D> backward(const Matrix<D>& input, Matrix<D>&& upstream_grad) {
+		virtual Matrix<D> backward_update(const Matrix<D>& input, Matrix<D>&& upstream_grad) {
 			auto curr_grad = grad(input);
 			auto t = hadmd(curr_grad, std::move(upstream_grad));
 			auto gW = t * input.T();
@@ -105,6 +110,16 @@ namespace Juzhen
 			}
 			return dx;
 		}
+
+        // Opt-in interface: legacy/custom layers are never silently routed
+        // through an updating backward pass by the explicit training driver.
+        virtual bool supports_backward() const { return false; }
+        virtual Matrix<D> backward(const Matrix<D>&, Matrix<D>&&) {
+            throw std::logic_error("this layer does not support gradient-only backward");
+        }
+        virtual std::vector<ParameterRef<D>> parameters() {
+            throw std::logic_error("this layer has no explicit parameter registration");
+        }
 
 		// this function will destroy gW and gb
 		void update(Matrix<D>&& gW, Matrix<D>&& gb) {
@@ -153,7 +168,7 @@ namespace Juzhen
 		friend void unfreeze(std::list<Layer<Data>*> neuralnet);
 
 		template <class Data>
-		friend Matrix<Data> backprop(std::list<Layer<Data>*> neuralnet, const Matrix<Data>& input);
+		friend Matrix<Data> backward_update(std::list<Layer<Data>*> neuralnet, const Matrix<Data>& input);
 	};
 
 	/**
@@ -164,6 +179,22 @@ namespace Juzhen
 	public:
 		LinearLayer(size_t m, size_t n, size_t nb) : Layer<D>(m, n, nb) {
 		}
+        bool supports_backward() const override {return true;}
+        std::vector<ParameterRef<D>> parameters() override {
+            return {this->parameter_gradients.parameter("weight",this->weights,this->adamW,this->need_update),
+                    this->parameter_gradients.parameter("bias",this->bias,this->adamb,this->need_update,false)};
+        }
+        Matrix<D> backward(const Matrix<D>& input,Matrix<D>&& dy) override {
+            if(input.num_row()!=this->weights.num_col() || dy.num_row()!=this->weights.num_row() || input.num_col()!=dy.num_col())
+                throw std::invalid_argument("linear backward shape mismatch");
+            auto dx=this->weights.T()*dy;
+            if(this->need_update) {
+                this->parameter_gradients.add(this->weights,dy*input.T());
+                this->parameter_gradients.add(this->bias,sum(dy,1));
+            }
+            return dx;
+        }
+
 		Matrix<D> grad(const Matrix<D>& input) const override {
 			return Matrix<D>::ones(Layer<D>::weights.num_row(), input.num_col());
 		}
@@ -212,6 +243,20 @@ namespace Juzhen
 
 		LossLayer(int nb, Matrix<D>&& output) : Layer<D>(1, 1, nb), output(output) { // move the output to the output owned by the layer
 		}
+
+        bool supports_backward() const override { return true; }
+        std::vector<ParameterRef<D>> parameters() override { return {}; }
+        std::vector<std::pair<std::string, Matrix<D>*>> checkpoint_parameters() override { return {}; }
+        std::vector<std::pair<std::string, adam_state<D>*>> checkpoint_optimizers() override { return {}; }
+
+        Matrix<D> backward(const Matrix<D>& input, Matrix<D>&& upstream) override {
+            if (upstream.num_row() != 1 || upstream.num_col() != 1 ||
+                input.num_row() != output.num_row() || input.num_col() != output.num_col())
+                throw std::invalid_argument("loss backward shape mismatch");
+            auto scale = Matrix<D>::ones(input.num_row(), 1) * upstream
+                       * Matrix<D>::ones(1, input.num_col());
+            return hadmd(grad(input), std::move(scale));
+        }
 
 		Matrix<D> grad(const Matrix<D>& input) const override {
 			return 2.0 * (input - output) / Layer<D>::nb;
@@ -343,6 +388,72 @@ namespace Juzhen
 		}
 	}
 
+// Lists retain the established Juzhen order: output layer first, input last.
+template<class D> std::vector<ParameterRef<D>> parameters(const std::list<Layer<D>*>& net) {
+    std::vector<ParameterRef<D>> result;
+    for(auto* layer:net)if(!layer||!layer->supports_backward())
+        throw std::logic_error("network contains a layer without explicit backward support");
+    size_t index=0;
+    for(auto i=net.rbegin();i!=net.rend();++i,++index)for(auto p:(*i)->parameters()) {
+        p.name="layer"+std::to_string(index)+"."+p.name;result.push_back(p);
+    }
+    return result;
+}
+template<class D> Matrix<D> backward(const std::list<Layer<D>*>& net,const Matrix<D>& input,Matrix<D>&& upstream) {
+    for(auto* layer:net)if(!layer||!layer->supports_backward())
+        throw std::logic_error("network contains a layer without explicit backward support");
+    auto gradient=std::move(upstream);
+    for(auto i=net.begin();i!=net.end();++i) {
+        auto next=std::next(i);const auto& x=next==net.end()?input:(*next)->value();
+        gradient=(*i)->backward(x,std::move(gradient));
+    }
+    return gradient;
+}
+
+    // Non-owning wrapper of the native output-first network list.
+    template<class D> class Sequential {
+        std::list<Layer<D>*> layers_;
+        const Matrix<D>* input_ = nullptr;
+    public:
+        explicit Sequential(std::list<Layer<D>*> layers) : layers_(std::move(layers)) {
+            if (layers_.empty()) throw std::invalid_argument("Sequential requires a nonempty network");
+            for (auto i = layers_.begin(); i != layers_.end(); ++i) {
+                if (!*i) throw std::invalid_argument("Sequential contains a null layer");
+                for (auto j = layers_.begin(); j != i; ++j)
+                    if (*j == *i) throw std::invalid_argument("Sequential requires distinct layer instances");
+            }
+        }
+        Sequential(std::initializer_list<Layer<D>*> layers)
+            : Sequential(std::list<Layer<D>*>(layers)) {}
+
+        const Matrix<D>& eval(const Matrix<D>& input) {
+            input_ = nullptr;
+            const auto& output = Juzhen::forward(layers_, input);
+            input_ = &input;
+            return output;
+        }
+        const Matrix<D>& eval(const Matrix<D>&&) = delete;
+
+        Matrix<D> backward(Matrix<D> upstream) {
+            if (!input_) throw std::logic_error("evaluate Sequential before backward");
+            return Juzhen::backward(layers_, *input_, std::move(upstream));
+        }
+        Matrix<D> backward() {
+            const auto& output = value();
+            if (output.num_row() != 1 || output.num_col() != 1)
+                throw std::logic_error("non-scalar output requires an upstream gradient");
+            return backward(Matrix<D>::ones(1, 1));
+        }
+        const Matrix<D>& value() const {
+            if (!input_) throw std::logic_error("evaluate Sequential before reading its value");
+            return layers_.front()->value();
+        }
+        std::vector<ParameterRef<D>> parameters() const {
+            return Juzhen::parameters(layers_);
+        }
+        const std::list<Layer<D>*>& layers() const { return layers_; }
+    };
+
 	// Forward-mode directional derivative (JVP) of a whole network:
 	// returns J(input) * tangent, the tangent of the network output when the
 	// input moves along `tangent`. The tangent pass is fused with a primal
@@ -365,15 +476,15 @@ namespace Juzhen
 
 	// updating the parameters in neural network.
 	template <class D>
-	Matrix<D> backprop(std::list<Layer<D>*> neuralnet, const Matrix<D>& input) {
+	Matrix<D> backward_update(std::list<Layer<D>*> neuralnet, const Matrix<D>& input) {
 		auto tt = neuralnet.back();
 		neuralnet.pop_back();
 		if (neuralnet.empty()) {
 			return tt->grad(input);
 		}
 		else {
-			auto WT_prev_grad = backprop(neuralnet, tt->value());
-			return tt->backward(input, std::move(WT_prev_grad));
+			auto WT_prev_grad = backward_update(neuralnet, tt->value());
+			return tt->backward_update(input, std::move(WT_prev_grad));
 		}
 	}
 
@@ -404,7 +515,7 @@ namespace Juzhen
 		forward(neuralnet, input);
         SumLayer sumL(W);
         neuralnet.push_front(&sumL);
-        auto ret = backprop(neuralnet, input);
+        auto ret = backward_update(neuralnet, input);
         neuralnet.pop_front();
 
         unfreeze(neuralnet);
@@ -729,7 +840,7 @@ namespace Juzhen
 				this->val = relu(Matrix<D>(this->val));
 		}
 
-		// grad() is superseded by backward(); return a dummy to satisfy the interface.
+		// grad() is superseded by backward_update(); return a dummy to satisfy the interface.
 		Matrix<D> grad(const Matrix<D>&) const override {
 			return Matrix<D>::ones(1, 1);
 		}
@@ -741,7 +852,7 @@ namespace Juzhen
 		 * @param upstream_grad Gradient from the layer above (dL/d_output).
 		 * @return              Gradient to propagate further back (dL/d_input).
 		 */
-		Matrix<D> backward(const Matrix<D>& input, Matrix<D>&& upstream_grad) override {
+		Matrix<D> backward_update(const Matrix<D>& input, Matrix<D>&& upstream_grad) override {
 			// Chain rule through activation:
 			// With ReLU:    t = upstream_grad ⊙ d_relu(val)
 			// Without ReLU: t = upstream_grad  (linear — derivative is 1)
@@ -970,7 +1081,7 @@ namespace Juzhen
 			return Matrix<D>::ones(1, 1);
 		}
 
-		Matrix<D> backward(const Matrix<D>& input, Matrix<D>&& upstream_grad) override {
+		Matrix<D> backward_update(const Matrix<D>& input, Matrix<D>&& upstream_grad) override {
 			auto t = use_relu
 				? hadmd(d_relu(Matrix<D>(this->val)), std::move(upstream_grad))
 				: std::move(upstream_grad);
@@ -1365,7 +1476,7 @@ namespace Juzhen
 			return Matrix<D>::ones(1, 1);
 		}
 
-		Matrix<D> backward(const Matrix<D>& input, Matrix<D>&& upstream_grad) override {
+		Matrix<D> backward_update(const Matrix<D>& input, Matrix<D>&& upstream_grad) override {
 			auto t = use_relu
 				? hadmd(d_relu(Matrix<D>(this->val)), std::move(upstream_grad))
 				: std::move(upstream_grad);
@@ -1524,7 +1635,7 @@ namespace Juzhen
 			return Matrix<D>::ones(1, 1);
 		}
 
-		Matrix<D> backward(const Matrix<D>& input, Matrix<D>&& upstream_grad) override {
+		Matrix<D> backward_update(const Matrix<D>& input, Matrix<D>&& upstream_grad) override {
 			auto t = use_relu
 				? hadmd(d_relu(Matrix<D>(this->val)), std::move(upstream_grad))
 				: std::move(upstream_grad);
@@ -1670,7 +1781,7 @@ namespace Juzhen
 			return Matrix<D>::ones(1, 1);
 		}
 
-		Matrix<D> backward(const Matrix<D>& input, Matrix<D>&& upstream_grad) override {
+		Matrix<D> backward_update(const Matrix<D>& input, Matrix<D>&& upstream_grad) override {
 			auto t = use_relu
 				? hadmd(d_relu(Matrix<D>(this->val)), std::move(upstream_grad))
 				: std::move(upstream_grad);
@@ -1821,7 +1932,7 @@ namespace Juzhen
 			return Matrix<D>::ones(1, 1);
 		}
 
-		Matrix<D> backward(const Matrix<D>& input, Matrix<D>&& upstream_grad) override {
+		Matrix<D> backward_update(const Matrix<D>& input, Matrix<D>&& upstream_grad) override {
 			auto t = use_relu
 				? hadmd(d_relu(Matrix<D>(this->val)), std::move(upstream_grad))
 				: std::move(upstream_grad);
@@ -2068,7 +2179,7 @@ namespace Juzhen
 			return Matrix<D>::ones(1, 1);
 		}
 
-		Matrix<D> backward(const Matrix<D>& input, Matrix<D>&& upstream_grad) override {
+		Matrix<D> backward_update(const Matrix<D>& input, Matrix<D>&& upstream_grad) override {
 			auto t = use_relu
 				? hadmd(d_relu(Matrix<D>(this->val)), std::move(upstream_grad))
 				: std::move(upstream_grad);
@@ -2289,7 +2400,7 @@ namespace Juzhen
 			return Matrix<D>::ones(1, 1);
 		}
 
-		Matrix<D> backward(const Matrix<D>& input, Matrix<D>&& upstream_grad) override {
+		Matrix<D> backward_update(const Matrix<D>& input, Matrix<D>&& upstream_grad) override {
 			auto t = use_relu
 				? hadmd(d_relu(Matrix<D>(this->val)), std::move(upstream_grad))
 				: std::move(upstream_grad);
@@ -2535,6 +2646,72 @@ namespace Juzhen
 		}
 	}
 
+	// A warp owns a column: adjacent lanes read adjacent features. Keep the
+	// serial kernels for very narrow columns, where lane utilization is low.
+	__device__ inline float layernorm_warp_sum(float value) {
+		for (int offset = 16; offset; offset >>= 1)
+			value += __shfl_down_sync(0xffffffffu, value, offset);
+		return __shfl_sync(0xffffffffu, value, 0);
+	}
+
+	__global__ void layernorm_forward_warp_kernel(
+		const float* x, const float* gamma, const float* beta,
+		float* y, float* xhat, float* inv_std, int dim, int N) {
+		const int lane = threadIdx.x & 31;
+		const int c = (blockIdx.x * blockDim.x + threadIdx.x) / 32;
+		if (c >= N) return; // whole warps leave together
+		const size_t c0 = (size_t)c * dim;
+		float mean = 0;
+		for (int i = lane; i < dim; i += 32) mean += x[c0 + i];
+		mean = layernorm_warp_sum(mean) / dim;
+		float var = 0;
+		for (int i = lane; i < dim; i += 32) {
+			const float centered = x[c0 + i] - mean;
+			var += centered * centered;
+		}
+		const float inv = rsqrtf(layernorm_warp_sum(var) / dim + 1e-5f);
+		if (lane == 0) inv_std[c] = inv;
+		for (int i = lane; i < dim; i += 32) {
+			const float h = (x[c0 + i] - mean) * inv;
+			xhat[c0 + i] = h;
+			y[c0 + i] = gamma[i] * h + beta[i];
+		}
+	}
+
+	__global__ void layernorm_backward_warp_kernel(
+		const float* dy, const float* gamma,
+		const float* xhat, const float* inv_std,
+		float* dx, int dim, int N) {
+		const int lane = threadIdx.x & 31;
+		const int c = (blockIdx.x * blockDim.x + threadIdx.x) / 32;
+		if (c >= N) return;
+		const size_t c0 = (size_t)c * dim;
+		float m1 = 0, m2 = 0;
+		for (int i = lane; i < dim; i += 32) {
+			const float g = gamma[i] * dy[c0 + i];
+			m1 += g;
+			m2 += g * xhat[c0 + i];
+		}
+		m1 = layernorm_warp_sum(m1) / dim;
+		m2 = layernorm_warp_sum(m2) / dim;
+		const float inv = inv_std[c];
+		for (int i = lane; i < dim; i += 32)
+			dx[c0 + i] = inv * (gamma[i] * dy[c0 + i] - m1 - xhat[c0 + i] * m2);
+	}
+
+	// Preserve d_relu's x > 0 convention, including at zero. Multiplication
+	// also preserves the previous behavior for nonfinite upstream gradients.
+	__global__ void relu_backward_inplace_kernel(const float* activation, float* gradient, size_t total) {
+		const size_t i = (size_t)blockIdx.x * blockDim.x + threadIdx.x;
+		if (i < total) gradient[i] *= activation[i] > 0.f ? 1.f : 0.f;
+	}
+
+	inline void cuda_relu_backward_inplace(const float* activation, float* gradient, size_t total) {
+		if (!total) return;
+		relu_backward_inplace_kernel<<<(total + 255) / 256, 256>>>(activation, gradient, total);
+		CudaErrorCheck(cudaGetLastError());
+	}
+
 	// Fused LayerNorm tangent. Unlike the reverse-mode kernel above, gamma
 	// multiplies after the symmetric standardization Jacobian:
 	//   dy = gamma * inv * (dx - mean(dx) - xhat * mean(xhat * dx)).
@@ -2591,8 +2768,13 @@ namespace Juzhen
 		const float* x, const float* gamma, const float* beta,
 		float* y, float* xhat, float* inv_std, int dim, int N) {
 		const int threads = 128;
-		const int blocks = (N + threads - 1) / threads;
-		layernorm_forward_kernel<<<blocks, threads>>>(x, gamma, beta, y, xhat, inv_std, dim, N);
+		if (N == 0) return;
+		if (dim < 32) {
+			layernorm_forward_kernel<<<(N + threads - 1) / threads, threads>>>(x, gamma, beta, y, xhat, inv_std, dim, N);
+		} else {
+			constexpr int warps = threads / 32;
+			layernorm_forward_warp_kernel<<<(N + warps - 1) / warps, threads>>>(x, gamma, beta, y, xhat, inv_std, dim, N);
+		}
 		CudaErrorCheck(cudaGetLastError());
 	}
 
@@ -2601,8 +2783,13 @@ namespace Juzhen
 		const float* xhat, const float* inv_std,
 		float* dx, int dim, int N) {
 		const int threads = 128;
-		const int blocks = (N + threads - 1) / threads;
-		layernorm_backward_kernel<<<blocks, threads>>>(dy, gamma, xhat, inv_std, dx, dim, N);
+		if (N == 0) return;
+		if (dim < 32) {
+			layernorm_backward_kernel<<<(N + threads - 1) / threads, threads>>>(dy, gamma, xhat, inv_std, dx, dim, N);
+		} else {
+			constexpr int warps = threads / 32;
+			layernorm_backward_warp_kernel<<<(N + warps - 1) / warps, threads>>>(dy, gamma, xhat, inv_std, dx, dim, N);
+		}
 		CudaErrorCheck(cudaGetLastError());
 	}
 
@@ -2636,6 +2823,9 @@ namespace Juzhen
 		int dim;
 		Matrix<D> gamma, beta;
 		adam_state<D> adam_g, adam_b;
+        GradientStore<D> parameter_gradients;
+        bool trainable=true;
+        bool has_forward=false;
 		Matrix<D> ones_d1, ones_1N;
 		Matrix<D> cached_xhat, cached_inv;   // xhat:(dim,N)  inv:(1,N)
 
@@ -2650,6 +2840,10 @@ namespace Juzhen
 		}
 
 		Matrix<D> forward(const Matrix<D>& x) {
+            has_forward=false;
+            if(x.num_row()!=size_t(dim)||x.num_col()!=ones_1N.num_col())
+                throw std::invalid_argument("LayerNorm forward shape mismatch");
+            has_forward=true;
 #ifdef CUDA
 			// Fused kernel (assumes plain column-major input, which is what
 			// TransformerLayer always passes); other backends use the
@@ -2717,7 +2911,21 @@ namespace Juzhen
 		}
 
 		// dy : (dim,N) upstream gradient.  Returns dL/dx; updates gamma,beta if `update`.
-		Matrix<D> backward(Matrix<D>&& dy, bool update) {
+        std::vector<ParameterRef<D>> parameters() {
+            return {parameter_gradients.parameter("gamma",gamma,adam_g,trainable,false),
+                    parameter_gradients.parameter("beta",beta,adam_b,trainable,false)};
+        }
+        Matrix<D> backward(Matrix<D>&& dy,bool enabled=true) {
+            if(!has_forward)throw std::logic_error("LayerNorm backward requires eval");
+            if(dy.num_row()!=size_t(dim)||dy.num_col()!=cached_xhat.num_col())
+                throw std::invalid_argument("LayerNorm backward shape mismatch");
+            return backward_impl(std::move(dy),enabled&&trainable,true);
+        }
+        Matrix<D> backward_update(Matrix<D>&& dy, bool update) {
+            return backward_impl(std::move(dy),update,false);
+        }
+    private:
+		Matrix<D> backward_impl(Matrix<D>&& dy, bool update, bool collect) {
 			Matrix<D> dx("ln_dx", dim, (int)dy.num_col());
 			bool fused = false;
 #ifdef CUDA
@@ -2772,12 +2980,18 @@ namespace Juzhen
 			}
 			// Parameter gradients read gamma/xhat, so dx (above) comes first.
 			if (update) {
+                if(collect) {
+                    parameter_gradients.add(gamma,sum(hadmd(dy,cached_xhat),1));
+                    parameter_gradients.add(beta,sum(dy,1));
+                } else {
 				gamma -= adam_update(sum(hadmd(dy, cached_xhat), 1), adam_g);
 				beta  -= adam_update(sum(dy, 1), adam_b);
+                }
 			}
 			return dx;
 		}
 
+    public:
 		// Tangent (JVP) through the normalization at the point cached by
 		// forward(): returns d LN(x) along dx. The standardization operator
 		// P(v) = inv .* (v - mean(v) - xhat .* mean(xhat .* v)) is symmetric,
@@ -2849,6 +3063,7 @@ namespace Juzhen
 	template <class D>
 	class TransformerLayer : public Layer<D> {
 		int d_model, d_k, d_ff, seq_len, batchN;
+        bool has_forward=false;
 		int num_heads, d_h;             // d_h = d_k / num_heads (per-head dim)
 		bool causal;                    // apply causal (autoregressive) attention
 		                                // mask when true; false = bidirectional
@@ -2994,6 +3209,9 @@ namespace Juzhen
 		}
 
 		void eval(const Matrix<D>& input) override {
+            has_forward=false;
+            if(input.num_row()!=size_t(d_model)||input.num_col()!=size_t(seq_len)*batchN)
+                throw std::invalid_argument("Transformer forward shape mismatch");
 			// 1. LN1 then linear projections  — Q,K,V : (d_k, N)
 			cached_x1 = ln1.forward(input);
 			cached_Q = Wq * cached_x1;
@@ -3205,6 +3423,7 @@ namespace Juzhen
 
 			// 5. Residual 2
 			this->val = cached_R + F;
+            has_forward=true;
 		}
 
 		Matrix<D> grad(const Matrix<D>&) const override {
@@ -3441,7 +3660,34 @@ namespace Juzhen
 			}
 		}
 
-		Matrix<D> backward(const Matrix<D>& input, Matrix<D>&& upstream_grad) override {
+        bool supports_backward() const override {return true;}
+        std::vector<ParameterRef<D>> parameters() override {
+            std::vector<ParameterRef<D>> result;
+            result.push_back(this->parameter_gradients.parameter("Wq",Wq,adam_Wq,this->need_update,true));
+            result.push_back(this->parameter_gradients.parameter("Wk",Wk,adam_Wk,this->need_update,true));
+            result.push_back(this->parameter_gradients.parameter("Wv",Wv,adam_Wv,this->need_update,true));
+            result.push_back(this->parameter_gradients.parameter("Wo",Wo,adam_Wo,this->need_update,true));
+            result.push_back(this->parameter_gradients.parameter("bo",bo,adam_bo,this->need_update,false));
+            result.push_back(this->parameter_gradients.parameter("W1",W1,adam_W1,this->need_update,true));
+            result.push_back(this->parameter_gradients.parameter("b1",b1,adam_b1,this->need_update,false));
+            result.push_back(this->parameter_gradients.parameter("W2",W2,adam_W2,this->need_update,true));
+            result.push_back(this->parameter_gradients.parameter("b2",b2,adam_b2,this->need_update,false));
+            for(auto p:ln1.parameters()){p.name="ln1."+p.name;p.parent_trainable=&this->need_update;result.push_back(p);}
+            for(auto p:ln2.parameters()){p.name="ln2."+p.name;p.parent_trainable=&this->need_update;result.push_back(p);}
+            return result;
+        }
+        Matrix<D> backward_update(const Matrix<D>& input,Matrix<D>&& dy) override {
+            return backward_impl(input,std::move(dy),false);
+        }
+        Matrix<D> backward(const Matrix<D>& input,Matrix<D>&& dy) override {
+            if(!has_forward)throw std::logic_error("Transformer backward requires eval");
+            if(input.num_row()!=size_t(d_model)||input.num_col()!=size_t(seq_len)*batchN||
+               dy.num_row()!=input.num_row()||dy.num_col()!=input.num_col())
+                throw std::invalid_argument("Transformer backward shape mismatch");
+            return backward_impl(input,std::move(dy),true);
+        }
+    private:
+        Matrix<D> backward_impl(const Matrix<D>& input,Matrix<D>&& upstream_grad,bool collect) {
 			const int N = seq_len * batchN;
 			auto dout = std::move(upstream_grad);         // (d_model, N)
 
@@ -3450,12 +3696,28 @@ namespace Juzhen
 			auto dW2 = dout * cached_F1_relu.T();          // (d_model, d_ff)
 			auto db2 = sum(dout, 1);                        // (d_model, 1)
 			auto dF1_relu = W2.T() * dout;                  // (d_ff, N)
-			auto dF1 = hadmd(d_relu(Matrix<D>(cached_F1)), std::move(dF1_relu)); // (d_ff, N)
+			Matrix<D> dF1;
+#ifdef CUDA
+			if constexpr (std::is_same_v<D, CUDAfloat>) {
+				if (!cached_F1.get_transpose() && !dF1_relu.get_transpose()) {
+					dF1 = std::move(dF1_relu);
+					cuda_relu_backward_inplace(
+						reinterpret_cast<const float*>(cached_F1.data()),
+						const_cast<float*>(reinterpret_cast<const float*>(dF1.data())),
+						dF1.num_row() * dF1.num_col());
+				} else {
+					dF1 = hadmd(d_relu(Matrix<D>(cached_F1)), std::move(dF1_relu));
+				}
+			} else
+#endif
+			{
+				dF1 = hadmd(d_relu(Matrix<D>(cached_F1)), std::move(dF1_relu));
+			}
 			auto dW1 = dF1 * cached_x2.T();                // (d_ff, d_model)
 			auto db1 = sum(dF1, 1);                         // (d_ff, 1)
 			auto dx2 = W1.T() * dF1;                        // (d_model, N) — grad wrt LN2 output
 			// Back through LN2, then add residual-1 path (out = R + F).
-			auto dR = ln2.backward(std::move(dx2), this->need_update) + dout;
+			auto dR = (collect ? ln2.backward(std::move(dx2),this->need_update) : ln2.backward_update(std::move(dx2),this->need_update)) + dout;
 
 			// ── Attention output projection backward ──────────────────────
 			// O = Wo * H + bo  →  dR is dO (read-only here); it also flows
@@ -3709,10 +3971,21 @@ namespace Juzhen
 			// Grad wrt LN1 output, back through LN1, plus the residual path
 			// (R = x + attention output, so dR flows straight into dx).
 			auto dx1 = Wq.T() * dQ + Wk.T() * dK + Wv.T() * dV;
-			auto dx = ln1.backward(std::move(dx1), this->need_update) + dR;
+			auto dx = (collect ? ln1.backward(std::move(dx1),this->need_update) : ln1.backward_update(std::move(dx1),this->need_update)) + dR;
 
 			// ── Parameter updates ─────────────────────────────────────────
 			if (this->need_update) {
+                if(collect) {
+                    this->parameter_gradients.add(Wq,std::move(dWq));
+                    this->parameter_gradients.add(Wk,std::move(dWk));
+                    this->parameter_gradients.add(Wv,std::move(dWv));
+                    this->parameter_gradients.add(Wo,std::move(dWo));
+                    this->parameter_gradients.add(bo,std::move(dbo));
+                    this->parameter_gradients.add(W1,std::move(dW1));
+                    this->parameter_gradients.add(b1,std::move(db1));
+                    this->parameter_gradients.add(W2,std::move(dW2));
+                    this->parameter_gradients.add(b2,std::move(db2));
+                } else {
 				Wq -= adam_update(std::move(dWq), adam_Wq);
 				Wk -= adam_update(std::move(dWk), adam_Wk);
 				Wv -= adam_update(std::move(dWv), adam_Wv);
@@ -3722,11 +3995,13 @@ namespace Juzhen
 				b1 -= adam_update(std::move(db1), adam_b1);
 				W2 -= adam_update(std::move(dW2), adam_W2);
 				b2 -= adam_update(std::move(db2), adam_b2);
+                }
 			}
 
 			return dx;
 		}
 
+    public:
 		// ── Accessors for parity testing ──
 		void set_Wq(const Matrix<D>& w) { Wq = w; }
 		void set_Wk(const Matrix<D>& w) { Wk = w; }

@@ -106,7 +106,7 @@ static void transformer(int d, int seq, int batch, const std::string& tag) {
     dump(tag+"_cached_jvp",result);
     measure(tag+"_forward_jvp",[&] { layer.eval(x); result=layer.jvp(x,u); });
     dump(tag+"_forward_jvp",result);
-    measure(tag+"_train",[&] { layer.eval(x); result=layer.backward(x,Matrix<D>(u)); });
+    measure(tag+"_train",[&] { layer.eval(x); result=layer.backward_update(x,Matrix<D>(u)); });
     dump(tag+"_train_dx",result);
     // Also validate actual updates, not merely that the training loop ran.
     for (auto& [name,param] : layer.checkpoint_parameters()) dump(tag+"_train_"+name,*param);

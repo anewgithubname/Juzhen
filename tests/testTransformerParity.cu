@@ -3,7 +3,7 @@
  * @brief CPU–CUDA parity test for TransformerLayer.
  *
  * Builds two TransformerLayers (one CPU, one CUDA) with identical weights,
- * runs eval() and backward() on the same inputs, and compares results.
+ * runs eval() and backward_update() on the same inputs, and compares results.
  * Only compiled when CUDA is available; otherwise a trivial pass.
  */
 
@@ -95,8 +95,8 @@ int compute() {
     cpu_tf.eval(x_h);
     gpu_tf.eval(Matrix<CUDAfloat>(x_h));
 
-    auto cpu_dx = cpu_tf.backward(x_h, Matrix<float>(g_h));
-    auto gpu_dx = gpu_tf.backward(Matrix<CUDAfloat>(x_h),
+    auto cpu_dx = cpu_tf.backward_update(x_h, Matrix<float>(g_h));
+    auto gpu_dx = gpu_tf.backward_update(Matrix<CUDAfloat>(x_h),
                                   Matrix<CUDAfloat>(g_h)).to_host();
 
     compare_matrix(gpu_dx, cpu_dx, "backward parity (dx)", max_abs, rel_l2);

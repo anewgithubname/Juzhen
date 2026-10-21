@@ -199,7 +199,7 @@ int compute() {
                     LossLayer<FLOAT> ls(batchsize, X1 - X0);
                     net.push_front(&ls);
                     float loss = item(forward(net, inp));
-                    backprop(net, inp);
+                    backward_update(net, inp);
                     net.pop_front();
 
                     if (i % 200 == 0 || i == iters - 1) {

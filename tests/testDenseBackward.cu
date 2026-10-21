@@ -48,7 +48,7 @@ static bool check(const std::string& name, int activation) {
     layer.adamWstate().alpha=.08f; layer.adambstate().alpha=.08f;
     Matrix<D> device_x(x);
     layer.eval(device_x);
-    auto dx=host(layer.backward(device_x,Matrix<D>(upstream)));
+    auto dx=host(layer.backward_update(device_x,Matrix<D>(upstream)));
     bool ok=close(dx,expected_dx,name+" training input gradient");
     // Verify the update really happened, rather than masking the bug by freezing.
     const auto changed=host(layer.W()); float movement=0;
@@ -64,7 +64,7 @@ static bool check(const std::string& name, int activation) {
     const auto before_m=host(layer.adamWstate().m),before_v=host(layer.adamWstate().v);
     const int before_iter=layer.adamWstate().iteration;
     layer.eval(device_x);
-    auto frozen_dx=host(layer.backward(device_x,Matrix<D>(upstream)));
+    auto frozen_dx=host(layer.backward_update(device_x,Matrix<D>(upstream)));
     ok = close(frozen_dx,expected_dx,name+" frozen input gradient") && ok;
     ok = close(host(layer.W()),w,name+" frozen weights",0) && ok;
     ok = close(host(layer.b()),b,name+" frozen bias",0) && ok;

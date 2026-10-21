@@ -335,7 +335,7 @@ int compute()
             LossLayer<FLOAT> L11(batchsize, X1_i - X0_i);
             trainnn.push_front(&L11);
             float loss = item(forward(trainnn, inp_i));
-            backprop(trainnn, inp_i);
+            backward_update(trainnn, inp_i);
             trainnn.pop_front();
 
             if (!ema_init) { ema_loss = loss; ema_init = true; }

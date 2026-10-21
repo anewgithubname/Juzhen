@@ -126,7 +126,7 @@ int compute() {
         LogisticLayer<FLOAT> L3(batchsize, std::move(Y_i));
         trainnn.push_front(&L3);
 
-        backprop(trainnn, X_i);
+        backward_update(trainnn, X_i);
         trainnn.pop_front();
         if (iter % 1000 == 0) {
 #if defined(CUDA) || defined(APPLE_SILICON)

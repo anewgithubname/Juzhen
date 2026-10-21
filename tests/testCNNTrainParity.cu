@@ -91,7 +91,7 @@ int compute() {
         std::list<Layer<CUDAfloat>*> train;
         train.push_back(&loss); train.push_back(&L2); train.push_back(&L1);
         train.push_back(&c3);   train.push_back(&c2); train.push_back(&c1);
-        backprop(train, Xg);
+        backward_update(train, Xg);
     }
 
     // Try to load CPU reference
@@ -173,7 +173,7 @@ int compute() {
         std::list<Layer<ROCMfloat>*> train;
         train.push_back(&loss); train.push_back(&L2); train.push_back(&L1);
         train.push_back(&c3);   train.push_back(&c2); train.push_back(&c1);
-        backprop(train, Xg);
+        backward_update(train, Xg);
     }
 
     std::ifstream ref(REF_FILE);
@@ -254,7 +254,7 @@ int compute() {
         std::list<Layer<MPSfloat>*> train;
         train.push_back(&loss); train.push_back(&L2); train.push_back(&L1);
         train.push_back(&c3);   train.push_back(&c2); train.push_back(&c1);
-        backprop(train, Xg);
+        backward_update(train, Xg);
     }
 
     std::ifstream ref(REF_FILE);
@@ -346,7 +346,7 @@ int compute() {
         std::list<Layer<float>*> train;
         train.push_back(&loss); train.push_back(&L2); train.push_back(&L1);
         train.push_back(&c3);   train.push_back(&c2); train.push_back(&c1);
-        backprop(train, Xh);
+        backward_update(train, Xh);
 
         std::cout << std::setw(5) << iter
                   << std::fixed << std::setprecision(6)
