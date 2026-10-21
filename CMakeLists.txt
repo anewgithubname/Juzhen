@@ -473,3 +473,21 @@ add_test(NAME training_regression_learning COMMAND demo_training)
 set_tests_properties(training_regression_learning PROPERTIES
     LABELS "unit;training" TIMEOUT 180
     ENVIRONMENT "NVIDIA_TF32_OVERRIDE=0;NVIDIA_TF32=0")
+
+# Explicit CPU/CUDA LLM training and optional PyTorch reference validation.
+GENERATE_PROJ(testLLMTraining tests/testLLMTraining.cu)
+add_test(NAME llm_training COMMAND testLLMTraining)
+set_tests_properties(llm_training PROPERTIES LABELS "unit;gradient;llm"
+    ENVIRONMENT "NVIDIA_TF32_OVERRIDE=0;NVIDIA_TF32=0")
+set(LLM_TEST_OUTPUT "" CACHE PATH "Output directory for LLM reference fixtures and checkpoints")
+if(LLM_TEST_OUTPUT)
+    add_test(NAME llm_torch_compare COMMAND python3 ${CMAKE_SOURCE_DIR}/tests/testLLMTrainingTorch.py
+        $<TARGET_FILE:testLLMTraining> ${LLM_TEST_OUTPUT})
+    set_tests_properties(llm_torch_compare PROPERTIES LABELS "unit;pytorch;llm"
+        SKIP_RETURN_CODE 77 TIMEOUT 180 ENVIRONMENT "NVIDIA_TF32_OVERRIDE=0;NVIDIA_TF32=0")
+endif()
+
+GENERATE_PROJ(demo_llm_tokens examples/demo_llm_tokens.cu)
+add_test(NAME llm_token_learning COMMAND demo_llm_tokens)
+set_tests_properties(llm_token_learning PROPERTIES LABELS "unit;llm;learning" TIMEOUT 180
+    ENVIRONMENT "JUZHEN_LLM_STEPS=200;NVIDIA_TF32_OVERRIDE=0;NVIDIA_TF32=0")
