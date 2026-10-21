@@ -1,5 +1,7 @@
 # Native Juzhen grokking experiment
 
+For the binary sparse-parity experiment, see [grokking-binary.md](grokking-binary.md).
+
 `demo_grokking` learns `(a + b) mod 113` from a fixed subset of ordered pairs.
 `GROK_MODEL=transformer` is the default; `GROK_MODEL=mlp` selects a plain MLP.
 The implementation uses native `Embedding`, `TransformerLayer`, `LinearLayer`,

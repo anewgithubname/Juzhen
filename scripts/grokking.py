@@ -20,13 +20,16 @@ def storage(path):
     return path
 
 
-def forward(refs, ids, heads=4):
+def forward(refs, ids, heads=4, task='addition'):
     """Independent functional MLP or PreLN block, using Torch autograd."""
     import torch
     import torch.nn.functional as F
     if 'hidden.weight' in refs:
-        p = refs['head.weight'].shape[0]
-        x = torch.cat([F.one_hot(ids[:, i], p) for i in (0, 1)], dim=-1)
+        if task == 'parity':
+            x = ids
+        else:
+            p = refs['head.weight'].shape[0]
+            x = torch.cat([F.one_hot(ids[:, i], p) for i in (0, 1)], dim=-1)
         x = x.to(refs['hidden.weight'].dtype)
         h = F.relu(F.linear(x, refs['hidden.weight'], refs['hidden.bias'].flatten()))
         return F.linear(h, refs['head.weight'], refs['head.bias'].flatten())
@@ -59,18 +62,29 @@ def verify(run, device):
     torch.backends.cuda.matmul.allow_tf32 = False
     torch.backends.cudnn.allow_tf32 = False
     c = json.loads((run/'config.json').read_text())
-    pairs = list(csv.DictReader((run/'pairs.csv').open()))
-    assert len(pairs) == c['p']**2
-    unique = {(int(row['a']), int(row['b'])) for row in pairs}
+    task = c.get('task', 'addition')
+    pairs = list(csv.DictReader((run/('examples.csv' if task == 'parity' else 'pairs.csv')).open()))
+    if task == 'parity':
+        unique = {int(row['id']) for row in pairs}
+        assert all(0 <= value < 2**c['bits'] for value in unique)
+        for row in pairs:
+            assert int(row['target']) == sum((int(row['id']) >> bit) & 1 for bit in range(3)) % 2
+    else:
+        assert len(pairs) == c['p']**2
+        unique = {(int(row['a']), int(row['b'])) for row in pairs}
+        for row in pairs:
+            assert int(row['target']) == (int(row['a'])+int(row['b'])) % c['p']
     assert len(unique) == len(pairs), 'Split overlaps or duplicates'
-    for row in pairs:
-        assert int(row['target']) == (int(row['a'])+int(row['b'])) % c['p']
     training = [row for row in pairs if row['split'] == 'train']
     heldout = [row for row in pairs if row['split'] == 'heldout']
     assert len(training) == c['train_examples'] and len(heldout) == c['heldout_examples']
 
     def batch(rows):
-        ids = torch.tensor([[int(r['a']), int(r['b']), c['p']] for r in rows], device=device)
+        if task == 'parity':
+            ids = torch.tensor([[1 if (int(r['id']) >> bit) & 1 else -1 for bit in range(c['bits'])]
+                                for r in rows], device=device)
+        else:
+            ids = torch.tensor([[int(r['a']), int(r['b']), c['p']] for r in rows], device=device)
         target = torch.tensor([int(r['target']) for r in rows], device=device)
         return ids, target
 
@@ -79,7 +93,7 @@ def verify(run, device):
     optimizer = torch.optim.AdamW(list(refs.values()), lr=c['lr'], betas=(c['beta1'], c['beta2']),
                                  eps=c['epsilon'], weight_decay=c['weight_decay'], foreach=False)
     ids, target = batch(training)
-    loss = F.cross_entropy(forward(refs, ids), target)
+    loss = F.cross_entropy(forward(refs, ids, task=task), target)
     loss.backward()
     expected = {name: p.grad.detach().cpu().numpy() for name, p in refs.items()}
     result = {'split_passed': True, 'initial_loss': loss.item(), 'device': device}
@@ -97,7 +111,7 @@ def verify(run, device):
             total, correct = 0., 0
             for start in range(0, len(rows), 512):
                 ids, target = batch(rows[start:start+512])
-                logits = forward(refs, ids)
+                logits = forward(refs, ids, task=task)
                 total += F.cross_entropy(logits, target, reduction='sum').item()
                 correct += (logits.argmax(-1) == target).sum().item()
             value, accuracy = total/len(rows), correct/len(rows)
@@ -118,7 +132,7 @@ def plot(runs, output):
         rows = list(csv.DictReader((run/'metrics.csv').open()))
         c = json.loads((run/'config.json').read_text())
         values = {key: np.array([float(r[key]) for r in rows]) for key in rows[0]}
-        label = f"{c.get('model', 'transformer')} / decay {c['weight_decay']:g}"
+        label = f"{c.get('model', 'transformer')} / decay {c['weight_decay']:g} / seed {c['seed']}"
         line, = axes[0].plot(values['step'], values['train_accuracy']*100, '--', label=label+' / train')
         color = line.get_color()
         axes[0].plot(values['step'], values['heldout_accuracy']*100, color=color, label=label+' / held out')
@@ -131,8 +145,9 @@ def plot(runs, output):
                        first_heldout_95_step=None if generalized is None else int(generalized['step']),
                        heldout_accuracy_at_memorization=None if memorized is None else float(memorized['heldout_accuracy']))
         # Operational criterion for this experiment, not a universal definition.
+        chance_ceiling = .6 if c.get('task') == 'parity' else .2
         summary['delayed_generalization'] = bool(memorized and generalized and
-            float(memorized['heldout_accuracy']) < .2 and int(generalized['step']) > int(memorized['step']))
+            float(memorized['heldout_accuracy']) <= chance_ceiling and int(generalized['step']) > int(memorized['step']))
         summaries.append(summary)
     axes[0].set(ylabel='Accuracy (%)', ylim=(-2, 102))
     axes[1].set(ylabel='Cross entropy')
@@ -140,7 +155,10 @@ def plot(runs, output):
         ax.set_xlabel('Optimizer steps')
         ax.grid(alpha=.2)
         ax.legend(fontsize=8)
-    fig.suptitle('Juzhen: modular addition')
+    tasks = {s['config'].get('task', 'addition') for s in summaries}
+    if tasks == {'parity'}:
+        axes[0].axhline(50, color='gray', linewidth=1, alpha=.5)
+    fig.suptitle('Juzhen: binary sparse parity' if tasks == {'parity'} else 'Juzhen: modular addition')
     output.parent.mkdir(parents=True, exist_ok=True)
     fig.savefig(output, dpi=180)
     output.with_suffix('.json').write_text(json.dumps(summaries, indent=2)+'\n')
