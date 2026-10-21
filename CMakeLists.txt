@@ -491,3 +491,32 @@ GENERATE_PROJ(demo_llm_tokens examples/demo_llm_tokens.cu)
 add_test(NAME llm_token_learning COMMAND demo_llm_tokens)
 set_tests_properties(llm_token_learning PROPERTIES LABELS "unit;llm;learning" TIMEOUT 180
     ENVIRONMENT "JUZHEN_LLM_STEPS=200;NVIDIA_TF32_OVERRIDE=0;NVIDIA_TF32=0")
+
+# Real-text character LM; datasets and output directories are caller supplied.
+GENERATE_PROJ(demo_text8_lm examples/demo_text8_lm.cu)
+set(TEXT8_TEST_OUTPUT "" CACHE PATH "Output directory for real-text LM pipeline checks")
+if(TEXT8_TEST_OUTPUT)
+    if(NVIDIA_CUDA)
+        set(_TEXT8_TEST_DEVICE cuda)
+    else()
+        set(_TEXT8_TEST_DEVICE cpu)
+    endif()
+    add_test(NAME text8_pipeline COMMAND python3 ${CMAKE_SOURCE_DIR}/tests/testText8LM.py
+        --binary $<TARGET_FILE:demo_text8_lm> --output ${TEXT8_TEST_OUTPUT} --device ${_TEXT8_TEST_DEVICE})
+    set_tests_properties(text8_pipeline PROPERTIES LABELS "unit;llm;pytorch;checkpoint"
+        SKIP_RETURN_CODE 77 TIMEOUT 180 ENVIRONMENT "NVIDIA_TF32_OVERRIDE=0;NVIDIA_TF32=0")
+endif()
+
+# Optional BPE pipeline uses the same native trainer with int32 token files.
+set(BPE_TEST_OUTPUT "" CACHE PATH "Output directory for byte-level BPE LM checks")
+if(BPE_TEST_OUTPUT)
+    if(NVIDIA_CUDA)
+        set(_BPE_TEST_DEVICE cuda)
+    else()
+        set(_BPE_TEST_DEVICE cpu)
+    endif()
+    add_test(NAME bpe_pipeline COMMAND python3 ${CMAKE_SOURCE_DIR}/tests/testBPELM.py
+        --binary $<TARGET_FILE:demo_text8_lm> --output ${BPE_TEST_OUTPUT} --device ${_BPE_TEST_DEVICE})
+    set_tests_properties(bpe_pipeline PROPERTIES LABELS "unit;llm;pytorch;checkpoint;tokenizer"
+        SKIP_RETURN_CODE 77 TIMEOUT 240 ENVIRONMENT "NVIDIA_TF32_OVERRIDE=0;NVIDIA_TF32=0")
+endif()
