@@ -473,3 +473,19 @@ add_test(NAME training_regression_learning COMMAND demo_training)
 set_tests_properties(training_regression_learning PROPERTIES
     LABELS "unit;training" TIMEOUT 180
     ENVIRONMENT "NVIDIA_TF32_OVERRIDE=0;NVIDIA_TF32=0")
+
+# Independent regression coverage for deterministic convolution selection.
+GENERATE_PROJ(testConvDeterministic tests/testConvDeterministic.cu)
+add_test(NAME conv_deterministic COMMAND testConvDeterministic)
+set_tests_properties(conv_deterministic PROPERTIES LABELS "unit;convolution;deterministic" SKIP_RETURN_CODE 77 TIMEOUT 180 ENVIRONMENT "NVIDIA_TF32_OVERRIDE=0;NVIDIA_TF32=0;OPENBLAS_NUM_THREADS=1;OMP_NUM_THREADS=1")
+set(CONV_DETERMINISTIC_TEST_OUTPUT "" CACHE PATH "External output for convolution restart tests")
+set(CONV_DETERMINISTIC_DATA_MOUNT "" CACHE PATH "Required mounted drive for convolution test outputs")
+if(CONV_DETERMINISTIC_TEST_OUTPUT)
+    set(_CONV_MOUNT_ARGS "")
+    if(CONV_DETERMINISTIC_DATA_MOUNT)
+        list(APPEND _CONV_MOUNT_ARGS --storage-mount ${CONV_DETERMINISTIC_DATA_MOUNT})
+    endif()
+    add_test(NAME conv_deterministic_restart COMMAND python3 ${CMAKE_SOURCE_DIR}/tests/testConvDeterministicRestart.py
+        --binary $<TARGET_FILE:testConvDeterministic> --output ${CONV_DETERMINISTIC_TEST_OUTPUT} ${_CONV_MOUNT_ARGS})
+    set_tests_properties(conv_deterministic_restart PROPERTIES LABELS "unit;convolution;deterministic;checkpoint" TIMEOUT 180 SKIP_RETURN_CODE 77)
+endif()

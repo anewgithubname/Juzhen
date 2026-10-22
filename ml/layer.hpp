@@ -729,7 +729,7 @@ template<class D> Matrix<D> backward(const std::list<Layer<D>*>& net,const Matri
 		 */
 		ConvLayer(int N, int C_in, int H_in, int W_in,
 		          int C_out, int kH, int kW,
-		          int pad = 0, int stride = 1, bool relu = true)
+		          int pad = 0, int stride = 1, bool relu = true, bool deterministic = false)
 			: Layer<D>(
 				  C_out * ((H_in + 2*pad - kH)/stride + 1) *
 				          ((W_in + 2*pad - kW)/stride + 1),
@@ -786,6 +786,37 @@ template<class D> Matrix<D> backward(const std::list<Layer<D>*>& net,const Matri
 			bwd_filt_algo = bwd_f_p.algo;
 
 			// Workspace — use the maximum needed by any of the three passes.
+			// Opt-in repeatable convolution for exact checkpoint recovery.
+			if (deterministic) {
+				{
+					cudnnConvolutionFwdAlgoPerf_t choices[CUDNN_CONVOLUTION_FWD_ALGO_COUNT];
+					int found=0;bool selected=false;
+					CUDNN_CHECK(cudnnGetConvolutionForwardAlgorithm_v7(cudnn, x_desc, w_desc, conv_desc, y_desc, CUDNN_CONVOLUTION_FWD_ALGO_COUNT, &found, choices));
+					for(int i=0;i<found;++i) if(choices[i].status==CUDNN_STATUS_SUCCESS && choices[i].determinism==CUDNN_DETERMINISTIC) {
+						fwd_algo=choices[i].algo;selected=true;break;
+					}
+					if(!selected) throw std::runtime_error("no deterministic cuDNN convolution algorithm");
+				}
+				{
+					cudnnConvolutionBwdDataAlgoPerf_t choices[CUDNN_CONVOLUTION_BWD_DATA_ALGO_COUNT];
+					int found=0;bool selected=false;
+					CUDNN_CHECK(cudnnGetConvolutionBackwardDataAlgorithm_v7(cudnn, w_desc, y_desc, conv_desc, x_desc, CUDNN_CONVOLUTION_BWD_DATA_ALGO_COUNT, &found, choices));
+					for(int i=0;i<found;++i) if(choices[i].status==CUDNN_STATUS_SUCCESS && choices[i].determinism==CUDNN_DETERMINISTIC) {
+						bwd_data_algo=choices[i].algo;selected=true;break;
+					}
+					if(!selected) throw std::runtime_error("no deterministic cuDNN convolution algorithm");
+				}
+				{
+					cudnnConvolutionBwdFilterAlgoPerf_t choices[CUDNN_CONVOLUTION_BWD_FILTER_ALGO_COUNT];
+					int found=0;bool selected=false;
+					CUDNN_CHECK(cudnnGetConvolutionBackwardFilterAlgorithm_v7(cudnn, x_desc, y_desc, conv_desc, w_desc, CUDNN_CONVOLUTION_BWD_FILTER_ALGO_COUNT, &found, choices));
+					for(int i=0;i<found;++i) if(choices[i].status==CUDNN_STATUS_SUCCESS && choices[i].determinism==CUDNN_DETERMINISTIC) {
+						bwd_filt_algo=choices[i].algo;selected=true;break;
+					}
+					if(!selected) throw std::runtime_error("no deterministic cuDNN convolution algorithm");
+				}
+			}
+
 			size_t ws_fwd, ws_bwd_d, ws_bwd_f;
 			CUDNN_CHECK(cudnnGetConvolutionForwardWorkspaceSize(
 				cudnn, x_desc, w_desc, conv_desc, y_desc, fwd_algo, &ws_fwd));
@@ -968,10 +999,11 @@ template<class D> Matrix<D> backward(const std::list<Layer<D>*>& net,const Matri
 		 * @param kW      Kernel width
 		 * @param pad     Zero-padding applied to each spatial side (default 0)
 		 * @param stride  Stride used by the transposed convolution (default 1)
+		 * @param deterministic CPU/CUDA: select repeatable cuDNN algorithms when true
 		 */
 		convtransLayer(int N, int C_in, int H_in, int W_in,
 		               int C_out, int kH, int kW,
-		               int pad = 0, int stride = 1, bool relu = true)
+		               int pad = 0, int stride = 1, bool relu = true, bool deterministic = false)
 			: Layer<D>(
 				  C_out * (((H_in - 1) * stride - 2 * pad + kH)) *
 				          (((W_in - 1) * stride - 2 * pad + kW)),
@@ -1030,6 +1062,37 @@ template<class D> Matrix<D> backward(const std::list<Layer<D>*>& net,const Matri
 			fwd_deconv_algo = fwd_p.algo;
 			bwd_input_algo  = bwd_in_p.algo;
 			bwd_filt_algo   = bwd_f_p.algo;
+
+			// Opt-in repeatable convolution for exact checkpoint recovery.
+			if (deterministic) {
+				{
+					cudnnConvolutionFwdAlgoPerf_t choices[CUDNN_CONVOLUTION_FWD_ALGO_COUNT];
+					int found=0;bool selected=false;
+					CUDNN_CHECK(cudnnGetConvolutionForwardAlgorithm_v7(cudnn, y_desc, w_desc, conv_desc, x_desc, CUDNN_CONVOLUTION_FWD_ALGO_COUNT, &found, choices));
+					for(int i=0;i<found;++i) if(choices[i].status==CUDNN_STATUS_SUCCESS && choices[i].determinism==CUDNN_DETERMINISTIC) {
+						bwd_input_algo=choices[i].algo;selected=true;break;
+					}
+					if(!selected) throw std::runtime_error("no deterministic cuDNN convolution algorithm");
+				}
+				{
+					cudnnConvolutionBwdDataAlgoPerf_t choices[CUDNN_CONVOLUTION_BWD_DATA_ALGO_COUNT];
+					int found=0;bool selected=false;
+					CUDNN_CHECK(cudnnGetConvolutionBackwardDataAlgorithm_v7(cudnn, w_desc, x_desc, conv_desc, y_desc, CUDNN_CONVOLUTION_BWD_DATA_ALGO_COUNT, &found, choices));
+					for(int i=0;i<found;++i) if(choices[i].status==CUDNN_STATUS_SUCCESS && choices[i].determinism==CUDNN_DETERMINISTIC) {
+						fwd_deconv_algo=choices[i].algo;selected=true;break;
+					}
+					if(!selected) throw std::runtime_error("no deterministic cuDNN convolution algorithm");
+				}
+				{
+					cudnnConvolutionBwdFilterAlgoPerf_t choices[CUDNN_CONVOLUTION_BWD_FILTER_ALGO_COUNT];
+					int found=0;bool selected=false;
+					CUDNN_CHECK(cudnnGetConvolutionBackwardFilterAlgorithm_v7(cudnn, y_desc, x_desc, conv_desc, w_desc, CUDNN_CONVOLUTION_BWD_FILTER_ALGO_COUNT, &found, choices));
+					for(int i=0;i<found;++i) if(choices[i].status==CUDNN_STATUS_SUCCESS && choices[i].determinism==CUDNN_DETERMINISTIC) {
+						bwd_filt_algo=choices[i].algo;selected=true;break;
+					}
+					if(!selected) throw std::runtime_error("no deterministic cuDNN convolution algorithm");
+				}
+			}
 
 			size_t ws_fwd, ws_bwd_in, ws_bwd_f;
 			CUDNN_CHECK(cudnnGetConvolutionBackwardDataWorkspaceSize(
@@ -2129,7 +2192,7 @@ template<class D> Matrix<D> backward(const std::list<Layer<D>*>& net,const Matri
 	public:
 		ConvLayer(int N, int C_in, int H_in, int W_in,
 		          int C_out, int kH, int kW,
-		          int pad = 0, int stride = 1, bool relu = true)
+		          int pad = 0, int stride = 1, bool relu = true, bool /*deterministic*/ = false)
 			: Layer<D>(
 				  C_out * ((H_in + 2*pad - kH)/stride + 1) *
 				          ((W_in + 2*pad - kW)/stride + 1),
@@ -2351,7 +2414,7 @@ template<class D> Matrix<D> backward(const std::list<Layer<D>*>& net,const Matri
 	public:
 		convtransLayer(int N, int C_in, int H_in, int W_in,
 		               int C_out, int kH, int kW,
-		               int pad = 0, int stride = 1, bool relu = true)
+		               int pad = 0, int stride = 1, bool relu = true, bool /*deterministic*/ = false)
 			: Layer<D>(
 				  C_out * (((H_in - 1) * stride - 2 * pad + kH)) *
 				          (((W_in - 1) * stride - 2 * pad + kW)),
