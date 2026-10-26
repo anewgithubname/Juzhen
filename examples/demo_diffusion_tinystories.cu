@@ -40,6 +40,7 @@
  */
 
 #include "../ml/layer.hpp"
+#include "../ml/masked_cross_entropy.hpp"
 #include "../cpp/juzhen.hpp"
 
 #include <algorithm>
@@ -103,47 +104,7 @@ static void copy_linear_weights(LinearLayer<FLOAT>& dst,
 //   loss   = sum_c  w_c * ( logsumexp(z_c) - <z_c, y_c> )
 //   dloss/dz_c = w_c * ( softmax(z_c) - y_c )
 // ────────────────────────────────────────────────────────────────────────────
-template <class D>
-static Matrix<D> col_max(const Matrix<D>& input) {
-    return reduce(
-        [] __GPU_CPU__(float* v, float* vdes, int lenv, int) {
-            float m = -1e30f;
-            for (int i = 0; i < lenv; i++) m = m > v[i] ? m : v[i];
-            vdes[0] = m;
-        }, input, 0, 1);
-}
-
-template <class D>
-class MaskedCELayer : public Layer<D> {
-    Matrix<D> output;   // (V, N) one-hot true tokens
-    Matrix<D> wrow;     // (1, N) per-column weights (0 for unmasked positions)
-    Matrix<D> oneK1;    // (V, 1) ones, for broadcasting a row over all V rows
-
-public:
-    MaskedCELayer(size_t nb, Matrix<D>&& target, Matrix<D>&& weights)
-        : Layer<D>(2, 2, nb),
-          output(std::move(target)),
-          wrow(std::move(weights)),
-          oneK1("oneK1", output.num_row(), 1) {
-        oneK1.ones();
-    }
-
-    Matrix<D> grad(const Matrix<D>& input) const override {
-        auto mx = col_max(input);              // (1, N)
-        auto E = exp(input - oneK1 * mx);      // (V, N)
-        auto Z = oneK1 * sum(E, 0);            // (V, N) column sums broadcast
-        auto softmax = E / std::move(Z);       // (V, N)
-        return hadmd(softmax - output, oneK1 * wrow);
-    }
-
-    void eval(const Matrix<D>& input) override {
-        auto mx = col_max(input);                               // (1, N)
-        auto lse = log(sum(exp(input - oneK1 * mx), 0)) + mx;   // (1, N)
-        auto dot = sum(hadmd(input, output), 0);                // (1, N) <z, y>
-        auto ce = lse - dot;                                    // (1, N)
-        Layer<D>::val = sum(hadmd(wrow, ce), 1);                // (1, 1)
-    }
-};
+// Shared masked loss supports both legacy and gradient-only training.
 
 // ── GPU one-hot builders ─────────────────────────────────────────────────────
 // ids arrive as a (1, N) float matrix. Input ids may equal MASK (= V), so the

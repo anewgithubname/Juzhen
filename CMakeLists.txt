@@ -468,6 +468,19 @@ set_tests_properties(training_api PROPERTIES
     LABELS "unit;gradient;training" TIMEOUT 180
     ENVIRONMENT "NVIDIA_TF32_OVERRIDE=0;NVIDIA_TF32=0")
 
+# Independent references for the legacy layers' gradient-only interfaces.
+GENERATE_PROJ(testAllLayerAPI tests/testAllLayerAPI.cu)
+add_test(NAME all_layer_training_api COMMAND testAllLayerAPI)
+set_tests_properties(all_layer_training_api PROPERTIES
+    LABELS "unit;gradient;training;convolution" TIMEOUT 180 SKIP_RETURN_CODE 77
+    ENVIRONMENT "NVIDIA_TF32_OVERRIDE=0;NVIDIA_TF32=0;OPENBLAS_NUM_THREADS=1;OMP_NUM_THREADS=1")
+
+GENERATE_PROJ(testMaskedLossAPI tests/testMaskedLossAPI.cu)
+add_test(NAME masked_loss_api COMMAND testMaskedLossAPI)
+set_tests_properties(masked_loss_api PROPERTIES
+    LABELS "unit;ml;training;loss" TIMEOUT 120
+    ENVIRONMENT "NVIDIA_TF32_OVERRIDE=0;NVIDIA_TF32=0;OPENBLAS_NUM_THREADS=1;OMP_NUM_THREADS=1")
+
 GENERATE_PROJ(demo_training examples/demo_training.cu)
 add_test(NAME training_regression_learning COMMAND demo_training)
 set_tests_properties(training_regression_learning PROPERTIES
@@ -488,4 +501,8 @@ if(CONV_DETERMINISTIC_TEST_OUTPUT)
     add_test(NAME conv_deterministic_restart COMMAND python3 ${CMAKE_SOURCE_DIR}/tests/testConvDeterministicRestart.py
         --binary $<TARGET_FILE:testConvDeterministic> --output ${CONV_DETERMINISTIC_TEST_OUTPUT} ${_CONV_MOUNT_ARGS})
     set_tests_properties(conv_deterministic_restart PROPERTIES LABELS "unit;convolution;deterministic;checkpoint" TIMEOUT 180 SKIP_RETURN_CODE 77)
+    add_test(NAME all_layer_training_api_restart COMMAND python3 ${CMAKE_SOURCE_DIR}/tests/testConvDeterministicRestart.py
+        --binary $<TARGET_FILE:testAllLayerAPI> --output ${CONV_DETERMINISTIC_TEST_OUTPUT} ${_CONV_MOUNT_ARGS})
+    set_tests_properties(all_layer_training_api_restart PROPERTIES
+        LABELS "unit;gradient;training;checkpoint" TIMEOUT 180 SKIP_RETURN_CODE 77)
 endif()

@@ -29,6 +29,7 @@
  */
 
 #include "../ml/layer.hpp"
+#include "../ml/masked_cross_entropy.hpp"
 #include "../cpp/juzhen.hpp"
 #include "../external/httplib.h"
 
@@ -87,49 +88,7 @@ static void copy_linear_weights(LinearLayer<FLOAT>& dst,
     dst.b() = Matrix<FLOAT>(as_host(src.b()));
 }
 
-// Column-wise max of a (V, N) matrix -> (1, N); used for a stable softmax.
-template <class D>
-static Matrix<D> col_max(const Matrix<D>& input) {
-    return reduce(
-        [] __GPU_CPU__(float* v, float* vdes, int lenv, int) {
-            float m = -1e30f;
-            for (int i = 0; i < lenv; i++) m = m > v[i] ? m : v[i];
-            vdes[0] = m;
-        }, input, 0, 1);
-}
-
-// Masked, 1/t-weighted softmax cross-entropy (see demo_discretediffusion.cu).
-template <class D>
-class MaskedCELayer : public Layer<D> {
-    Matrix<D> output;   // (V, N) one-hot true characters
-    Matrix<D> wrow;     // (1, N) per-column weights (0 for unmasked positions)
-    Matrix<D> oneK1;    // (V, 1) ones, for broadcasting a row over all V rows
-
-public:
-    MaskedCELayer(size_t nb, Matrix<D>&& target, Matrix<D>&& weights)
-        : Layer<D>(2, 2, nb),
-          output(std::move(target)),
-          wrow(std::move(weights)),
-          oneK1("oneK1", output.num_row(), 1) {
-        oneK1.ones();
-    }
-
-    Matrix<D> grad(const Matrix<D>& input) const override {
-        auto mx = col_max(input);
-        auto E = exp(input - oneK1 * mx);
-        auto Z = oneK1 * sum(E, 0);
-        auto softmax = E / std::move(Z);
-        return hadmd(softmax - output, oneK1 * wrow);
-    }
-
-    void eval(const Matrix<D>& input) override {
-        auto mx = col_max(input);
-        auto lse = log(sum(exp(input - oneK1 * mx), 0)) + mx;
-        auto dot = sum(hadmd(input, output), 0);
-        auto ce = lse - dot;
-        Layer<D>::val = sum(hadmd(wrow, ce), 1);
-    }
-};
+// Shared masked loss supports both legacy and gradient-only training.
 
 static string embedded_corpus() {
     return

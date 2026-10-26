@@ -5,6 +5,8 @@
 
 #include "../ml/layer.hpp"
 #include <iostream>
+#include <cmath>
+#include <stdexcept>
 
 using namespace Juzhen;
 using namespace std;
@@ -21,6 +23,7 @@ public:
     static constexpr int H = 32;
     static constexpr int W = 32;
     static constexpr int d = H * W;
+    static constexpr int input_channels = 3; // grayscale image + sin/cos time maps
 
     ConvLayer enc1;
     ConvLayer enc2;
@@ -33,7 +36,7 @@ public:
     Matrix<float> c_cat;
 
     explicit UNetScore(int bs)
-                : enc1(bs,   3, 32, 32,  16, 3, 3, 1, 1, true),
+                : enc1(bs, input_channels, H, W,  16, 3, 3, 1, 1, true),
                     enc2(bs,  16, 32, 32,  32, 3, 3, 1, 2, true),
                     up1 (bs,  32, 16, 16,  16, 4, 4, 1, 2, true),
                     dec1(bs,  32, 32, 32,  16, 3, 3, 1, 1, true),
@@ -71,17 +74,40 @@ int compute() {
     cout << "UNetScore created" << endl;
     
     cout << "Creating input..." << endl;
-    // Input should be 3-channel 32x32 + time embedding (2 channels) = 5 channels total
-    Matrix<float> inp("inp", 5 * 32 * 32, batchsize);
-    inp = Matrix<float>::randn(5 * 32 * 32, batchsize) * 0.1f;
+    // Match the MNIST score network: one grayscale channel and two time maps.
+    Matrix<float> inp("inp", UNetScore::input_channels * UNetScore::d, batchsize);
+    inp = Matrix<float>::randn(UNetScore::input_channels * UNetScore::d, batchsize) * 0.1f;
     cout << "Input created: " << inp.num_row() << " x " << inp.num_col() << endl;
     
+    // The old fixture supplied five channels to a three-channel convolution.
+    // Reject extra channels instead of silently ignoring their values.
+    bool rejected_extra_channels = false;
+    try {
+        net.enc1.eval(Matrix<float>::zeros((UNetScore::input_channels + 2) * UNetScore::d, batchsize));
+    } catch (const std::invalid_argument&) {
+        rejected_extra_channels = true;
+    }
+    if (!rejected_extra_channels) {
+        cerr << "Extra input channels were not rejected" << endl;
+        return 1;
+    }
+
     cout << "Calling fwd..." << endl;
     const auto& out = net.fwd(inp);
     cout << "Fwd completed" << endl;
     cout << "Output shape: " << out.num_row() << " x " << out.num_col() << endl;
     
-    cout << "Test passed!" << endl;
+    if (out.num_row() != UNetScore::d || out.num_col() != size_t(batchsize)) {
+        cerr << "Unexpected U-Net output shape" << endl;
+        return 1;
+    }
+    for (size_t col = 0; col < out.num_col(); ++col)
+        for (size_t row = 0; row < out.num_row(); ++row)
+            if (!std::isfinite(out.elem(row, col))) {
+                cerr << "Non-finite U-Net output" << endl;
+                return 1;
+            }
+    cout << "Test passed: valid three-channel forward and extra-channel rejection" << endl;
     return 0;
 }
 
