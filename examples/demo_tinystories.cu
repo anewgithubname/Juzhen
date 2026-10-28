@@ -38,6 +38,7 @@
  */
 
 #include "../ml/layer.hpp"
+#include "../ml/optimizer.hpp"
 #include "../cpp/juzhen.hpp"
 
 #include <algorithm>
@@ -409,7 +410,11 @@ int compute() {
         auto best_blocks = make_blocks(1);
         LinearLayer<FLOAT> best_proj(V, cfg.d_model, 1);
 
-        list<Layer<FLOAT>*> trainnn = build_net(blocks, embed, proj);
+        Sequential<FLOAT> trainnn(build_net(blocks, embed, proj));
+        AdamWOptions optimizer_options;
+        optimizer_options.lr = lr_at(0);
+        optimizer_options.weight_decay = 0.0f; // Preserve the existing Adam training rule.
+        AdamW<FLOAT> optimizer(trainnn.parameters(), optimizer_options);
 
         auto save_best = [&]() {
             copy_linear_weights(best_embed, embed);
@@ -422,12 +427,6 @@ int compute() {
             for (int i = 0; i < cfg.num_blocks; ++i) copy_tf_weights(*blocks[i], *best_blocks[i]);
         };
         save_best();
-
-        auto set_all_lr = [&](float lr) {
-            embed.adamWstate().alpha = lr; embed.adambstate().alpha = lr;
-            proj.adamWstate().alpha  = lr; proj.adambstate().alpha  = lr;
-            for (int i = 0; i < cfg.num_blocks; ++i) blocks[i]->set_lr(lr);
-        };
 
         Matrix<float> xids("xids", 1, N), yids("yids", 1, N);
         auto fill_ids = [&](const vector<uint16_t>& corpus, const vector<long>& offs) {
@@ -473,18 +472,18 @@ int compute() {
         int best_step = 0, stale = 0, last_ckpt_step = 0;
 
         for (int step = 0; step < steps; ++step) {
-            set_all_lr(lr_at(step));
+            optimizer.set_lr(lr_at(step));
 
             for (int b = 0; b < batch; ++b) offs[b] = pick(global_rand_gen);
             fill_ids(train_ids, offs);
             auto X = make_X(xids);
             auto Y = make_Y(yids);
 
-            forward(trainnn, X);
+            optimizer.zero_grad();
+            const auto& logits = trainnn.eval(X);
             LogisticLayer<FLOAT> loss(N, std::move(Y));
-            trainnn.push_front(&loss);
-            backward_update(trainnn, X);
-            trainnn.pop_front();
+            trainnn.backward(loss.backward(logits, Matrix<FLOAT>::ones(1, 1)));
+            optimizer.step();
 
             if (step % log_every == 0 || step == steps - 1) {
                 auto [va_l, va_a] = eval_val();

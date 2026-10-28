@@ -29,6 +29,7 @@
  */
 
 #include "../ml/layer.hpp"
+#include "../ml/optimizer.hpp"
 #include "../ml/masked_cross_entropy.hpp"
 #include "../cpp/juzhen.hpp"
 #include "../external/httplib.h"
@@ -375,7 +376,11 @@ int compute() {
             net.push_back(&emb);
             return net;
         };
-        list<Layer<FLOAT>*> trainnn = build_net(blocks, embed, proj);
+        Sequential<FLOAT> trainnn(build_net(blocks, embed, proj));
+        AdamWOptions optimizer_options;
+        optimizer_options.lr = lr_at(0);
+        optimizer_options.weight_decay = 0.0f; // Preserve the existing Adam training rule.
+        AdamW<FLOAT> optimizer(trainnn.parameters(), optimizer_options);
 
         auto save_best = [&]() {
             copy_linear_weights(best_embed, embed);
@@ -388,12 +393,6 @@ int compute() {
             for (int i = 0; i < cfg.num_blocks; ++i) copy_tf_weights(*blocks[i], *best_blocks[i]);
         };
         save_best();
-
-        auto set_all_lr = [&](float lr) {
-            embed.adamWstate().alpha = lr; embed.adambstate().alpha = lr;
-            proj.adamWstate().alpha  = lr; proj.adambstate().alpha  = lr;
-            for (int i = 0; i < cfg.num_blocks; ++i) blocks[i]->set_lr(lr);
-        };
 
         auto fill_batch = [&](const vector<int>& offs, const vector<float>& tlvl,
                               Matrix<float>& X, Matrix<float>& Y, Matrix<float>& W,
@@ -467,18 +466,18 @@ int compute() {
         int   best_step = 0, stale = 0;
 
         for (int step = 0; step < steps; ++step) {
-            set_all_lr(lr_at(step));
+            optimizer.set_lr(lr_at(step));
 
             for (int b = 0; b < batch; ++b) offs[b] = pick(global_rand_gen);
             stratified_t(tlvl);
             fill_batch(offs, tlvl, Xh, Yh, Wh, true_idx, masked);
 
             auto X = Matrix<FLOAT>(Xh);
-            forward(trainnn, X);
+            optimizer.zero_grad();
+            const auto& logits = trainnn.eval(X);
             MaskedCELayer<FLOAT> loss(N, Matrix<FLOAT>(Yh), Matrix<FLOAT>(Wh));
-            trainnn.push_front(&loss);
-            backward_update(trainnn, X);
-            trainnn.pop_front();
+            trainnn.backward(loss.backward(logits, Matrix<FLOAT>::ones(1, 1)));
+            optimizer.step();
 
             if (step % log_every == 0 || step == steps - 1) {
                 auto [tr_l, tr_bpc, tr_a] = eval_batch(train_lo, train_windows, 4);

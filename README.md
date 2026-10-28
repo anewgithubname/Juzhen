@@ -174,7 +174,15 @@ Only one GPU backend may be enabled at a time.
 
 ### Running examples
 
+Neural-network training examples separate gradient calculation from parameter
+updates: `zero_grad()` -> `eval()` -> `backward()` -> `step()`. Start with
+[`demo_training`](examples/demo_training.cu) and the [training API guide](docs/training-api.md).
+The migrated demos set weight decay to zero to retain their original Adam behavior.
+
 ```bash
+# small regression using the explicit training API
+./build_cpu/demo_training
+
 # basic
 ./build/helloworld
 

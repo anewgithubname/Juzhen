@@ -10,6 +10,7 @@ existing layer calls that update weights migrate to `layer.backward_update(...)`
 ```cpp
 #include "ml/layer.hpp"
 #include "ml/optimizer.hpp"
+using namespace Juzhen;
 
 LinearLayer<float> linear(1, 2, batch_size);
 LossLayer<float> loss(batch_size, targets);
@@ -63,9 +64,11 @@ Convolution inputs, upstream gradients and JVP tangents must match the configure
 dimensions. GPU convolution paths require non-transposed tensors, including
 weights and biases; CPU convolution supports matrix transpose views.
 
-`AdamW` supports CPU `float` and CUDA `CUDAfloat`, parameter freezing, shared
-parameter registrations, learning-rate changes and optional global gradient
-clipping. It borrows existing layer Adam states so checkpoint storage stays
+`AdamW` supports CPU `float`, CUDA `CUDAfloat`, Metal `MPSfloat`, and ROCm
+`ROCMfloat`, with parameter freezing, shared parameter registrations,
+learning-rate changes and optional global gradient clipping. CPU and CUDA use
+their optimized updates; Metal and ROCm use device matrix operations. The latter
+two backends have not been exercised on hardware for this migration. It borrows existing layer Adam states so checkpoint storage stays
 compatible. Weight decay excludes parameters registered with `decay=false`.
 
 The `demo_training` target provides a complete regression example.
@@ -101,3 +104,39 @@ instances to `LayerNormLayer<D>`, and replace wrapper member access such as
 `normalization.norm.gamma` with `normalization.gamma`. Parameter and optimizer
 checkpoint names remain unchanged, including the normalization fields inside
 Transformer checkpoints.
+
+## Examples and custom networks
+
+Layer-based training demos now separate gradient calculation from updates.
+They explicitly set `options.weight_decay = 0` to preserve their original Adam
+training rule; `AdamWOptions` otherwise defaults to nonzero weight decay.
+Existing learning-rate schedules use `optimizer.set_lr(...)`.
+
+When targets change every batch, a persistent prediction network can be combined
+with a temporary loss head:
+
+```cpp
+Sequential<float> network{&linear};
+AdamWOptions options;
+options.weight_decay = 0;
+AdamW<float> optimizer(network.parameters(), options);
+
+// inputs and targets remain alive through this step.
+optimizer.zero_grad();
+const auto& prediction = network.eval(inputs);
+LossLayer<float> loss(inputs.num_col(), targets);
+network.backward(loss.backward(prediction, Matrix<float>::ones(1, 1)));
+optimizer.step();
+```
+
+Call `loss.eval(prediction)` to read the loss via `loss.value()` when needed.
+The loss backward uses the supplied prediction directly and does not repeat the
+network's forward pass. Finish backward before running validation or inference
+through the same layers, because those calls replace the forward caches.
+
+The CNN rectified-flow example has skip connections and therefore keeps its
+explicit graph traversal: `net.eval(input)`, `net.backward(input, upstream)` and
+`optimizer.step()`. Its backward method accumulates the two skip-branch gradients
+before propagating into each encoder layer. `demo_word2vec` and the standalone
+WebAssembly examples use their own matrix calculations rather than the layer
+training API. `demo_gui` remains an optional source with external GUI dependencies.

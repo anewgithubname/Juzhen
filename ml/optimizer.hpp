@@ -29,6 +29,20 @@ static __global__ void explicit_adamw_kernel(
 }
 #endif
 
+namespace optimizer_detail {
+// Portable device implementation: matrix operations respect each operand's
+// logical transpose layout and leave the accumulated gradient intact. The
+// caller validates all parameters first and advances the iteration afterwards.
+template<class D> void adamw_matrix_update(Matrix<D>& w,const Matrix<D>& g,
+    adam_state<D>& a,float bc1,float bc2,float decay) {
+    a.m=a.beta1*a.m+(1-a.beta1)*g;
+    a.v=a.beta2*a.v+(1-a.beta2)*square(g);
+    auto update=(a.alpha*bc1)*a.m/(sqrt(bc2*a.v)+a.eps);
+    w.scale(1-a.alpha*decay);
+    w-=update;
+}
+} // namespace optimizer_detail
+
 // Adam states are borrowed from layers, retaining the existing checkpoint
 // representation. Shared parameters must reuse the same ParameterRef storage.
 template<class D> class AdamW {
@@ -67,7 +81,13 @@ public:
 #ifdef CUDA
                       || std::is_same_v<D,CUDAfloat>
 #endif
-                      ,"Explicit AdamW currently supports CPU float and CUDAfloat");
+#ifdef APPLE_SILICON
+                      || std::is_same_v<D,MPSfloat>
+#endif
+#ifdef ROCM_HIP
+                      || std::is_same_v<D,ROCMfloat>
+#endif
+                      ,"Explicit AdamW requires a supported float backend");
         valid_options(options);
         std::unordered_map<Matrix<D>*,size_t> unique;
         for(auto p:parameters) {
@@ -130,7 +150,7 @@ public:
                 CudaErrorCheck(cudaGetLastError());
             } else
 #endif
-            {
+            if constexpr(std::is_same_v<D,float>) {
                 for(size_t j=0;j<p.value->num_col();++j)for(size_t i=0;i<p.value->num_row();++i) {
                     const float g=p.grad().elem(i,j);
                     const float m=a.beta1*a.m.elem(i,j)+(1-a.beta1)*g;
@@ -139,6 +159,7 @@ public:
                     p.value->elem(i,j)=p.value->elem(i,j)*(1-a.alpha*decay)-a.alpha*(m*bc1)/(std::sqrt(v*bc2)+a.eps);
                 }
             }
+            else optimizer_detail::adamw_matrix_update(*p.value,p.grad(),a,bc1,bc2,decay);
             ++a.iteration;++updated;
         }
         return updated;
