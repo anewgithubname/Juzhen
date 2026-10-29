@@ -87,6 +87,11 @@ inline void Memory<CUDAfloat>::_free(CUDAfloat* ptr) {
 __global__ void copyKernel(float* d_out, float* d_in, size_t numElements,
                            size_t numrow, size_t rowstart, size_t rowend,
                            size_t colstart, size_t colend, bool direction);
+__global__ void copySliceAssignKernel(float* dst, const float* src,
+                                       size_t rows, size_t cols,
+                                       size_t dst_numrow, bool dst_transpose,
+                                       size_t src_numrow, bool src_transpose,
+                                       size_t rstart, size_t cstart);
 __global__ void copyDexKernel(float* d_out, const float* d_in, const size_t* d_rowidx,
                                const size_t* d_colidx, size_t num_rows_out,
                                size_t num_cols_out, size_t numrow_in,
@@ -214,18 +219,27 @@ class Matrix<CUDAfloat> {
 
     void slice(size_t rstart, size_t rend, size_t cstart, size_t cend,
                const Matrix<CUDAfloat>& M) {
-        size_t numElem = (rend - rstart) * (cend - cstart);
-        if (transpose) {
-            size_t tmp = rstart;
-            rstart = cstart;
-            cstart = tmp;
-            tmp = rend;
-            rend = cend;
-            cend = tmp;
+        if (rstart > rend || cstart > cend || rend > num_row() || cend > num_col())
+            throw std::out_of_range("CUDA slice assignment indices out of range");
+        const size_t rows = rend - rstart, cols = cend - cstart;
+        if (M.num_row() != rows || M.num_col() != cols)
+            throw std::invalid_argument("CUDA slice assignment dimensions do not match target range");
+        const size_t limit = std::numeric_limits<size_t>::max();
+        if ((cols && rows > limit / cols) || rows * cols > limit / sizeof(float))
+            throw std::length_error("CUDA slice assignment size overflows");
+        const size_t count = rows * cols;
+        if (!count) return;
+        // T() shares storage; preserve the source before any overlapping write.
+        if (elements.get() == M.elements.get()) {
+            Matrix<CUDAfloat> snapshot(M);
+            slice(rstart, rend, cstart, cend, snapshot);
+            return;
         }
-        copyKernel<<<cudaConfig(numElem)>>>(
-            (float*)M.elements.get(), (float*)elements.get(), numElem, numrow,
-            rstart, rend, cstart, cend, false);
+        const unsigned blocks = unsigned(std::min(size_t(4096), (count - 1) / 256 + 1));
+        copySliceAssignKernel<<<blocks, 256>>>(
+            (float*)elements.get(), (const float*)M.elements.get(), rows, cols,
+            numrow, transpose, M.numrow, M.transpose, rstart, cstart);
+        CudaErrorCheck(cudaGetLastError());
     }
 
     Matrix<CUDAfloat> rows(size_t rstart, size_t rend) const {
@@ -337,10 +351,15 @@ struct GPUSampler {
     }
 
     void setseed(int seed) {
-        // set seed
-        stats = curandSetGeneratorOffset(gen, seed);
+        stats = curandSetPseudoRandomGeneratorSeed(gen, seed);
         if (stats != CURAND_STATUS_SUCCESS) {
             LOG_ERROR("curand set seed failed");
+            ERROR_OUT;
+        }
+        // A reset starts at the beginning even after an earlier nonzero offset.
+        stats = curandSetGeneratorOffset(gen, 0);
+        if (stats != CURAND_STATUS_SUCCESS) {
+            LOG_ERROR("curand reset generator offset failed");
             ERROR_OUT;
         }
     }

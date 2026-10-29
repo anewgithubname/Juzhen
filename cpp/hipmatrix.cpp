@@ -67,7 +67,9 @@ Matrix<ROCMfloat>::Matrix(const char* name, size_t numrow, size_t numcol, int tr
 }
 
 Matrix<ROCMfloat>::Matrix(const Matrix<float>& M)
-    : Matrix<ROCMfloat>(M.get_name().c_str(), M.num_row(), M.num_col(), M.get_transpose()) {
+    // The raw buffer uses physical dimensions; logical dimensions already
+    // account for transpose and would swap a non-square input a second time.
+    : Matrix<ROCMfloat>(M.get_name().c_str(), M.numrow, M.numcol, M.get_transpose()) {
     Juzhen::RocmMemcpyH2D(reinterpret_cast<float*>(elements.get()), M.data(), M.num_row() * M.num_col());
 }
 

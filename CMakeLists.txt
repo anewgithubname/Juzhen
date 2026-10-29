@@ -455,6 +455,17 @@ GENERATE_PROJ(testSecurityIO tests/testSecurityIO.cu)
 GENERATE_PROJ(testGather tests/testGather.cu)
 add_test(NAME indexed_gather COMMAND testGather)
 set_tests_properties(indexed_gather PROPERTIES LABELS "unit;indexing" ENVIRONMENT "NVIDIA_TF32_OVERRIDE=0;NVIDIA_TF32=0")
+# CUDA RNG reseeding and logical slice assignment, with independent references.
+GENERATE_PROJ(testCUDAMatrixContracts tests/testCUDAMatrixContracts.cu)
+add_test(NAME cuda_rng_reseed COMMAND testCUDAMatrixContracts)
+set_tests_properties(cuda_rng_reseed PROPERTIES
+    LABELS "unit;cuda;random" SKIP_RETURN_CODE 77 TIMEOUT 120
+    ENVIRONMENT "JUZHEN_CUDA_CONTRACT_CASE=seed")
+add_test(NAME cuda_slice_assignment COMMAND testCUDAMatrixContracts)
+set_tests_properties(cuda_slice_assignment PROPERTIES
+    LABELS "unit;cuda;indexing" SKIP_RETURN_CODE 77 TIMEOUT 120
+    ENVIRONMENT "JUZHEN_CUDA_CONTRACT_CASE=slice")
+
 set(SECURITY_TEST_OUTPUT "" CACHE PATH "Output directory for file-validation fixtures and results")
 if(SECURITY_TEST_OUTPUT)
     add_test(NAME security_io COMMAND python3 ${CMAKE_SOURCE_DIR}/tests/testSecurityIO.py $<TARGET_FILE:testSecurityIO> ${SECURITY_TEST_OUTPUT})

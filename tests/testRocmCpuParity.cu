@@ -55,6 +55,40 @@ int CheckFinite(const M& m, const char* name) {
 int compute() {
     int ret = 0;
 
+    // Upload CPU transpose views directly: uploading first and then calling
+    // the device's T() does not exercise the host-to-device constructor.
+    M upload_wide("upload_wide", {{1, 2, 3}, {4, 5, 6}});
+    M upload_tall("upload_tall", {{1, 4}, {2, 5}, {3, 6}});
+    auto check_upload = [&ret](const M& source, const M& expected, const char* label) {
+        auto check_values = [&ret, &expected, label](const M& got) {
+            if (got.num_row() != expected.num_row() || got.num_col() != expected.num_col()) {
+                LOG_ERROR("{} upload shape mismatch: got {}x{}, expected {}x{}",
+                          label, got.num_row(), got.num_col(),
+                          expected.num_row(), expected.num_col());
+                ++ret;
+                return;
+            }
+            for (size_t r = 0; r < expected.num_row(); ++r) {
+                for (size_t c = 0; c < expected.num_col(); ++c) {
+                    if (got.elem(r, c) != expected.elem(r, c)) {
+                        LOG_ERROR("{} upload value mismatch at ({}, {}): got {}, expected {}",
+                                  label, r, c, got.elem(r, c), expected.elem(r, c));
+                        ++ret;
+                    }
+                }
+            }
+        };
+        CM uploaded(source);
+        M restored = uploaded.to_host();
+        check_values(restored);
+        // A downloaded transpose view must remain valid input to another upload.
+        check_values(CM(restored).to_host());
+    };
+    check_upload(upload_wide, upload_wide, "wide");
+    check_upload(upload_tall, upload_tall, "tall");
+    check_upload(upload_wide.T(), upload_tall, "wide transpose");
+    check_upload(upload_tall.T(), upload_wide, "tall transpose");
+
     // Non-square matrices expose accidental raw-buffer arithmetic across
     // transpose views. Exercise both layouts and every ownership overload.
     M layout_a("layout_a", {{1, -2, 3}, {4, 5, -6}});
