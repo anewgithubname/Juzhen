@@ -491,38 +491,86 @@ Matrix<D> Matrix<D>::eleminv(double l) const {
 // Helpers for the existing three-native-int matrix format. Keep stream reads
 // composable: validate available payload when seekable, but preserve pipe input.
 namespace matrix_io_detail {
+
+// log the reason and quit the program
 [[noreturn]] inline void fail(const char* reason) {
     LOG_ERROR("matrix/data read: {}", reason);
     ERROR_OUT;
 }
-struct Header { size_t rows,cols;int transpose; };
+
+// the three ints at the start of every .matrix file
+struct Header {
+    size_t rows;
+    size_t cols;
+    int transpose;  // 0 or 1
+};
+
+// read and sanity-check the header
 inline Header header(FILE* file) {
-    if(!file)fail("null input stream");
+    if (!file)
+        fail("null input stream");
+
     int fields[3];
-    if(std::fread(fields,sizeof(int),3,file)!=3)fail("incomplete matrix header");
-    if(fields[0]<0 || fields[1]<0 || (fields[2]!=0 && fields[2]!=1))fail("invalid matrix header");
-    return {size_t(fields[0]),size_t(fields[1]),fields[2]};
+    if (std::fread(fields, sizeof(int), 3, file) != 3)
+        fail("incomplete matrix header");
+
+    const int rows = fields[0], cols = fields[1], transpose = fields[2];
+    if (rows < 0 || cols < 0 || (transpose != 0 && transpose != 1))
+        fail("invalid matrix header");
+
+    return {size_t(rows), size_t(cols), transpose};
 }
-template<class D> size_t count(size_t rows,size_t cols) {
-    const size_t limit=std::min(std::numeric_limits<size_t>::max(),size_t(std::numeric_limits<std::ptrdiff_t>::max()))/sizeof(D);
-    if(cols && rows>limit/cols)fail("matrix byte size overflows");
-    return rows*cols;
+
+// rows * cols, failing if the matrix would be too big to address in bytes
+template <class D>
+size_t count(size_t rows, size_t cols) {
+    const size_t max_bytes = std::min(std::numeric_limits<size_t>::max(),
+                                      size_t(std::numeric_limits<std::ptrdiff_t>::max()));
+    const size_t max_elements = max_bytes / sizeof(D);
+    if (cols && rows > max_elements / cols)
+        fail("matrix byte size overflows");
+    return rows * cols;
 }
-inline bool enough_bytes(FILE* file,size_t bytes) {
-    const long position=std::ftell(file);
-    if(position<0)return true; // e.g. a pipe; fread below still checks every item.
-    if(std::fseek(file,0,SEEK_END)!=0){std::clearerr(file);return true;}
-    const long end=std::ftell(file);
-    if(std::fseek(file,position,SEEK_SET)!=0)fail("cannot restore input position");
-    return end>=position && size_t(end-position)>=bytes;
+
+// does the file have at least `bytes` left after the current position?
+// Streams that cannot seek (e.g. a pipe) are assumed fine; the caller's
+// fread still checks every item.
+inline bool enough_bytes(FILE* file, size_t bytes) {
+    const long position = std::ftell(file);
+    if (position < 0)
+        return true;
+
+    if (std::fseek(file, 0, SEEK_END) != 0) {
+        std::clearerr(file);
+        return true;
+    }
+    const long end = std::ftell(file);
+
+    // go back to where we were
+    if (std::fseek(file, position, SEEK_SET) != 0)
+        fail("cannot restore input position");
+
+    return end >= position && size_t(end - position) >= bytes;
 }
-template<class D> size_t payload(FILE* file,size_t rows,size_t cols) {
-    size_t n=count<D>(rows,cols);
-    if(!enough_bytes(file,n*sizeof(D)))fail("truncated matrix payload");
+
+// number of elements to read, after checking the file really holds them
+template <class D>
+size_t payload(FILE* file, size_t rows, size_t cols) {
+    const size_t n = count<D>(rows, cols);
+    if (!enough_bytes(file, n * sizeof(D)))
+        fail("truncated matrix payload");
     return n;
 }
-struct FileCloser {void operator()(FILE* file)const{if(file)std::fclose(file);}};
-}
+
+// deleter so std::unique_ptr<FILE, FileCloser> closes the file automatically
+struct FileCloser {
+    void operator()(FILE* file) const {
+        if (file)
+            std::fclose(file);
+    }
+};
+
+}  // namespace matrix_io_detail
 
 template <class D>
 void read(FILE* file,Matrix<D>& destination) {
