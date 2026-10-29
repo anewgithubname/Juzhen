@@ -7,6 +7,8 @@
 #define EIGEN_USE_BLAS  // route Eigen through the same BLAS as juzhen
 #endif
 #define EIGEN_NO_CUDA
+// This comparison uses CPU Eigen even when Juzhen is built with HIP.
+#define EIGEN_NO_HIP
 
 #include "../cpp/juzhen.hpp"
 #include "../external/Eigen3/include/eigen3/Eigen/Dense"
