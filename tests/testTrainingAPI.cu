@@ -329,7 +329,7 @@ template<class D> void clipping_checks(){
 // Independent FP64 LayerNorm reference covers both the CUDA warp path and
 // narrow/transposed fallbacks. Tiny variance also exercises cancellation.
 template<class D> void normalization_checks() {
-    auto near=[](const Matrix<float>& actual,const Matrix<float>& expected,const std::string& label){
+    auto check_reference=[](const Matrix<float>& actual,const Matrix<float>& expected,const std::string& label){
         double error2=0,reference2=0,max_error=0;
         for(size_t j=0;j<actual.num_col();++j)for(size_t i=0;i<actual.num_row();++i){
             double e=double(actual.elem(i,j))-expected.elem(i,j);
@@ -357,18 +357,18 @@ template<class D> void normalization_checks() {
             Matrix<D> input=transposed?Matrix<D>(transpose_storage(x)).T():Matrix<D>(x);
             Matrix<D> upstream=transposed?Matrix<D>(transpose_storage(up)).T():Matrix<D>(up);
             const std::string label="LayerNorm dim="+std::to_string(d)+" pattern="+std::to_string(pattern)+" transposed="+std::to_string(transposed);
-            near(host(layer.forward(input)),y,label+" forward");auto cache=host(layer.cached_xhat);
+            check_reference(host(layer.forward(input)),y,label+" forward");auto cache=host(layer.cached_xhat);
             // Parameter gradients differentiate the actual cached normalization.
             // For tiny variance, rounding its mean can dominate a small gamma
             // gradient; check that reduction independently against this cache.
             Matrix<float> cached_dg("cached gamma reference",d,1);
             for(int i=0;i<d;++i){double v=0;for(int c=0;c<n;++c)v+=double(up.elem(i,c))*cache.elem(i,c);cached_dg.elem(i,0)=float(v);}
-            near(host(layer.backward(Matrix<D>(upstream))),dx,label+" input gradient");
-            near(host(refs[0].grad()),cached_dg,label+" gamma gradient");near(host(refs[1].grad()),db,label+" beta gradient");
-            layer.backward(Matrix<D>(upstream));near(host(refs[0].grad()),cached_dg*2,label+" accumulated gamma");near(host(refs[1].grad()),db*2,label+" accumulated beta");
+            check_reference(host(layer.backward(Matrix<D>(upstream))),dx,label+" input gradient");
+            check_reference(host(refs[0].grad()),cached_dg,label+" gamma gradient");check_reference(host(refs[1].grad()),db,label+" beta gradient");
+            layer.backward(Matrix<D>(upstream));check_reference(host(refs[0].grad()),cached_dg*2,label+" accumulated gamma");check_reference(host(refs[1].grad()),db*2,label+" accumulated beta");
             close(host(layer.gamma),g,label+" deferred gamma",0);close(host(layer.beta),b,label+" deferred beta",0);
             close(host(layer.cached_xhat),cache,label+" preserved cache",0);close(host(input),x,label+" preserved input",0);close(host(upstream),up,label+" preserved upstream",0);
-            opt.zero_grad();layer.trainable=false;near(host(layer.backward(Matrix<D>(upstream))),dx,label+" frozen input gradient");require(!refs[0].has_grad()&&!refs[1].has_grad(),label+" frozen parameters");
+            opt.zero_grad();layer.trainable=false;check_reference(host(layer.backward(Matrix<D>(upstream))),dx,label+" frozen input gradient");require(!refs[0].has_grad()&&!refs[1].has_grad(),label+" frozen parameters");
         }
     }
 #ifdef CUDA
