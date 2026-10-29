@@ -29,6 +29,8 @@
  */
 
 #include "../ml/layer.hpp"
+#include "../ml/optimizer.hpp"
+#include "../ml/masked_cross_entropy.hpp"
 #include "../cpp/juzhen.hpp"
 #include "../external/httplib.h"
 
@@ -87,49 +89,7 @@ static void copy_linear_weights(LinearLayer<FLOAT>& dst,
     dst.b() = Matrix<FLOAT>(as_host(src.b()));
 }
 
-// Column-wise max of a (V, N) matrix -> (1, N); used for a stable softmax.
-template <class D>
-static Matrix<D> col_max(const Matrix<D>& input) {
-    return reduce(
-        [] __GPU_CPU__(float* v, float* vdes, int lenv, int) {
-            float m = -1e30f;
-            for (int i = 0; i < lenv; i++) m = m > v[i] ? m : v[i];
-            vdes[0] = m;
-        }, input, 0, 1);
-}
-
-// Masked, 1/t-weighted softmax cross-entropy (see demo_discretediffusion.cu).
-template <class D>
-class MaskedCELayer : public Layer<D> {
-    Matrix<D> output;   // (V, N) one-hot true characters
-    Matrix<D> wrow;     // (1, N) per-column weights (0 for unmasked positions)
-    Matrix<D> oneK1;    // (V, 1) ones, for broadcasting a row over all V rows
-
-public:
-    MaskedCELayer(size_t nb, Matrix<D>&& target, Matrix<D>&& weights)
-        : Layer<D>(2, 2, nb),
-          output(std::move(target)),
-          wrow(std::move(weights)),
-          oneK1("oneK1", output.num_row(), 1) {
-        oneK1.ones();
-    }
-
-    Matrix<D> grad(const Matrix<D>& input) const override {
-        auto mx = col_max(input);
-        auto E = exp(input - oneK1 * mx);
-        auto Z = oneK1 * sum(E, 0);
-        auto softmax = E / std::move(Z);
-        return hadmd(softmax - output, oneK1 * wrow);
-    }
-
-    void eval(const Matrix<D>& input) override {
-        auto mx = col_max(input);
-        auto lse = log(sum(exp(input - oneK1 * mx), 0)) + mx;
-        auto dot = sum(hadmd(input, output), 0);
-        auto ce = lse - dot;
-        Layer<D>::val = sum(hadmd(wrow, ce), 1);
-    }
-};
+// Shared masked loss supports both legacy and gradient-only training.
 
 static string embedded_corpus() {
     return
@@ -416,7 +376,11 @@ int compute() {
             net.push_back(&emb);
             return net;
         };
-        list<Layer<FLOAT>*> trainnn = build_net(blocks, embed, proj);
+        Sequential<FLOAT> trainnn(build_net(blocks, embed, proj));
+        AdamWOptions optimizer_options;
+        optimizer_options.lr = lr_at(0);
+        optimizer_options.weight_decay = 0.0f; // Preserve the existing Adam training rule.
+        AdamW<FLOAT> optimizer(trainnn.parameters(), optimizer_options);
 
         auto save_best = [&]() {
             copy_linear_weights(best_embed, embed);
@@ -429,12 +393,6 @@ int compute() {
             for (int i = 0; i < cfg.num_blocks; ++i) copy_tf_weights(*blocks[i], *best_blocks[i]);
         };
         save_best();
-
-        auto set_all_lr = [&](float lr) {
-            embed.adamWstate().alpha = lr; embed.adambstate().alpha = lr;
-            proj.adamWstate().alpha  = lr; proj.adambstate().alpha  = lr;
-            for (int i = 0; i < cfg.num_blocks; ++i) blocks[i]->set_lr(lr);
-        };
 
         auto fill_batch = [&](const vector<int>& offs, const vector<float>& tlvl,
                               Matrix<float>& X, Matrix<float>& Y, Matrix<float>& W,
@@ -508,18 +466,18 @@ int compute() {
         int   best_step = 0, stale = 0;
 
         for (int step = 0; step < steps; ++step) {
-            set_all_lr(lr_at(step));
+            optimizer.set_lr(lr_at(step));
 
             for (int b = 0; b < batch; ++b) offs[b] = pick(global_rand_gen);
             stratified_t(tlvl);
             fill_batch(offs, tlvl, Xh, Yh, Wh, true_idx, masked);
 
             auto X = Matrix<FLOAT>(Xh);
-            forward(trainnn, X);
+            optimizer.zero_grad();
+            const auto& logits = trainnn.eval(X);
             MaskedCELayer<FLOAT> loss(N, Matrix<FLOAT>(Yh), Matrix<FLOAT>(Wh));
-            trainnn.push_front(&loss);
-            backward_update(trainnn, X);
-            trainnn.pop_front();
+            trainnn.backward(loss.backward(logits, Matrix<FLOAT>::ones(1, 1)));
+            optimizer.step();
 
             if (step % log_every == 0 || step == steps - 1) {
                 auto [tr_l, tr_bpc, tr_a] = eval_batch(train_lo, train_windows, 4);

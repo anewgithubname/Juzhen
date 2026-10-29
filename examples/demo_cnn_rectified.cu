@@ -22,6 +22,7 @@
 
 #include "../cpp/juzhen.hpp"
 #include "../ml/layer.hpp"
+#include "../ml/optimizer.hpp"
 
 #include <chrono>
 #include <cmath>
@@ -252,18 +253,12 @@ public:
           cat1("cat1", ch1 * 2 * d32, bs)
     {}
 
-    void set_lr(float alpha) {
-        for (auto* L : {(Layer<FLOAT>*)&enc1, (Layer<FLOAT>*)&enc2,
-                        (Layer<FLOAT>*)&enc3, (Layer<FLOAT>*)&mid,
-                        (Layer<FLOAT>*)&up2,  (Layer<FLOAT>*)&dec2,
-                        (Layer<FLOAT>*)&up1,  (Layer<FLOAT>*)&dec1,
-                        (Layer<FLOAT>*)&head}) {
-            L->adamWstate().alpha = alpha;
-            L->adambstate().alpha = alpha;
-        }
+    std::vector<ParameterRef<FLOAT>> parameters() {
+        return Juzhen::parameters<FLOAT>({&head, &dec1, &up1, &dec2, &up2,
+                                          &mid, &enc3, &enc2, &enc1});
     }
 
-    const Matrix<FLOAT>& fwd(const Matrix<FLOAT>& inp) {
+    const Matrix<FLOAT>& eval(const Matrix<FLOAT>& inp) {
         enc1.eval(inp);
         e1 = enc1.value();
 
@@ -289,28 +284,28 @@ public:
         return head.value();
     }
 
-    void bwd(const Matrix<FLOAT>& inp, Matrix<FLOAT>&& g) {
-        auto g_head = head.backward_update(dec1.value(), std::move(g));
-        auto g_cat1 = dec1.backward_update(cat1, std::move(g_head));
+    void backward(const Matrix<FLOAT>& inp, Matrix<FLOAT>&& g) {
+        auto g_head = head.backward(dec1.value(), std::move(g));
+        auto g_cat1 = dec1.backward(cat1, std::move(g_head));
 
         const size_t skip1_sz = (size_t)ch1 * (size_t)d32;
         auto g_u1   = g_cat1.rows(0, skip1_sz);
         auto g_skip1 = g_cat1.rows(skip1_sz, g_cat1.num_row());
 
-        auto g_d2 = up1.backward_update(d2_out, std::move(g_u1));
-        auto g_cat2 = dec2.backward_update(cat2, std::move(g_d2));
+        auto g_d2 = up1.backward(d2_out, std::move(g_u1));
+        auto g_cat2 = dec2.backward(cat2, std::move(g_d2));
 
         const size_t skip2_sz = (size_t)ch2 * (size_t)d16;
         auto g_u2   = g_cat2.rows(0, skip2_sz);
         auto g_skip2 = g_cat2.rows(skip2_sz, g_cat2.num_row());
 
-        auto g_m  = up2.backward_update(m_out, std::move(g_u2));
-        auto g_e3 = mid.backward_update(e3, std::move(g_m));
-        auto g_e2 = enc3.backward_update(e2, std::move(g_e3));
+        auto g_m  = up2.backward(m_out, std::move(g_u2));
+        auto g_e3 = mid.backward(e3, std::move(g_m));
+        auto g_e2 = enc3.backward(e2, std::move(g_e3));
         g_e2 = g_e2 + g_skip2;
-        auto g_e1 = enc2.backward_update(e1, std::move(g_e2));
+        auto g_e1 = enc2.backward(e1, std::move(g_e2));
         g_e1 = g_e1 + g_skip1;
-        enc1.backward_update(inp, std::move(g_e1));
+        enc1.backward(inp, std::move(g_e1));
     }
 };
 
@@ -380,7 +375,7 @@ static Matrix<FLOAT> euler_sample(RectifiedUNet& net, int batchsize, int euler_s
 
         auto inp_s = vs({MatrixView<FLOAT>(Zs),
                          MatrixView<FLOAT>(temb)});
-        const auto& vel = net.fwd(inp_s);
+        const auto& vel = net.eval(inp_s);
         Zs = Zs + vel * dt;
     }
 
@@ -451,7 +446,10 @@ int compute() {
     const int d = C * H * W;
 
     RectifiedUNet net(batchsize);
-    net.set_lr(lr);
+    AdamWOptions options;
+    options.lr = lr;
+    options.weight_decay = 0; // Preserve the original Adam training objective.
+    AdamW<FLOAT> optimizer(net.parameters(), options);
 
     auto t_start = Clock::now();
     float ema_loss = 0.0f;
@@ -471,7 +469,7 @@ int compute() {
 
             // Cosine LR schedule with warmup
             float cur_lr = cosine_lr(global_step, total_steps, lr);
-            net.set_lr(cur_lr);
+            optimizer.set_lr(cur_lr);
 
             int offset = step * batchsize;
 
@@ -524,14 +522,17 @@ int compute() {
             auto inp = vs({MatrixView<FLOAT>(x_t),
                            MatrixView<FLOAT>(temb)});
 
+            optimizer.zero_grad();
+
             // Forward pass
-            const auto& pred_v = net.fwd(inp);
+            const auto& pred_v = net.eval(inp);
 
             // MSE loss + backward
             auto diff = pred_v - target_v;
             float loss = item(sum(sum(square(Matrix<FLOAT>(diff)), 0), 1)) / (float)batchsize;
             auto grad = 2.0f * diff / (float)batchsize;
-            net.bwd(inp, std::move(grad));
+            net.backward(inp, std::move(grad));
+            optimizer.step();
 
             if (!ema_init) { ema_loss = loss; ema_init = true; }
             else           { ema_loss = 0.95f * ema_loss + 0.05f * loss; }

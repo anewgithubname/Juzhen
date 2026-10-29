@@ -28,6 +28,7 @@
 
 #include <cfloat>
 #include <type_traits>
+#include <typeinfo>
 #include <list>
 #include <iterator>
 #include <initializer_list>
@@ -67,8 +68,18 @@ namespace Juzhen
 		adam_state<D> adamW, adamb;
 		GradientStore<D> parameter_gradients;
 
+        // Derived layers with their own parameters need no dense tensors or RNG.
+        explicit Layer(size_t batch)
+            : weights(nullptr), bias(nullptr), val(nullptr), nb(batch), lrW(.01), lrb(.01) {}
+
 	public:
 		
+		virtual ~Layer() = default;
+        Layer(const Layer&) = default;
+        Layer(Layer&&) = default;
+        Layer& operator=(const Layer&) = default;
+        Layer& operator=(Layer&&) = default;
+
 		Layer(size_t m, size_t n, size_t nb) :
 			weights("weights", m, n), bias("bias", m, 1), val("output", m, nb), adamW(.0001, m, n), adamb(.0001, m, 1), nb(nb) {
 
@@ -111,14 +122,28 @@ namespace Juzhen
 			return dx;
 		}
 
-        // Opt-in interface: legacy/custom layers are never silently routed
-        // through an updating backward pass by the explicit training driver.
-        virtual bool supports_backward() const { return false; }
-        virtual Matrix<D> backward(const Matrix<D>&, Matrix<D>&&) {
-            throw std::logic_error("this layer does not support gradient-only backward");
+        // Layer itself is a trainable tanh dense layer. Unknown subclasses
+        // still opt in explicitly: their grad() may mean a loss derivative.
+        virtual bool supports_backward() const { return typeid(*this)==typeid(Layer<D>); }
+        virtual Matrix<D> backward(const Matrix<D>& input, Matrix<D>&& upstream) {
+            if(!supports_backward())
+                throw std::logic_error("this layer does not support gradient-only backward");
+            if(input.num_row()!=weights.num_col() || upstream.num_row()!=weights.num_row() ||
+               input.num_col()!=upstream.num_col() || bias.num_row()!=weights.num_row() || bias.num_col()!=1)
+                throw std::invalid_argument("dense backward shape mismatch");
+            auto t=hadmd(grad(input),std::move(upstream));
+            auto dx=weights.T()*t;
+            if(need_update) {
+                parameter_gradients.add(weights,t*input.T());
+                parameter_gradients.add(bias,sum(t,1));
+            }
+            return dx;
         }
         virtual std::vector<ParameterRef<D>> parameters() {
-            throw std::logic_error("this layer has no explicit parameter registration");
+            if(!supports_backward())
+                throw std::logic_error("this layer has no explicit parameter registration");
+            return {parameter_gradients.parameter("weight",weights,adamW,need_update),
+                    parameter_gradients.parameter("bias",bias,adamb,need_update,false)};
         }
 
 		// this function will destroy gW and gb
@@ -219,6 +244,7 @@ namespace Juzhen
     public:
         ReluLayer(size_t m, size_t n, size_t nb) : Layer<D>(m, n, nb) {
         }
+        bool supports_backward() const override { return true; }
         Matrix<D> grad(const Matrix<D>& input) const override {
             return d_relu(Layer<D>::weights * input + Layer<D>::bias * Matrix<D>::ones(1, input.num_col()));
         }
@@ -281,6 +307,11 @@ namespace Juzhen
 		// you cannot change the output once you set it. 
 		Matrix<D> output;
 		Matrix<D> oneK1;
+        void check_input(const Matrix<D>& input) const {
+            if(!Layer<D>::nb || !output.num_row() || output.num_col()!=Layer<D>::nb ||
+               input.num_row()!=output.num_row() || input.num_col()!=output.num_col())
+                throw std::invalid_argument("logistic loss input shape mismatch");
+        }
 	public:
 		LogisticLayer(size_t nb, const Matrix<D>& output) : 
 			Layer<D>(2, 2, nb), 
@@ -296,8 +327,19 @@ namespace Juzhen
 			oneK1.ones();
 		}
 
+        bool supports_backward() const override { return true; }
+        std::vector<ParameterRef<D>> parameters() override { return {}; }
+        Matrix<D> backward(const Matrix<D>& input,Matrix<D>&& upstream) override {
+            if(!Layer<D>::nb || upstream.num_row()!=1 || upstream.num_col()!=1 ||
+               input.num_row()!=output.num_row() || input.num_col()!=output.num_col() ||
+               input.num_col()!=Layer<D>::nb)
+                throw std::invalid_argument("logistic loss backward shape mismatch");
+            auto scale=Matrix<D>::ones(input.num_row(),1)*upstream*Matrix<D>::ones(1,input.num_col());
+            return hadmd(grad(input),std::move(scale));
+        }
 		Matrix<D> grad(const Matrix<D>& input) const override {
 			// Numerically stable softmax: subtract column-wise max before exp.
+            check_input(input);
 			auto mx = reduce(
 				[] __GPU_CPU__(float* v, float* vdes, int lenv, int) {
 					float m = -1e30f;
@@ -317,6 +359,7 @@ namespace Juzhen
 
 		void eval(const Matrix<D>& input) override {
 			// Numerically stable log-sum-exp: max subtraction prevents overflow.
+            check_input(input);
 			auto mx = reduce(
 				[] __GPU_CPU__(float* v, float* vdes, int lenv, int) {
 					float m = -1e30f;
@@ -341,6 +384,11 @@ namespace Juzhen
 		Matrix<D> oneK1;
 
 	public:
+        bool supports_backward() const override { return false; }
+        std::vector<ParameterRef<D>> parameters() override { return {}; }
+        Matrix<D> backward(const Matrix<D>&,Matrix<D>&&) override {
+            throw std::logic_error("ZeroOneLayer is an evaluation metric and cannot be differentiated");
+        }
 		ZeroOneLayer(size_t nb, const Matrix<D>& output) :
 			Layer<D>(1, 1, nb),
 			output(output),
@@ -499,6 +547,15 @@ template<class D> Matrix<D> backward(const std::list<Layer<D>*>& net,const Matri
 		public:
             explicit SumLayer(const Matrix<D> &W): Layer<D>(2, 2, 2), W(W) {
 			}
+            bool supports_backward() const override { return true; }
+            std::vector<ParameterRef<D>> parameters() override { return {}; }
+            Matrix<D> backward(const Matrix<D>& input,Matrix<D>&& upstream) override {
+                if(input.num_row()!=W.num_row() || input.num_col()!=W.num_col() ||
+                   upstream.num_row()!=1 || upstream.num_col()!=1)
+                    throw std::invalid_argument("weighted sum backward shape mismatch");
+                auto scale=Matrix<D>::ones(W.num_row(),1)*upstream*Matrix<D>::ones(1,W.num_col());
+                return hadmd(W,std::move(scale));
+            }
 
 			Matrix<D> grad(const Matrix<D>&) const override {
 				return W;
@@ -715,6 +772,34 @@ template<class D> Matrix<D> backward(const std::list<Layer<D>*>& net,const Matri
 		}
 #define CUDNN_CHECK(expr) cudnn_check((expr), __FILE__, __LINE__)
 
+		bool has_forward = false;
+
+		void check_input(const Matrix<D>& input) const {
+			if (input.num_row() != size_t(C_in * H_in * W_in) || input.num_col() != size_t(batchN))
+				throw std::invalid_argument("convolution input shape mismatch");
+			if (this->weights.num_row() != size_t(C_in * C_out * kH * kW) || this->weights.num_col() != 1 ||
+			    this->bias.num_row() != size_t(C_out) || this->bias.num_col() != 1)
+				throw std::invalid_argument("convolution parameter shape mismatch");
+			// These backends pass raw NCHW pointers to their kernels. A lazy
+			// Matrix transpose changes indexing but does not reorder storage.
+			if (input.get_transpose() || this->weights.get_transpose() || this->bias.get_transpose())
+				throw std::invalid_argument("convolution GPU tensors require contiguous, untransposed storage");
+		}
+
+		void check_cached_activation() const {
+			if (use_relu && !has_forward)
+				throw std::logic_error("convolution with ReLU requires eval before backward or JVP");
+		}
+
+		void finish_parameter_gradients(Matrix<D>&& dW, Matrix<D>&& db, bool collect) {
+			if (collect) {
+				this->parameter_gradients.add(this->weights, std::move(dW));
+				this->parameter_gradients.add(this->bias, std::move(db));
+			} else {
+				this->update(std::move(dW), std::move(db));
+			}
+		}
+
 	public:
 		/**
 		 * @param N       Batch size
@@ -851,6 +936,8 @@ template<class D> Matrix<D> backward(const std::list<Layer<D>*>& net,const Matri
 		 * because d_relu(relu(x)) == d_relu(x) for all x.
 		 */
 		void eval(const Matrix<D>& input) override {
+			has_forward = false;
+			check_input(input);
 			const float alpha = 1.0f, beta = 0.0f, one = 1.0f;
 
 			// Convolution: val = conv(input, W)
@@ -869,9 +956,10 @@ template<class D> Matrix<D> backward(const std::list<Layer<D>*>& net,const Matri
 			// Optional ReLU activation
 			if (use_relu)
 				this->val = relu(Matrix<D>(this->val));
+			has_forward = true;
 		}
 
-		// grad() is superseded by backward_update(); return a dummy to satisfy the interface.
+		// Use backward() for gradients or jvp() for directional derivatives.
 		Matrix<D> grad(const Matrix<D>&) const override {
 			return Matrix<D>::ones(1, 1);
 		}
@@ -883,7 +971,26 @@ template<class D> Matrix<D> backward(const std::list<Layer<D>*>& net,const Matri
 		 * @param upstream_grad Gradient from the layer above (dL/d_output).
 		 * @return              Gradient to propagate further back (dL/d_input).
 		 */
+		bool supports_backward() const override { return true; }
+		std::vector<ParameterRef<D>> parameters() override {
+			return {this->parameter_gradients.parameter("weight", this->weights, this->adamW, this->need_update),
+			        this->parameter_gradients.parameter("bias", this->bias, this->adamb, this->need_update, false)};
+		}
+		Matrix<D> backward(const Matrix<D>& input, Matrix<D>&& upstream_grad) override {
+			return backward_impl(input, std::move(upstream_grad), true);
+		}
 		Matrix<D> backward_update(const Matrix<D>& input, Matrix<D>&& upstream_grad) override {
+			return backward_impl(input, std::move(upstream_grad), false);
+		}
+
+	private:
+		Matrix<D> backward_impl(const Matrix<D>& input, Matrix<D>&& upstream_grad, bool collect) {
+			check_input(input);
+			if (upstream_grad.num_row() != size_t(C_out * H_out * W_out) || upstream_grad.num_col() != size_t(batchN))
+				throw std::invalid_argument("convolution upstream gradient shape mismatch");
+			if (upstream_grad.get_transpose())
+				throw std::invalid_argument("convolution GPU upstream gradient requires contiguous, untransposed storage");
+			check_cached_activation();
 			// Chain rule through activation:
 			// With ReLU:    t = upstream_grad ⊙ d_relu(val)
 			// Without ReLU: t = upstream_grad  (linear — derivative is 1)
@@ -919,15 +1026,19 @@ template<class D> Matrix<D> backward(const std::list<Layer<D>*>& net,const Matri
 				&beta, b_desc, ptr(db)));
 
 			if (this->need_update)
-				this->update(std::move(dW), std::move(db));
+				finish_parameter_gradients(std::move(dW), std::move(db), collect);
 
 			return dx;
 		}
+	public:
 
 		// JVP: convolution is linear in its input, so the input-tangent rule is
 		// the forward convolution itself without the bias (constants have zero
 		// tangent), masked by the activation pattern cached in val by eval().
-		Matrix<D> jvp(const Matrix<D>&, const Matrix<D>& tangent) override {
+		Matrix<D> jvp(const Matrix<D>& input, const Matrix<D>& tangent) override {
+			check_input(input);
+			check_input(tangent);
+			check_cached_activation();
 			const float alpha = 1.0f, beta = 0.0f;
 
 			Matrix<D> out("conv_jvp", C_out * H_out * W_out, batchN);
@@ -987,6 +1098,34 @@ template<class D> Matrix<D> backward(const std::list<Layer<D>*>& net,const Matri
 			}
 		}
 #define CUDNN_CHECK(expr) cudnn_check((expr), __FILE__, __LINE__)
+
+		bool has_forward = false;
+
+		void check_input(const Matrix<D>& input) const {
+			if (input.num_row() != size_t(C_in * H_in * W_in) || input.num_col() != size_t(batchN))
+				throw std::invalid_argument("transposed convolution input shape mismatch");
+			if (this->weights.num_row() != size_t(C_in * C_out * kH * kW) || this->weights.num_col() != 1 ||
+			    this->bias.num_row() != size_t(C_out) || this->bias.num_col() != 1)
+				throw std::invalid_argument("transposed convolution parameter shape mismatch");
+			// These backends pass raw NCHW pointers to their kernels. A lazy
+			// Matrix transpose changes indexing but does not reorder storage.
+			if (input.get_transpose() || this->weights.get_transpose() || this->bias.get_transpose())
+				throw std::invalid_argument("transposed convolution GPU tensors require contiguous, untransposed storage");
+		}
+
+		void check_cached_activation() const {
+			if (use_relu && !has_forward)
+				throw std::logic_error("transposed convolution with ReLU requires eval before backward or JVP");
+		}
+
+		void finish_parameter_gradients(Matrix<D>&& dW, Matrix<D>&& db, bool collect) {
+			if (collect) {
+				this->parameter_gradients.add(this->weights, std::move(dW));
+				this->parameter_gradients.add(this->bias, std::move(db));
+			} else {
+				this->update(std::move(dW), std::move(db));
+			}
+		}
 
 	public:
 		/**
@@ -1121,6 +1260,8 @@ template<class D> Matrix<D> backward(const std::list<Layer<D>*>& net,const Matri
 		convtransLayer& operator=(const convtransLayer&) = delete;
 
 		void eval(const Matrix<D>& input) override {
+			has_forward = false;
+			check_input(input);
 			const float alpha = 1.0f, beta = 0.0f, one = 1.0f;
 
 			// y = ConvTranspose(x, W)
@@ -1138,13 +1279,33 @@ template<class D> Matrix<D> backward(const std::list<Layer<D>*>& net,const Matri
 
 			if (use_relu)
 				this->val = relu(Matrix<D>(this->val));
+			has_forward = true;
 		}
 
 		Matrix<D> grad(const Matrix<D>&) const override {
 			return Matrix<D>::ones(1, 1);
 		}
 
+		bool supports_backward() const override { return true; }
+		std::vector<ParameterRef<D>> parameters() override {
+			return {this->parameter_gradients.parameter("weight", this->weights, this->adamW, this->need_update),
+			        this->parameter_gradients.parameter("bias", this->bias, this->adamb, this->need_update, false)};
+		}
+		Matrix<D> backward(const Matrix<D>& input, Matrix<D>&& upstream_grad) override {
+			return backward_impl(input, std::move(upstream_grad), true);
+		}
 		Matrix<D> backward_update(const Matrix<D>& input, Matrix<D>&& upstream_grad) override {
+			return backward_impl(input, std::move(upstream_grad), false);
+		}
+
+	private:
+		Matrix<D> backward_impl(const Matrix<D>& input, Matrix<D>&& upstream_grad, bool collect) {
+			check_input(input);
+			if (upstream_grad.num_row() != size_t(C_out * H_out * W_out) || upstream_grad.num_col() != size_t(batchN))
+				throw std::invalid_argument("transposed convolution upstream gradient shape mismatch");
+			if (upstream_grad.get_transpose())
+				throw std::invalid_argument("transposed convolution GPU upstream gradient requires contiguous, untransposed storage");
+			check_cached_activation();
 			auto t = use_relu
 				? hadmd(d_relu(Matrix<D>(this->val)), std::move(upstream_grad))
 				: std::move(upstream_grad);
@@ -1177,14 +1338,18 @@ template<class D> Matrix<D> backward(const std::list<Layer<D>*>& net,const Matri
 				&beta, b_desc, ptr(db)));
 
 			if (this->need_update)
-				this->update(std::move(dW), std::move(db));
+				finish_parameter_gradients(std::move(dW), std::move(db), collect);
 
 			return dx;
 		}
+	public:
 
 		// JVP: transposed convolution is linear in its input — mirror eval()
 		// without the bias, then apply the cached activation mask.
-		Matrix<D> jvp(const Matrix<D>&, const Matrix<D>& tangent) override {
+		Matrix<D> jvp(const Matrix<D>& input, const Matrix<D>& tangent) override {
+			check_input(input);
+			check_input(tangent);
+			check_cached_activation();
 			const float alpha = 1.0f, beta = 0.0f;
 
 			Matrix<D> out("convtrans_jvp", C_out * H_out * W_out, batchN);
@@ -1469,6 +1634,34 @@ template<class D> Matrix<D> backward(const std::list<Layer<D>*>& net,const Matri
 			return dW;
 		}
 
+		bool has_forward = false;
+
+		void check_input(const Matrix<D>& input) const {
+			if (input.num_row() != size_t(C_in * H_in * W_in) || input.num_col() != size_t(batchN))
+				throw std::invalid_argument("convolution input shape mismatch");
+			if (this->weights.num_row() != size_t(C_in * C_out * kH * kW) || this->weights.num_col() != 1 ||
+			    this->bias.num_row() != size_t(C_out) || this->bias.num_col() != 1)
+				throw std::invalid_argument("convolution parameter shape mismatch");
+			// These backends pass raw NCHW pointers to their kernels. A lazy
+			// Matrix transpose changes indexing but does not reorder storage.
+			if (input.get_transpose() || this->weights.get_transpose() || this->bias.get_transpose())
+				throw std::invalid_argument("convolution GPU tensors require contiguous, untransposed storage");
+		}
+
+		void check_cached_activation() const {
+			if (use_relu && !has_forward)
+				throw std::logic_error("convolution with ReLU requires eval before backward or JVP");
+		}
+
+		void finish_parameter_gradients(Matrix<D>&& dW, Matrix<D>&& db, bool collect) {
+			if (collect) {
+				this->parameter_gradients.add(this->weights, std::move(dW));
+				this->parameter_gradients.add(this->bias, std::move(db));
+			} else {
+				this->update(std::move(dW), std::move(db));
+			}
+		}
+
 	public:
 		ConvLayer(int N, int C_in, int H_in, int W_in,
 		          int C_out, int kH, int kW,
@@ -1492,6 +1685,8 @@ template<class D> Matrix<D> backward(const std::list<Layer<D>*>& net,const Matri
 		}
 
 		void eval(const Matrix<D>& input) override {
+			has_forward = false;
+			check_input(input);
 			auto wh = this->weights.to_host();
 			auto w2d_h = flatten_weights_2d(wh);
 
@@ -1510,11 +1705,15 @@ template<class D> Matrix<D> backward(const std::list<Layer<D>*>& net,const Matri
 			if (use_relu) {
 				this->val = relu(Matrix<D>(this->val));
 			}
+			has_forward = true;
 		}
 
 		// JVP: convolution is linear in its input — mirror eval() with a zero
 		// bias (constants have zero tangent), then apply the cached mask.
-		Matrix<D> jvp(const Matrix<D>&, const Matrix<D>& tangent) override {
+		Matrix<D> jvp(const Matrix<D>& input, const Matrix<D>& tangent) override {
+			check_input(input);
+			check_input(tangent);
+			check_cached_activation();
 			auto wh = this->weights.to_host();
 			auto w2d_h = flatten_weights_2d(wh);
 
@@ -1539,7 +1738,26 @@ template<class D> Matrix<D> backward(const std::list<Layer<D>*>& net,const Matri
 			return Matrix<D>::ones(1, 1);
 		}
 
+		bool supports_backward() const override { return true; }
+		std::vector<ParameterRef<D>> parameters() override {
+			return {this->parameter_gradients.parameter("weight", this->weights, this->adamW, this->need_update),
+			        this->parameter_gradients.parameter("bias", this->bias, this->adamb, this->need_update, false)};
+		}
+		Matrix<D> backward(const Matrix<D>& input, Matrix<D>&& upstream_grad) override {
+			return backward_impl(input, std::move(upstream_grad), true);
+		}
 		Matrix<D> backward_update(const Matrix<D>& input, Matrix<D>&& upstream_grad) override {
+			return backward_impl(input, std::move(upstream_grad), false);
+		}
+
+	private:
+		Matrix<D> backward_impl(const Matrix<D>& input, Matrix<D>&& upstream_grad, bool collect) {
+			check_input(input);
+			if (upstream_grad.num_row() != size_t(C_out * H_out * W_out) || upstream_grad.num_col() != size_t(batchN))
+				throw std::invalid_argument("convolution upstream gradient shape mismatch");
+			if (upstream_grad.get_transpose())
+				throw std::invalid_argument("convolution GPU upstream gradient requires contiguous, untransposed storage");
+			check_cached_activation();
 			auto t = use_relu
 				? hadmd(d_relu(Matrix<D>(this->val)), std::move(upstream_grad))
 				: std::move(upstream_grad);
@@ -1568,11 +1786,12 @@ template<class D> Matrix<D> backward(const std::list<Layer<D>*>& net,const Matri
 			auto dW2d_h = dW2d.to_host();
 
 			if (this->need_update) {
-				this->update(Matrix<D>(pack_weight_grad(dW2d_h)), std::move(db));
+				finish_parameter_gradients(Matrix<D>(pack_weight_grad(dW2d_h)), std::move(db), collect);
 			}
 
 			return dx;
 		}
+	public:
 	};
 
 	class convtransLayer : public Layer<MPSfloat> {
@@ -1625,6 +1844,34 @@ template<class D> Matrix<D> backward(const std::list<Layer<D>*>& net,const Matri
 			return const_cast<float*>(reinterpret_cast<const float*>(m.data()));
 		}
 
+		bool has_forward = false;
+
+		void check_input(const Matrix<D>& input) const {
+			if (input.num_row() != size_t(C_in * H_in * W_in) || input.num_col() != size_t(batchN))
+				throw std::invalid_argument("transposed convolution input shape mismatch");
+			if (this->weights.num_row() != size_t(C_in * C_out * kH * kW) || this->weights.num_col() != 1 ||
+			    this->bias.num_row() != size_t(C_out) || this->bias.num_col() != 1)
+				throw std::invalid_argument("transposed convolution parameter shape mismatch");
+			// These backends pass raw NCHW pointers to their kernels. A lazy
+			// Matrix transpose changes indexing but does not reorder storage.
+			if (input.get_transpose() || this->weights.get_transpose() || this->bias.get_transpose())
+				throw std::invalid_argument("transposed convolution GPU tensors require contiguous, untransposed storage");
+		}
+
+		void check_cached_activation() const {
+			if (use_relu && !has_forward)
+				throw std::logic_error("transposed convolution with ReLU requires eval before backward or JVP");
+		}
+
+		void finish_parameter_gradients(Matrix<D>&& dW, Matrix<D>&& db, bool collect) {
+			if (collect) {
+				this->parameter_gradients.add(this->weights, std::move(dW));
+				this->parameter_gradients.add(this->bias, std::move(db));
+			} else {
+				this->update(std::move(dW), std::move(db));
+			}
+		}
+
 	public:
 		convtransLayer(int N, int C_in, int H_in, int W_in,
 		               int C_out, int kH, int kW,
@@ -1653,6 +1900,8 @@ template<class D> Matrix<D> backward(const std::list<Layer<D>*>& net,const Matri
 		}
 
 		void eval(const Matrix<D>& input) override {
+			has_forward = false;
+			check_input(input);
 			const int P_in = H_in * W_in;
 			Matrix<D> x2d("deconv_x2d", C_in, batchN * P_in);
 			mpsPackFeatureMap2D(ptr(input), ptr(x2d), batchN, C_in, P_in);
@@ -1673,11 +1922,15 @@ template<class D> Matrix<D> backward(const std::list<Layer<D>*>& net,const Matri
 			if (use_relu) {
 				this->val = relu(Matrix<D>(this->val));
 			}
+			has_forward = true;
 		}
 
 		// JVP: transposed convolution is linear in its input — mirror eval()
 		// up to (but not including) the bias add, then apply the cached mask.
-		Matrix<D> jvp(const Matrix<D>&, const Matrix<D>& tangent) override {
+		Matrix<D> jvp(const Matrix<D>& input, const Matrix<D>& tangent) override {
+			check_input(input);
+			check_input(tangent);
+			check_cached_activation();
 			const int P_in = H_in * W_in;
 			Matrix<D> x2d("deconv_x2d", C_in, batchN * P_in);
 			mpsPackFeatureMap2D(ptr(tangent), ptr(x2d), batchN, C_in, P_in);
@@ -1698,7 +1951,26 @@ template<class D> Matrix<D> backward(const std::list<Layer<D>*>& net,const Matri
 			return Matrix<D>::ones(1, 1);
 		}
 
+		bool supports_backward() const override { return true; }
+		std::vector<ParameterRef<D>> parameters() override {
+			return {this->parameter_gradients.parameter("weight", this->weights, this->adamW, this->need_update),
+			        this->parameter_gradients.parameter("bias", this->bias, this->adamb, this->need_update, false)};
+		}
+		Matrix<D> backward(const Matrix<D>& input, Matrix<D>&& upstream_grad) override {
+			return backward_impl(input, std::move(upstream_grad), true);
+		}
 		Matrix<D> backward_update(const Matrix<D>& input, Matrix<D>&& upstream_grad) override {
+			return backward_impl(input, std::move(upstream_grad), false);
+		}
+
+	private:
+		Matrix<D> backward_impl(const Matrix<D>& input, Matrix<D>&& upstream_grad, bool collect) {
+			check_input(input);
+			if (upstream_grad.num_row() != size_t(C_out * H_out * W_out) || upstream_grad.num_col() != size_t(batchN))
+				throw std::invalid_argument("transposed convolution upstream gradient shape mismatch");
+			if (upstream_grad.get_transpose())
+				throw std::invalid_argument("transposed convolution GPU upstream gradient requires contiguous, untransposed storage");
+			check_cached_activation();
 			auto t = use_relu
 				? hadmd(d_relu(Matrix<D>(this->val)), std::move(upstream_grad))
 				: std::move(upstream_grad);
@@ -1725,11 +1997,12 @@ template<class D> Matrix<D> backward(const std::list<Layer<D>*>& net,const Matri
 			Matrix<D> db = sum(t2d, 1);
 
 			if (this->need_update) {
-				this->update(pack_weight_grad(dW2d), std::move(db));
+				finish_parameter_gradients(pack_weight_grad(dW2d), std::move(db), collect);
 			}
 
 			return dx;
 		}
+	public:
 	};
 
 	using ConvTransLayer = convtransLayer;
@@ -1756,6 +2029,34 @@ template<class D> Matrix<D> backward(const std::list<Layer<D>*>& net,const Matri
 
 		static float* ptr(const Matrix<D>& m) {
 			return const_cast<float*>(reinterpret_cast<const float*>(m.data()));
+		}
+
+		bool has_forward = false;
+
+		void check_input(const Matrix<D>& input) const {
+			if (input.num_row() != size_t(C_in * H_in * W_in) || input.num_col() != size_t(batchN))
+				throw std::invalid_argument("convolution input shape mismatch");
+			if (this->weights.num_row() != size_t(C_in * C_out * kH * kW) || this->weights.num_col() != 1 ||
+			    this->bias.num_row() != size_t(C_out) || this->bias.num_col() != 1)
+				throw std::invalid_argument("convolution parameter shape mismatch");
+			// These backends pass raw NCHW pointers to their kernels. A lazy
+			// Matrix transpose changes indexing but does not reorder storage.
+			if (input.get_transpose() || this->weights.get_transpose() || this->bias.get_transpose())
+				throw std::invalid_argument("convolution GPU tensors require contiguous, untransposed storage");
+		}
+
+		void check_cached_activation() const {
+			if (use_relu && !has_forward)
+				throw std::logic_error("convolution with ReLU requires eval before backward or JVP");
+		}
+
+		void finish_parameter_gradients(Matrix<D>&& dW, Matrix<D>&& db, bool collect) {
+			if (collect) {
+				this->parameter_gradients.add(this->weights, std::move(dW));
+				this->parameter_gradients.add(this->bias, std::move(db));
+			} else {
+				this->update(std::move(dW), std::move(db));
+			}
 		}
 
 	public:
@@ -1785,6 +2086,8 @@ template<class D> Matrix<D> backward(const std::list<Layer<D>*>& net,const Matri
 		}
 
 		void eval(const Matrix<D>& input) override {
+			has_forward = false;
+			check_input(input);
 			const int K = C_in * kH * kW;
 			const int P = H_out * W_out;
 
@@ -1810,11 +2113,15 @@ template<class D> Matrix<D> backward(const std::list<Layer<D>*>& net,const Matri
 			// 4. Optional ReLU
 			if (use_relu)
 				this->val = relu(Matrix<D>(this->val));
+			has_forward = true;
 		}
 
 		// JVP: convolution is linear in its input — mirror eval() with a zero
 		// bias (constants have zero tangent), then apply the cached mask.
-		Matrix<D> jvp(const Matrix<D>&, const Matrix<D>& tangent) override {
+		Matrix<D> jvp(const Matrix<D>& input, const Matrix<D>& tangent) override {
+			check_input(input);
+			check_input(tangent);
+			check_cached_activation();
 			const int K = C_in * kH * kW;
 			const int P = H_out * W_out;
 
@@ -1844,7 +2151,26 @@ template<class D> Matrix<D> backward(const std::list<Layer<D>*>& net,const Matri
 			return Matrix<D>::ones(1, 1);
 		}
 
+		bool supports_backward() const override { return true; }
+		std::vector<ParameterRef<D>> parameters() override {
+			return {this->parameter_gradients.parameter("weight", this->weights, this->adamW, this->need_update),
+			        this->parameter_gradients.parameter("bias", this->bias, this->adamb, this->need_update, false)};
+		}
+		Matrix<D> backward(const Matrix<D>& input, Matrix<D>&& upstream_grad) override {
+			return backward_impl(input, std::move(upstream_grad), true);
+		}
 		Matrix<D> backward_update(const Matrix<D>& input, Matrix<D>&& upstream_grad) override {
+			return backward_impl(input, std::move(upstream_grad), false);
+		}
+
+	private:
+		Matrix<D> backward_impl(const Matrix<D>& input, Matrix<D>&& upstream_grad, bool collect) {
+			check_input(input);
+			if (upstream_grad.num_row() != size_t(C_out * H_out * W_out) || upstream_grad.num_col() != size_t(batchN))
+				throw std::invalid_argument("convolution upstream gradient shape mismatch");
+			if (upstream_grad.get_transpose())
+				throw std::invalid_argument("convolution GPU upstream gradient requires contiguous, untransposed storage");
+			check_cached_activation();
 			auto t = use_relu
 				? hadmd(d_relu(Matrix<D>(this->val)), std::move(upstream_grad))
 				: std::move(upstream_grad);
@@ -1888,10 +2214,11 @@ template<class D> Matrix<D> backward(const std::list<Layer<D>*>& net,const Matri
 			Matrix<D> db = sum(t2d, 1);
 
 			if (this->need_update)
-				this->update(std::move(dW), std::move(db));
+				finish_parameter_gradients(std::move(dW), std::move(db), collect);
 
 			return dx;
 		}
+	public:
 	};
 
 	/**
@@ -1913,6 +2240,34 @@ template<class D> Matrix<D> backward(const std::list<Layer<D>*>& net,const Matri
 
 		static float* ptr(const Matrix<D>& m) {
 			return const_cast<float*>(reinterpret_cast<const float*>(m.data()));
+		}
+
+		bool has_forward = false;
+
+		void check_input(const Matrix<D>& input) const {
+			if (input.num_row() != size_t(C_in * H_in * W_in) || input.num_col() != size_t(batchN))
+				throw std::invalid_argument("transposed convolution input shape mismatch");
+			if (this->weights.num_row() != size_t(C_in * C_out * kH * kW) || this->weights.num_col() != 1 ||
+			    this->bias.num_row() != size_t(C_out) || this->bias.num_col() != 1)
+				throw std::invalid_argument("transposed convolution parameter shape mismatch");
+			// These backends pass raw NCHW pointers to their kernels. A lazy
+			// Matrix transpose changes indexing but does not reorder storage.
+			if (input.get_transpose() || this->weights.get_transpose() || this->bias.get_transpose())
+				throw std::invalid_argument("transposed convolution GPU tensors require contiguous, untransposed storage");
+		}
+
+		void check_cached_activation() const {
+			if (use_relu && !has_forward)
+				throw std::logic_error("transposed convolution with ReLU requires eval before backward or JVP");
+		}
+
+		void finish_parameter_gradients(Matrix<D>&& dW, Matrix<D>&& db, bool collect) {
+			if (collect) {
+				this->parameter_gradients.add(this->weights, std::move(dW));
+				this->parameter_gradients.add(this->bias, std::move(db));
+			} else {
+				this->update(std::move(dW), std::move(db));
+			}
 		}
 
 	public:
@@ -1942,6 +2297,8 @@ template<class D> Matrix<D> backward(const std::list<Layer<D>*>& net,const Matri
 		}
 
 		void eval(const Matrix<D>& input) override {
+			has_forward = false;
+			check_input(input);
 			const int P_in = H_in * W_in;
 			const int patch_rows = C_out * kH * kW;
 
@@ -1963,11 +2320,15 @@ template<class D> Matrix<D> backward(const std::list<Layer<D>*>& net,const Matri
 
 			if (use_relu)
 				this->val = relu(Matrix<D>(this->val));
+			has_forward = true;
 		}
 
 		// JVP: transposed convolution is linear in its input — mirror eval()
 		// with a zero bias, then apply the cached mask.
-		Matrix<D> jvp(const Matrix<D>&, const Matrix<D>& tangent) override {
+		Matrix<D> jvp(const Matrix<D>& input, const Matrix<D>& tangent) override {
+			check_input(input);
+			check_input(tangent);
+			check_cached_activation();
 			const int P_in = H_in * W_in;
 			const int patch_rows = C_out * kH * kW;
 
@@ -1995,7 +2356,26 @@ template<class D> Matrix<D> backward(const std::list<Layer<D>*>& net,const Matri
 			return Matrix<D>::ones(1, 1);
 		}
 
+		bool supports_backward() const override { return true; }
+		std::vector<ParameterRef<D>> parameters() override {
+			return {this->parameter_gradients.parameter("weight", this->weights, this->adamW, this->need_update),
+			        this->parameter_gradients.parameter("bias", this->bias, this->adamb, this->need_update, false)};
+		}
+		Matrix<D> backward(const Matrix<D>& input, Matrix<D>&& upstream_grad) override {
+			return backward_impl(input, std::move(upstream_grad), true);
+		}
 		Matrix<D> backward_update(const Matrix<D>& input, Matrix<D>&& upstream_grad) override {
+			return backward_impl(input, std::move(upstream_grad), false);
+		}
+
+	private:
+		Matrix<D> backward_impl(const Matrix<D>& input, Matrix<D>&& upstream_grad, bool collect) {
+			check_input(input);
+			if (upstream_grad.num_row() != size_t(C_out * H_out * W_out) || upstream_grad.num_col() != size_t(batchN))
+				throw std::invalid_argument("transposed convolution upstream gradient shape mismatch");
+			if (upstream_grad.get_transpose())
+				throw std::invalid_argument("transposed convolution GPU upstream gradient requires contiguous, untransposed storage");
+			check_cached_activation();
 			auto t = use_relu
 				? hadmd(d_relu(Matrix<D>(this->val)), std::move(upstream_grad))
 				: std::move(upstream_grad);
@@ -2039,10 +2419,11 @@ template<class D> Matrix<D> backward(const std::list<Layer<D>*>& net,const Matri
 			Matrix<D> db = sum(t2d, 1);
 
 			if (this->need_update)
-				this->update(std::move(dW), std::move(db));
+				finish_parameter_gradients(std::move(dW), std::move(db), collect);
 
 			return dx;
 		}
+	public:
 	};
 
 	using ConvTransLayer = convtransLayer;
@@ -2189,6 +2570,30 @@ template<class D> Matrix<D> backward(const std::list<Layer<D>*>& net,const Matri
 			return dW;
 		}
 
+		bool has_forward = false;
+
+		void check_input(const Matrix<D>& input) const {
+			if (input.num_row() != size_t(C_in * H_in * W_in) || input.num_col() != size_t(batchN))
+				throw std::invalid_argument("convolution input shape mismatch");
+			if (this->weights.num_row() != size_t(C_in * C_out * kH * kW) || this->weights.num_col() != 1 ||
+			    this->bias.num_row() != size_t(C_out) || this->bias.num_col() != 1)
+				throw std::invalid_argument("convolution parameter shape mismatch");
+		}
+
+		void check_cached_activation() const {
+			if (use_relu && !has_forward)
+				throw std::logic_error("convolution with ReLU requires eval before backward or JVP");
+		}
+
+		void finish_parameter_gradients(Matrix<D>&& dW, Matrix<D>&& db, bool collect) {
+			if (collect) {
+				this->parameter_gradients.add(this->weights, std::move(dW));
+				this->parameter_gradients.add(this->bias, std::move(db));
+			} else {
+				this->update(std::move(dW), std::move(db));
+			}
+		}
+
 	public:
 		ConvLayer(int N, int C_in, int H_in, int W_in,
 		          int C_out, int kH, int kW,
@@ -2217,6 +2622,8 @@ template<class D> Matrix<D> backward(const std::list<Layer<D>*>& net,const Matri
 		}
 
 		void eval(const Matrix<D>& input) override {
+			has_forward = false;
+			check_input(input);
 			const Matrix<D> col = make_im2col(input);
 			const Matrix<D> w2d = flatten_weights_2d(this->weights);
 			const Matrix<D> y2d = w2d * col;
@@ -2224,12 +2631,16 @@ template<class D> Matrix<D> backward(const std::list<Layer<D>*>& net,const Matri
 			if (use_relu) {
 				this->val = relu(Matrix<D>(this->val));
 			}
+			has_forward = true;
 		}
 
 		// JVP: convolution is linear in its input, so the input-tangent rule is
 		// the forward convolution itself without the bias (constants have zero
 		// tangent), masked by the activation pattern cached in val by eval().
-		Matrix<D> jvp(const Matrix<D>&, const Matrix<D>& tangent) override {
+		Matrix<D> jvp(const Matrix<D>& input, const Matrix<D>& tangent) override {
+			check_input(input);
+			check_input(tangent);
+			check_cached_activation();
 			const Matrix<D> col = make_im2col(tangent);
 			const Matrix<D> w2d = flatten_weights_2d(this->weights);
 			Matrix<D> out = unpack_output_add_bias(w2d * col, /*with_bias=*/false);
@@ -2242,7 +2653,24 @@ template<class D> Matrix<D> backward(const std::list<Layer<D>*>& net,const Matri
 			return Matrix<D>::ones(1, 1);
 		}
 
+		bool supports_backward() const override { return true; }
+		std::vector<ParameterRef<D>> parameters() override {
+			return {this->parameter_gradients.parameter("weight", this->weights, this->adamW, this->need_update),
+			        this->parameter_gradients.parameter("bias", this->bias, this->adamb, this->need_update, false)};
+		}
+		Matrix<D> backward(const Matrix<D>& input, Matrix<D>&& upstream_grad) override {
+			return backward_impl(input, std::move(upstream_grad), true);
+		}
 		Matrix<D> backward_update(const Matrix<D>& input, Matrix<D>&& upstream_grad) override {
+			return backward_impl(input, std::move(upstream_grad), false);
+		}
+
+	private:
+		Matrix<D> backward_impl(const Matrix<D>& input, Matrix<D>&& upstream_grad, bool collect) {
+			check_input(input);
+			if (upstream_grad.num_row() != size_t(C_out * H_out * W_out) || upstream_grad.num_col() != size_t(batchN))
+				throw std::invalid_argument("convolution upstream gradient shape mismatch");
+			check_cached_activation();
 			auto t = use_relu
 				? hadmd(d_relu(Matrix<D>(this->val)), std::move(upstream_grad))
 				: std::move(upstream_grad);
@@ -2257,11 +2685,12 @@ template<class D> Matrix<D> backward(const std::list<Layer<D>*>& net,const Matri
 			Matrix<D> dx = col2im(dx_col);
 
 			if (this->need_update) {
-				this->update(pack_weight_grad(dW2d), std::move(db));
+				finish_parameter_gradients(pack_weight_grad(dW2d), std::move(db), collect);
 			}
 
 			return dx;
 		}
+	public:
 	};
 
 	class convtransLayer : public Layer<float> {
@@ -2411,6 +2840,30 @@ template<class D> Matrix<D> backward(const std::list<Layer<D>*>& net,const Matri
 			return dW;
 		}
 
+		bool has_forward = false;
+
+		void check_input(const Matrix<D>& input) const {
+			if (input.num_row() != size_t(C_in * H_in * W_in) || input.num_col() != size_t(batchN))
+				throw std::invalid_argument("transposed convolution input shape mismatch");
+			if (this->weights.num_row() != size_t(C_in * C_out * kH * kW) || this->weights.num_col() != 1 ||
+			    this->bias.num_row() != size_t(C_out) || this->bias.num_col() != 1)
+				throw std::invalid_argument("transposed convolution parameter shape mismatch");
+		}
+
+		void check_cached_activation() const {
+			if (use_relu && !has_forward)
+				throw std::logic_error("transposed convolution with ReLU requires eval before backward or JVP");
+		}
+
+		void finish_parameter_gradients(Matrix<D>&& dW, Matrix<D>&& db, bool collect) {
+			if (collect) {
+				this->parameter_gradients.add(this->weights, std::move(dW));
+				this->parameter_gradients.add(this->bias, std::move(db));
+			} else {
+				this->update(std::move(dW), std::move(db));
+			}
+		}
+
 	public:
 		convtransLayer(int N, int C_in, int H_in, int W_in,
 		               int C_out, int kH, int kW,
@@ -2439,6 +2892,8 @@ template<class D> Matrix<D> backward(const std::list<Layer<D>*>& net,const Matri
 		}
 
 		void eval(const Matrix<D>& input) override {
+			has_forward = false;
+			check_input(input);
 			const Matrix<D> x2d = pack_input_2d(input);
 			const Matrix<D> w2d = flatten_weights_2d(this->weights);
 			const Matrix<D> patches = w2d * x2d;
@@ -2446,11 +2901,15 @@ template<class D> Matrix<D> backward(const std::list<Layer<D>*>& net,const Matri
 			if (use_relu) {
 				this->val = relu(Matrix<D>(this->val));
 			}
+			has_forward = true;
 		}
 
 		// JVP: transposed convolution is linear in its input — mirror eval()
 		// without the bias, then apply the cached activation mask.
-		Matrix<D> jvp(const Matrix<D>&, const Matrix<D>& tangent) override {
+		Matrix<D> jvp(const Matrix<D>& input, const Matrix<D>& tangent) override {
+			check_input(input);
+			check_input(tangent);
+			check_cached_activation();
 			const Matrix<D> x2d = pack_input_2d(tangent);
 			const Matrix<D> w2d = flatten_weights_2d(this->weights);
 			Matrix<D> out = unpack_forward_from_patches(w2d * x2d, /*with_bias=*/false);
@@ -2463,7 +2922,24 @@ template<class D> Matrix<D> backward(const std::list<Layer<D>*>& net,const Matri
 			return Matrix<D>::ones(1, 1);
 		}
 
+		bool supports_backward() const override { return true; }
+		std::vector<ParameterRef<D>> parameters() override {
+			return {this->parameter_gradients.parameter("weight", this->weights, this->adamW, this->need_update),
+			        this->parameter_gradients.parameter("bias", this->bias, this->adamb, this->need_update, false)};
+		}
+		Matrix<D> backward(const Matrix<D>& input, Matrix<D>&& upstream_grad) override {
+			return backward_impl(input, std::move(upstream_grad), true);
+		}
 		Matrix<D> backward_update(const Matrix<D>& input, Matrix<D>&& upstream_grad) override {
+			return backward_impl(input, std::move(upstream_grad), false);
+		}
+
+	private:
+		Matrix<D> backward_impl(const Matrix<D>& input, Matrix<D>&& upstream_grad, bool collect) {
+			check_input(input);
+			if (upstream_grad.num_row() != size_t(C_out * H_out * W_out) || upstream_grad.num_col() != size_t(batchN))
+				throw std::invalid_argument("transposed convolution upstream gradient shape mismatch");
+			check_cached_activation();
 			auto t = use_relu
 				? hadmd(d_relu(Matrix<D>(this->val)), std::move(upstream_grad))
 				: std::move(upstream_grad);
@@ -2489,11 +2965,12 @@ template<class D> Matrix<D> backward(const std::list<Layer<D>*>& net,const Matri
 			Matrix<D> dx = unpack_dx_from_2d(dx2d);
 
 			if (this->need_update) {
-				this->update(pack_weight_grad(dW2d), std::move(db));
+				finish_parameter_gradients(pack_weight_grad(dW2d), std::move(db), collect);
 			}
 
 			return dx;
 		}
+	public:
 	};
 
 	using ConvTransLayer = convtransLayer;
@@ -2881,32 +3358,68 @@ template<class D> Matrix<D> backward(const std::list<Layer<D>*>& net,const Matri
 	//   y[:,c] = gamma ⊙ (x[:,c] - mean_c) / sqrt(var_c + eps) + beta
 	// where mean/var are over the `dim` features. gamma,beta are (dim,1) learnable.
 	// Implemented with backend-generic Matrix<D> ops so it works on CPU and GPU.
-	template <class D>
-	struct LayerNorm {
-		int dim;
-		Matrix<D> gamma, beta;
-		adam_state<D> adam_g, adam_b;
-        GradientStore<D> parameter_gradients;
+    template<class D> class LayerNormLayer : public Layer<D> {
+        int configured_dim;
+        static int positive(int n) {
+            if(n<=0) throw std::invalid_argument("LayerNormLayer dimensions must be positive");
+            return n;
+        }
+        void check_state() const {
+            if(dim!=configured_dim || gamma.num_row()!=size_t(dim) || gamma.num_col()!=1 ||
+               beta.num_row()!=size_t(dim) || beta.num_col()!=1 ||
+               ones_d1.num_row()!=size_t(dim) || ones_d1.num_col()!=1 ||
+               ones_1N.num_row()!=1 || ones_1N.num_col()!=this->nb ||
+               cached_xhat.num_row()!=size_t(dim) || cached_xhat.num_col()!=this->nb ||
+               cached_inv.num_row()!=1 || cached_inv.num_col()!=this->nb ||
+               cached_xhat.get_transpose())
+                throw std::invalid_argument("LayerNormLayer parameter/cache shape mismatch");
+            // A transposed Nx1 inverse-std vector is still a contiguous 1xN
+            // vector; the generic reduction path produces this layout.
+        }
+        void check_input(const Matrix<D>& input) const {
+            check_state();
+            if(input.num_row()!=size_t(dim) || input.num_col()!=this->nb)
+                throw std::invalid_argument("LayerNormLayer input shape mismatch");
+        }
+        void check_context() const {
+            check_state();
+            if(!has_forward) throw std::logic_error("LayerNormLayer requires a successful forward or eval");
+        }
+        void check_upstream(const Matrix<D>& upstream) const {
+            check_context();
+            if(upstream.num_row()!=size_t(dim) || upstream.num_col()!=this->nb)
+                throw std::invalid_argument("LayerNormLayer backward shape mismatch");
+        }
+    public:
+        int dim;
+        Matrix<D> gamma, beta;
+        adam_state<D> adam_g, adam_b;
         bool trainable=true;
         bool has_forward=false;
-		Matrix<D> ones_d1, ones_1N;
-		Matrix<D> cached_xhat, cached_inv;   // xhat:(dim,N)  inv:(1,N)
+        Matrix<D> ones_d1, ones_1N;
+        Matrix<D> cached_xhat, cached_inv;
 
-		LayerNorm(int dim, int N)
-			: dim(dim),
-			  gamma(Matrix<D>::ones(dim, 1)), beta(Matrix<D>::zeros(dim, 1)),
-			  adam_g(0.0001, dim, 1), adam_b(0.0001, dim, 1),
-			  ones_d1("ln_d1", dim, 1), ones_1N("ln_1N", 1, N),
-			  cached_xhat("ln_xhat", dim, N), cached_inv("ln_inv", 1, N) {
-			ones_d1.ones();
-			ones_1N.ones();
-		}
-
-		Matrix<D> forward(const Matrix<D>& x) {
+        LayerNormLayer(int features,int batch)
+            : Layer<D>(positive(batch)), configured_dim(positive(features)), dim(configured_dim),
+              gamma(Matrix<D>::ones(dim,1)), beta(Matrix<D>::zeros(dim,1)),
+              adam_g(0.0001,dim,1), adam_b(0.0001,dim,1),
+              ones_d1("ln_d1",dim,1), ones_1N("ln_1N",1,batch),
+              cached_xhat("ln_xhat",dim,batch), cached_inv("ln_inv",1,batch) {
+            ones_d1.ones(); ones_1N.ones();
+        }
+        bool supports_backward() const override { return true; }
+        std::vector<ParameterRef<D>> parameters() override {
+            auto result=std::vector<ParameterRef<D>>{
+                this->parameter_gradients.parameter("gamma",gamma,adam_g,trainable,false),
+                this->parameter_gradients.parameter("beta",beta,adam_b,trainable,false)};
+            for(auto& p:result) p.parent_trainable=&this->need_update;
+            return result;
+        }
+        // Direct composition returns the output by value so Transformer can
+        // move it into its own cache. eval() stores that result for Sequential.
+        Matrix<D> forward(const Matrix<D>& x) {
             has_forward=false;
-            if(x.num_row()!=size_t(dim)||x.num_col()!=ones_1N.num_col())
-                throw std::invalid_argument("LayerNorm forward shape mismatch");
-            has_forward=true;
+            check_input(x);
 #ifdef CUDA
 			// Fused kernel (assumes plain column-major input, which is what
 			// TransformerLayer always passes); other backends use the
@@ -2922,6 +3435,7 @@ template<class D> Matrix<D> backward(const std::list<Layer<D>*>& net,const Matri
 						const_cast<float*>(reinterpret_cast<const float*>(cached_xhat.data())),
 						const_cast<float*>(reinterpret_cast<const float*>(cached_inv.data())),
 						dim, (int)x.num_col());
+					has_forward=true;
 					return y;
 				}
 			}
@@ -2941,6 +3455,7 @@ template<class D> Matrix<D> backward(const std::list<Layer<D>*>& net,const Matri
 						const_cast<float*>(reinterpret_cast<const float*>(cached_xhat.data())),
 						const_cast<float*>(reinterpret_cast<const float*>(cached_inv.data())),
 						dim, (int)x.num_col()));
+					has_forward=true;
 					return y;
 				}
 			}
@@ -2959,6 +3474,7 @@ template<class D> Matrix<D> backward(const std::list<Layer<D>*>& net,const Matri
 						const_cast<float*>(reinterpret_cast<const float*>(cached_xhat.data())),
 						const_cast<float*>(reinterpret_cast<const float*>(cached_inv.data())),
 						dim, (int)x.num_col());
+					has_forward=true;
 					return y;
 				}
 			}
@@ -2970,22 +3486,41 @@ template<class D> Matrix<D> backward(const std::list<Layer<D>*>& net,const Matri
 			cached_inv = elemwise(
 				[] __GPU_CPU__(float v) { return 1.0f / sqrtf(v + 1e-5f); }, std::move(var));
 			cached_xhat = hadmd(xc, ones_d1 * cached_inv);       // (dim,N) standardized
-			return hadmd(gamma * ones_1N, cached_xhat) + beta * ones_1N;
-		}
-
-		// dy : (dim,N) upstream gradient.  Returns dL/dx; updates gamma,beta if `update`.
-        std::vector<ParameterRef<D>> parameters() {
-            return {parameter_gradients.parameter("gamma",gamma,adam_g,trainable,false),
-                    parameter_gradients.parameter("beta",beta,adam_b,trainable,false)};
+			auto result=hadmd(gamma * ones_1N, cached_xhat) + beta * ones_1N;
+            has_forward=true;
+            return result;
         }
-        Matrix<D> backward(Matrix<D>&& dy,bool enabled=true) {
-            if(!has_forward)throw std::logic_error("LayerNorm backward requires eval");
-            if(dy.num_row()!=size_t(dim)||dy.num_col()!=cached_xhat.num_col())
-                throw std::invalid_argument("LayerNorm backward shape mismatch");
-            return backward_impl(std::move(dy),enabled&&trainable,true);
+        void eval(const Matrix<D>& input) override {
+            this->val=forward(input);
         }
-        Matrix<D> backward_update(Matrix<D>&& dy, bool update) {
-            return backward_impl(std::move(dy),update,false);
+        Matrix<D> backward(Matrix<D>&& upstream,bool enabled=true) {
+            check_upstream(upstream);
+            return backward_impl(std::move(upstream),enabled&&this->need_update&&trainable,true);
+        }
+        Matrix<D> backward(const Matrix<D>& input,Matrix<D>&& upstream) override {
+            check_input(input);
+            return backward(std::move(upstream));
+        }
+        Matrix<D> backward_update(Matrix<D>&& upstream,bool enabled) {
+            check_upstream(upstream);
+            return backward_impl(std::move(upstream),enabled&&this->need_update&&trainable,false);
+        }
+        Matrix<D> backward_update(const Matrix<D>& input,Matrix<D>&& upstream) override {
+            check_input(input);
+            return backward_update(std::move(upstream),true);
+        }
+        Matrix<D> jvp(const Matrix<D>& input,const Matrix<D>& tangent) override {
+            check_input(input);
+            return jvp(tangent);
+        }
+        Matrix<D> grad(const Matrix<D>&) const override {
+            throw std::logic_error("LayerNormLayer has a full Jacobian; use backward or jvp");
+        }
+        std::vector<std::pair<std::string,Matrix<D>*>> checkpoint_parameters() override {
+            return {{"gamma",&gamma},{"beta",&beta}};
+        }
+        std::vector<std::pair<std::string,adam_state<D>*>> checkpoint_optimizers() override {
+            return {{"adam_gamma",&adam_g},{"adam_beta",&adam_b}};
         }
     private:
 		Matrix<D> backward_impl(Matrix<D>&& dy, bool update, bool collect) {
@@ -3044,8 +3579,8 @@ template<class D> Matrix<D> backward(const std::list<Layer<D>*>& net,const Matri
 			// Parameter gradients read gamma/xhat, so dx (above) comes first.
 			if (update) {
                 if(collect) {
-                    parameter_gradients.add(gamma,sum(hadmd(dy,cached_xhat),1));
-                    parameter_gradients.add(beta,sum(dy,1));
+                    this->parameter_gradients.add(gamma,sum(hadmd(dy,cached_xhat),1));
+                    this->parameter_gradients.add(beta,sum(dy,1));
                 } else {
 				gamma -= adam_update(sum(hadmd(dy, cached_xhat), 1), adam_g);
 				beta  -= adam_update(sum(dy, 1), adam_b);
@@ -3061,6 +3596,7 @@ template<class D> Matrix<D> backward(const std::list<Layer<D>*>& net,const Matri
 		// so this mirrors backward() — but gamma multiplies on the outside
 		// (J = diag(gamma) P) instead of the inside (J^T = P diag(gamma)).
 		Matrix<D> jvp(const Matrix<D>& dx) const {
+            check_context();
 			// Validate before the fused kernel bypasses Matrix's shape checks.
 			if (dx.num_row() != (size_t)dim ||
 				dx.num_col() != cached_xhat.num_col() ||
@@ -3096,9 +3632,7 @@ template<class D> Matrix<D> backward(const std::list<Layer<D>*>& net,const Matri
 		void set_beta(const Matrix<D>& b)  { beta = b; }
 		const Matrix<D>& get_gamma() const { return gamma; }
 		const Matrix<D>& get_beta() const  { return beta; }
-	};
-
-	//
+    };
 	// Pre-LN multi-head self-attention + feed-forward block.
 	//
 	// Input  shape: (d_model, seq_len * batch)   — each column is one token.
@@ -3157,7 +3691,7 @@ template<class D> Matrix<D> backward(const std::list<Layer<D>*>& net,const Matri
 		Matrix<D> attn_scores_scratch, attn_dAiT_scratch, attn_dS_scratch;
 
 		// Pre-norm LayerNorms: LN1 before attention, LN2 before FFN.
-		LayerNorm<D> ln1, ln2;
+		LayerNormLayer<D> ln1, ln2;
 
 #ifdef ROCM_HIP
         static void check_rocm_attention(int rc) {

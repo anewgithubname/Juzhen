@@ -125,6 +125,10 @@ class Matrix<CUDAfloat> {
     explicit Matrix<CUDAfloat>(const Matrix<float>& M);
     Matrix<CUDAfloat>(const char* name, size_t numrow, size_t numcol)
         : Matrix<CUDAfloat>(name, numrow, numcol, 0){};
+    // Empty state for non-affine layers: no device allocation or fill kernel.
+    explicit Matrix<CUDAfloat>(std::nullptr_t)
+        : numcol(0), numrow(0), transpose(false), name("empty"), elements(nullptr),
+          handle(global_handle) {}
     Matrix<CUDAfloat>() : Matrix<CUDAfloat>("un_init", 2, 2, 0){};
 
     // copy and move constructors, assignment operators

@@ -5,6 +5,7 @@
  */
 
 #include "../ml/layer.hpp"
+#include "../ml/optimizer.hpp"
 #include "../ml/dataloader.hpp"
 
 #include <ftxui/component/component.hpp>
@@ -263,6 +264,11 @@ int compute() {
                 layer->b().num_row(), layer->b().num_col(), init_rng, 0.01f));
         }
 
+        Sequential<D> network(trainnn);
+        AdamWOptions options;
+        options.weight_decay = 0; // Preserve the original Adam update.
+        AdamW<D> optimizer(network.parameters(), options);
+
         DataLoader<float, int> train_loader(mnist_dir, "train", batchsize);
         const size_t n_test_batches = 10000 / batchsize;
         std::vector<float> loss_history;
@@ -278,14 +284,14 @@ int compute() {
                 auto X_i = Matrix<D>(X_i_cpu / 255.0f);
                 auto Y_i = Matrix<D>(one_hot(y_i_idx, k));
 
-                forward(trainnn, X_i);
+                optimizer.zero_grad();
+                const auto& prediction = network.eval(X_i);
                 LogisticLayer<D> loss_layer(batchsize, std::move(Y_i));
-                loss_layer.eval(L2.value());
+                loss_layer.eval(prediction);
                 float cur_loss = item(loss_layer.value());
                 loss_history.push_back(cur_loss);
-                trainnn.push_front(&loss_layer);
-                backward_update(trainnn, X_i);
-                trainnn.pop_front();
+                network.backward(loss_layer.backward(prediction, Matrix<D>::ones(1, 1)));
+                optimizer.step();
 
                 float elapsed = (float)time_in_ms(t_start, Clock::now()) / 1000.0f;
                 bool do_log = (global_step % log_every == 0) || (global_step == total_steps - 1);

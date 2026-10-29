@@ -26,6 +26,7 @@
 // #define CPU_ONLY
 
 #include "../ml/layer.hpp"
+#include "../ml/optimizer.hpp"
 #include <thread>
 
 using namespace std;
@@ -90,6 +91,10 @@ int compute() {
 
     // nns are linked lists containing layers
     list<Layer<FLOAT>*> trainnn({ &L2, &L1, &L0 }), testnn({ &L3t, &L2, &L1, &L0 });
+    Sequential<FLOAT> network(trainnn);
+    AdamWOptions options;
+    options.weight_decay = 0; // Preserve the original Adam update.
+    AdamW<FLOAT> optimizer(network.parameters(), options);
 
     // //if file exists, load weights
     // FILE *fp = fopen((std::string(PROJECT_DIR) + "/mnist.weights").c_str(), "r");
@@ -112,13 +117,12 @@ int compute() {
         auto Y_i = Y.columns(batchsize * batch_id, batchsize * (batch_id + 1));
 #endif
 
-        // forward-backward pass
-        forward(trainnn, X_i);
+        // Compute gradients, then update all parameters together.
+        optimizer.zero_grad();
+        const auto& prediction = network.eval(X_i);
         LogisticLayer<FLOAT> L3(batchsize, std::move(Y_i));
-        trainnn.push_front(&L3);
-
-        backward_update(trainnn, X_i);
-        trainnn.pop_front();
+        network.backward(L3.backward(prediction, Matrix<FLOAT>::ones(1, 1)));
+        optimizer.step();
         if (iter % 1000 == 0) {
 #if defined(CUDA) || defined(ROCM_HIP) || defined(APPLE_SILICON)
             cout << "Misclassification Rate: " << forward(testnn, XT).to_host().elem(0, 0) << endl;

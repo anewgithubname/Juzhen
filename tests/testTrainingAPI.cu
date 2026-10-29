@@ -4,6 +4,8 @@
 #include <iostream>
 #include <limits>
 using namespace Juzhen;
+// An unregistered custom subclass must remain an explicit opt-in.
+template<class D> struct UnadaptedLayer : Layer<D> { using Layer<D>::Layer; };
 
 template<class D> Matrix<float> host(const Matrix<D>& m) {
     if constexpr(std::is_same_v<D,float>)return m;else return m.to_host();
@@ -127,7 +129,7 @@ template<class D> void ordinary_loss_checks(bool use_sequential) {
     LossLayer<D> legacy(batch,y);legacy.eval(readout.value());
     close(host(legacy.value()),host(loss.value()),"original LossLayer eval",0);
     rejects([&]{loss.backward(readout.value(),Matrix<D>::ones(1,2));},"loss requires a scalar upstream gradient");
-    Layer<D> unsupported(2,2,batch);std::list<Layer<D>*> bad{&loss,&readout,&unsupported};
+    UnadaptedLayer<D> unsupported(2,2,batch);std::list<Layer<D>*> bad{&loss,&readout,&unsupported};
     Sequential<D> bad_model(bad);optimizer.zero_grad();bad_model.eval(x);
     rejects([&]{bad_model.backward();},"network rejects unsupported layer");
     for(const auto& p:refs)require(!p.has_grad(),"unsupported network leaves no partial gradients");
@@ -159,7 +161,7 @@ template<class D> void compatibility_and_errors() {
     auto before=host(explicit_layer.W());const int iteration=explicit_layer.adamWstate().iteration;
     explicit_layer.eval(x);explicit_layer.backward(x,Matrix<D>(up));require(opt.step()==0,"frozen parameters skipped");
     close(host(explicit_layer.W()),before,"frozen weights",0);require(explicit_layer.adamWstate().iteration==iteration,"frozen Adam state");unfreeze(net);
-    Layer<D> unsupported(3,2,4);std::list<Layer<D>*> bad{&explicit_layer,&unsupported};
+    UnadaptedLayer<D> unsupported(3,2,4);std::list<Layer<D>*> bad{&explicit_layer,&unsupported};
     rejects([&]{Juzhen::backward(bad,x,Matrix<D>(up));},"unsupported layer rejected before partial backward");
     require(!opt.parameters()[0].has_grad(),"unsupported network left no partial gradients");
     rejects([&]{Juzhen::parameters(bad);},"unsupported parameter traversal");
@@ -177,13 +179,94 @@ template<class D> void compatibility_and_errors() {
     TransformerLayer<D> uninitialized(2,2,4,4,1,1,true);
     rejects([&]{uninitialized.backward(x,Matrix<D>(x));},"Transformer needs eval");
     rejects([&]{uninitialized.eval(Matrix<D>("bad",2,3));},"Transformer forward shape");
-    LayerNorm<D> norm(2,4);
+    LayerNormLayer<D> norm(2,4);
     rejects([&]{norm.backward(Matrix<D>(x));},"LayerNorm needs eval");
     rejects([&]{norm.forward(Matrix<D>("bad",2,3));},"LayerNorm forward shape");
     auto norm_refs=norm.parameters();AdamW<D> norm_opt(norm_refs,settings);
     norm.forward(x);auto saved=host(norm.gamma);norm.backward(Matrix<D>(x));close(host(norm.gamma),saved,"layernorm deferred update",0);
     require(norm_opt.step()==2,"standalone LayerNorm gradients");
     norm_opt.zero_grad();norm.trainable=false;norm.forward(x);norm.backward(Matrix<D>(x));require(norm_opt.step()==0,"frozen LayerNorm");
+}
+
+// Exercise the portable device formulation directly on every available
+// backend, as well as the production optimizer dispatch. All 16 independent
+// weight/gradient/moment storage layouts represent the same non-square shape.
+template<class D> void optimizer_math_checks() {
+    for(int layout=0;layout<16;++layout)for(bool decay:{false,true}) {
+        Matrix<float> expected_w("weight reference",3,2),expected_m("first moment",3,2),expected_v("second moment",3,2);
+        for(size_t j=0;j<2;++j)for(size_t i=0;i<3;++i) {
+            expected_w.elem(i,j)=float(int(i+3*j)-2)*.2f;
+            expected_m.elem(i,j)=float(int(i+3*j)-3)*.025f;
+            expected_v.elem(i,j)=float(i+3*j+1)*.017f;
+        }
+        auto stored=[&](const Matrix<float>& value,int bit) {
+            return (layout&bit)?Matrix<D>(transpose_storage(value)).T():Matrix<D>(value);
+        };
+        auto w=stored(expected_w,1),portable_w=stored(expected_w,1);
+        adam_state<D> state(w),portable_state(w);GradientBuffer<D> gradient;bool trainable=true;
+        AdamWOptions settings{.0125f,.7f,.93f,.02f,.2f};
+        AdamW<D> opt({{"fixture",&w,&gradient,&state,&trainable,decay}},settings);
+        state.iteration=7;state.m=stored(expected_m,4);state.v=stored(expected_v,8);
+        portable_state=state;
+        for(int step=0;step<4;++step) {
+            const float lr=step==1?0.f:settings.lr;opt.set_lr(lr);portable_state.alpha=lr;
+            Matrix<float> g("gradient",3,2);
+            for(size_t j=0;j<2;++j)for(size_t i=0;i<3;++i)
+                g.elem(i,j)=step==3?0.f:float(int((i+3*j+step*2)%7)-3)*.13f;
+            gradient.value=stored(g,2);gradient.ready=true;
+            const int iteration=state.iteration;
+            const double bc1=1/(1-std::pow(double(settings.beta1),iteration));
+            const double bc2=1/(1-std::pow(double(settings.beta2),iteration));
+            for(size_t j=0;j<2;++j)for(size_t i=0;i<3;++i) {
+                const double gi=g.elem(i,j);
+                const double m=settings.beta1*double(expected_m.elem(i,j))+(1-settings.beta1)*gi;
+                const double v=settings.beta2*double(expected_v.elem(i,j))+(1-settings.beta2)*gi*gi;
+                expected_w.elem(i,j)=float(expected_w.elem(i,j)*(1-lr*(decay?settings.weight_decay:0))-
+                    lr*(m*bc1)/(std::sqrt(v*bc2)+settings.eps));
+                expected_m.elem(i,j)=float(m);expected_v.elem(i,j)=float(v);
+            }
+            const float portable_bc1=1.f/(1.f-std::pow(settings.beta1,float(iteration)));
+            const float portable_bc2=1.f/(1.f-std::pow(settings.beta2,float(iteration)));
+            optimizer_detail::adamw_matrix_update(portable_w,gradient.value,portable_state,
+                portable_bc1,portable_bc2,decay?settings.weight_decay:0);
+            ++portable_state.iteration;
+            require(opt.step()==1,"AdamW updates registered parameter once");
+            const std::string label="AdamW layout="+std::to_string(layout)+" decay="+std::to_string(decay)+" step="+std::to_string(step);
+            close(host(w),expected_w,label+" production weight",2e-6f);
+            close(host(portable_w),expected_w,label+" portable weight",2e-6f);
+            for(auto* a:{&state,&portable_state}) {
+                close(host(a->m),expected_m,label+" first moment",2e-6f);
+                close(host(a->v),expected_v,label+" second moment",2e-6f);
+                require(a->iteration==iteration+1,label+" iteration");
+            }
+            close(host(gradient.value),g,label+" preserves accumulated gradient",0);
+            require(gradient.ready&&gradient.value.get_transpose()==bool(layout&2),label+" preserves gradient metadata");
+        }
+        // Both freeze flags and missing gradients suppress moments, decay and
+        // iteration changes, even when old gradients and moments are still stored.
+        bool parent_trainable=true;
+        auto registration=opt.parameters()[0];registration.parent_trainable=&parent_trainable;
+        AdamW<D> guarded({registration},settings);
+        const auto saved_w=host(w),saved_m=host(state.m),saved_v=host(state.v);
+        const int saved_iteration=state.iteration;
+        for(int mode=0;mode<3;++mode) {
+            trainable=mode!=0;parent_trainable=mode!=1;gradient.ready=mode!=2;
+            require(guarded.step()==0,"AdamW frozen/absent parameter skipped");
+            close(host(w),saved_w,"skipped AdamW weight",0);
+            close(host(state.m),saved_m,"skipped AdamW first moment",0);
+            close(host(state.v),saved_v,"skipped AdamW second moment",0);
+            require(state.iteration==saved_iteration,"skipped AdamW iteration");
+        }
+        trainable=true;parent_trainable=true;gradient.ready=true;
+        // Full validation precedes updates, including on the portable backends.
+        auto bad_w=Matrix<D>::ones(2,2);adam_state<D> bad_state(bad_w);GradientBuffer<D> bad_gradient;
+        bad_gradient.value=Matrix<D>::ones(3,2);bad_gradient.ready=true;
+        AdamW<D> invalid({registration,{"invalid",&bad_w,&bad_gradient,&bad_state,nullptr}},settings);
+        rejects([&]{invalid.step();},"AdamW rejects later malformed gradient");
+        close(host(w),saved_w,"invalid AdamW preserves earlier weight",0);
+        close(host(state.m),saved_m,"invalid AdamW preserves earlier moment",0);
+        require(state.iteration==saved_iteration,"invalid AdamW preserves earlier iteration");
+    }
 }
 
 // Scalar references exercise reduction tails, zero/absent/frozen groups,
@@ -270,7 +353,7 @@ template<class D> void normalization_checks() {
         }
         for(int i=0;i<d;++i){db.elem(i,0)=float(bd[i]);}
         for(bool transposed:{false,true}){
-            LayerNorm<D> layer(d,n);layer.gamma=Matrix<D>(g);layer.beta=Matrix<D>(b);auto refs=layer.parameters();AdamW<D> opt(refs);
+            LayerNormLayer<D> layer(d,n);layer.gamma=Matrix<D>(g);layer.beta=Matrix<D>(b);auto refs=layer.parameters();AdamW<D> opt(refs);
             Matrix<D> input=transposed?Matrix<D>(transpose_storage(x)).T():Matrix<D>(x);
             Matrix<D> upstream=transposed?Matrix<D>(transpose_storage(up)).T():Matrix<D>(up);
             const std::string label="LayerNorm dim="+std::to_string(d)+" pattern="+std::to_string(pattern)+" transposed="+std::to_string(transposed);
@@ -313,6 +396,7 @@ template<class D> void suite(const char* backend) {
     ordinary_loss_checks<D>(false);
     ordinary_loss_checks<D>(true);
     compatibility_and_errors<D>();
+    optimizer_math_checks<D>();
     clipping_checks<D>();
     normalization_checks<D>();
     std::cout << "[PASS] " << backend << " core training API\n";
@@ -324,6 +408,14 @@ int compute() {
 #ifdef CUDA
         GPUSampler sampler(919);
         suite<CUDAfloat>("CUDA");
+#endif
+#ifdef APPLE_SILICON
+        optimizer_math_checks<MPSfloat>();
+        std::cout << "[PASS] Metal AdamW scalar references\n";
+#endif
+#ifdef ROCM_HIP
+        optimizer_math_checks<ROCMfloat>();
+        std::cout << "[PASS] ROCm AdamW scalar references\n";
 #endif
         return 0;
     } catch (const std::exception& error) {

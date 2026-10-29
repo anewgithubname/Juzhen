@@ -54,6 +54,9 @@ class Matrix<ROCMfloat> {
     explicit Matrix<ROCMfloat>(const Matrix<float>& M);
     Matrix<ROCMfloat>(const char* name, size_t numrow, size_t numcol)
         : Matrix<ROCMfloat>(name, numrow, numcol, 0) {}
+    // Empty state for non-affine layers: no device allocation or fill kernel.
+    explicit Matrix<ROCMfloat>(std::nullptr_t)
+        : numcol(0), numrow(0), transpose(false), name("empty"), elements(nullptr) {}
     Matrix<ROCMfloat>() : Matrix<ROCMfloat>("un_init", 2, 2, 0) {}
 
     Matrix<ROCMfloat>(const Matrix<ROCMfloat>& M);

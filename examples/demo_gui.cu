@@ -28,6 +28,7 @@
 #include "implot.h"
 #include "../cpp/juzhen.hpp"
 #include "../ml/layer.hpp"
+#include "../ml/optimizer.hpp"
 using namespace std;
 using namespace Juzhen;
 #include <mutex>
@@ -112,6 +113,10 @@ public:
 
         // nns are linked lists containing layers
         list<Layer<FLOAT> *> trainnn({&L10, &L3, &L2, &L1, &L0});
+        Sequential<FLOAT> network(trainnn);
+        AdamWOptions options;
+        options.weight_decay = 0; // Preserve the original Adam update.
+        AdamW<FLOAT> optimizer(network.parameters(), options);
 
         // start the training loop
         for (int i = 0; i < numbatches * 480; i++)
@@ -132,25 +137,27 @@ public:
             auto inp_i = vs({Xt_i, t});
             auto Yt_i = X1_i - X0_i;
 
-            // forward-backward pass
             LossLayer<FLOAT> L11(batchsize, Yt_i);
-            trainnn.push_front(&L11);
+            optimizer.zero_grad();
+            const auto& prediction = network.eval(inp_i);
+            L11.eval(prediction);
 
             if (i % (25 * numbatches) == 0)
             {
-                float loss = item(forward(trainnn, inp_i));
+                float loss = item(L11.value());
                 losses.push_back(loss);
                 std::string msg = ", training loss: " + std::to_string(loss);
-                dumpweights(trainnn, base + "/res/net.weights");
+                auto checkpoint_layers = trainnn;
+                checkpoint_layers.push_front(&L11);
+                dumpweights(checkpoint_layers, base + "/res/net.weights");
             }
             else
             {
                 progress = (float)i / (numbatches * 480);
-                forward(trainnn, inp_i);
             }
 
-            backward_update(trainnn, inp_i);
-            trainnn.pop_front();
+            network.backward(L11.backward(prediction, Matrix<FLOAT>::ones(1, 1)));
+            optimizer.step();
 
             if (i % (numbatches) == 0)
             {

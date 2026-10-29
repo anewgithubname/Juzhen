@@ -236,7 +236,7 @@ int run_parity() {
 template <class D>
 int check_layernorm_jvp_dimensions(const char* backend) {
     constexpr int dim = 6, tokens = 3;
-    LayerNorm<D> layer(dim, tokens);
+    LayerNormLayer<D> layer(dim, tokens);
     layer.forward(Matrix<D>::ones(dim, tokens));
     for (const auto shape : {std::pair{5, 3}, std::pair{7, 3},
                              std::pair{6, 2}, std::pair{6, 4}}) {
@@ -278,7 +278,7 @@ int check_cuda_layernorm_jvp() {
                     u.elem(r, c) = std::cos(0.13f * r - 0.29f * c);
                 }
             }
-            LayerNorm<CUDAfloat> layer(dim, tokens);
+            LayerNormLayer<CUDAfloat> layer(dim, tokens);
             layer.set_gamma(Matrix<CUDAfloat>(gamma));
             layer.set_beta(Matrix<CUDAfloat>(beta));
             layer.forward(Matrix<CUDAfloat>(x));

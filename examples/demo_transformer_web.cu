@@ -25,6 +25,7 @@
  */
 
 #include "../ml/layer.hpp"
+#include "../ml/optimizer.hpp"
 #include "../cpp/juzhen.hpp"
 #include "../external/httplib.h"
 
@@ -416,7 +417,11 @@ int compute() {
             return net;
         };
 
-        list<Layer<FLOAT>*> trainnn = build_net(blocks, embed, proj);
+        Sequential<FLOAT> trainnn(build_net(blocks, embed, proj));
+        AdamWOptions optimizer_options;
+        optimizer_options.lr = lr_at(0);
+        optimizer_options.weight_decay = 0.0f; // Preserve the existing Adam training rule.
+        AdamW<FLOAT> optimizer(trainnn.parameters(), optimizer_options);
 
         auto save_best = [&]() {
             copy_linear_weights(best_embed, embed);
@@ -429,12 +434,6 @@ int compute() {
             for (int i = 0; i < cfg.num_blocks; ++i) copy_tf_weights(*blocks[i], *best_blocks[i]);
         };
         save_best();
-
-        auto set_all_lr = [&](float lr) {
-            embed.adamWstate().alpha = lr; embed.adambstate().alpha = lr;
-            proj.adamWstate().alpha  = lr; proj.adambstate().alpha  = lr;
-            for (int i = 0; i < cfg.num_blocks; ++i) blocks[i]->set_lr(lr);
-        };
 
         auto make_fixed = [&](int lo, long long count, Matrix<float>& X, Matrix<float>& Y) {
             vector<int> off_(batch);
@@ -480,17 +479,17 @@ int compute() {
         int   last_ckpt_step = 0;   // periodic checkpoint of the best snapshot
 
         for (int step = 0; step < steps; ++step) {
-            set_all_lr(lr_at(step));
+            optimizer.set_lr(lr_at(step));
 
             for (int b = 0; b < batch; ++b) offs[b] = pick(global_rand_gen);
             fill_batch(X_h, Y_h, corpus, offs, seq_len, V, c2i);
 
             auto X = Matrix<FLOAT>(X_h);
-            forward(trainnn, X);
+            optimizer.zero_grad();
+            const auto& logits = trainnn.eval(X);
             LogisticLayer<FLOAT> loss(N, Matrix<FLOAT>(Y_h));
-            trainnn.push_front(&loss);
-            backward_update(trainnn, X);
-            trainnn.pop_front();
+            trainnn.backward(loss.backward(logits, Matrix<FLOAT>::ones(1, 1)));
+            optimizer.step();
 
             if (step % log_every == 0 || step == steps - 1) {
                 auto [train_l, train_a] = eval_batch(Xt_h, Yt_h);

@@ -29,6 +29,7 @@
 #include "helper.hpp"
 #include "memory.hpp"
 
+#include <cstddef>
 #include <cstdint>
 #include <cstdio>
 #include <limits>
@@ -104,6 +105,9 @@ class Matrix {
 
    public:
     // constructors
+    // Explicit empty storage; keep the historical default constructor unchanged.
+    explicit Matrix(std::nullptr_t)
+        : numcol(0), numrow(0), transpose(false), name("empty"), elements(nullptr) {}
     Matrix()
         : numcol(0),
           numrow(0),

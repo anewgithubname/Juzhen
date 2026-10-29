@@ -48,6 +48,7 @@
  */
 
 #include "../ml/layer.hpp"
+#include "../ml/optimizer.hpp"
 #include "../cpp/juzhen.hpp"
 
 #include <cmath>
@@ -329,7 +330,11 @@ int compute() {
         net.push_back(&emb);
         return net;
     };
-    list<Layer<FLOAT>*> trainnn = build_net(blocks, embed, proj);
+    Sequential<FLOAT> trainnn(build_net(blocks, embed, proj));
+    AdamWOptions optimizer_options;
+    optimizer_options.lr = lr_at(0);
+    optimizer_options.weight_decay = 0.0f; // Preserve the existing Adam training rule.
+    AdamW<FLOAT> optimizer(trainnn.parameters(), optimizer_options);
 
     auto save_best = [&]() {
         copy_linear_weights(best_embed, embed);
@@ -416,12 +421,6 @@ int compute() {
         fclose(fp);
         if (!ok) cerr << "Ignoring " << path << ": truncated file\n";
         return ok;
-    };
-
-    auto set_all_lr = [&](float lr) {
-        embed.adamWstate().alpha = lr; embed.adambstate().alpha = lr;
-        proj.adamWstate().alpha  = lr; proj.adambstate().alpha  = lr;
-        for (int i = 0; i < num_blocks; ++i) blocks[i]->set_lr(lr);
     };
 
     // Teacher-forced next-char batch from a list of (a,b) pairs.
@@ -528,7 +527,7 @@ int compute() {
     int   best_step = 0;
 
     for (int step = 0; step < steps; ++step) {
-        set_all_lr(lr_at(step));
+        optimizer.set_lr(lr_at(step));
 
         for (int b = 0; b < batch; ++b) {
             int a, bb;
@@ -555,10 +554,10 @@ int compute() {
         auto X = Matrix<FLOAT>(X_h);
         LogisticLayer<FLOAT> loss(N, Matrix<FLOAT>(Y_h));
 #endif
-        forward(trainnn, X);
-        trainnn.push_front(&loss);
-        backward_update(trainnn, X);
-        trainnn.pop_front();
+        optimizer.zero_grad();
+        const auto& logits = trainnn.eval(X);
+        trainnn.backward(loss.backward(logits, Matrix<FLOAT>::ones(1, 1)));
+        optimizer.step();
 
         if (step % log_every == 0 || step == steps - 1) {
             // Mean next-char NLL (nats/position) of this batch, pre-update

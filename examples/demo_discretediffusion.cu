@@ -29,6 +29,8 @@
  */
 
 #include "../ml/layer.hpp"
+#include "../ml/optimizer.hpp"
+#include "../ml/masked_cross_entropy.hpp"
 #include "../cpp/juzhen.hpp"
 
 #include <algorithm>
@@ -95,51 +97,7 @@ static void copy_linear_weights(LinearLayer<FLOAT>& dst,
 //   loss   = sum_c  w_c * ( logsumexp(z_c) - <z_c, y_c> )
 //   dloss/dz_c = w_c * ( softmax(z_c) - y_c )
 // ────────────────────────────────────────────────────────────────────────────
-// Column-wise max of a (V, N) matrix -> (1, N); used for a stable softmax.
-// Free function: an extended __host__ __device__ lambda may not sit in a
-// private/protected class member.
-template <class D>
-static Matrix<D> col_max(const Matrix<D>& input) {
-    return reduce(
-        [] __GPU_CPU__(float* v, float* vdes, int lenv, int) {
-            float m = -1e30f;
-            for (int i = 0; i < lenv; i++) m = m > v[i] ? m : v[i];
-            vdes[0] = m;
-        }, input, 0, 1);
-}
-
-template <class D>
-class MaskedCELayer : public Layer<D> {
-    Matrix<D> output;   // (V, N) one-hot true characters
-    Matrix<D> wrow;     // (1, N) per-column weights (0 for unmasked positions)
-    Matrix<D> oneK1;    // (V, 1) ones, for broadcasting a row over all V rows
-
-public:
-    MaskedCELayer(size_t nb, Matrix<D>&& target, Matrix<D>&& weights)
-        : Layer<D>(2, 2, nb),
-          output(std::move(target)),
-          wrow(std::move(weights)),
-          oneK1("oneK1", output.num_row(), 1) {
-        oneK1.ones();
-    }
-
-    Matrix<D> grad(const Matrix<D>& input) const override {
-        auto mx = col_max(input);              // (1, N)
-        auto E = exp(input - oneK1 * mx);      // (V, N)
-        auto Z = oneK1 * sum(E, 0);            // (V, N) column sums broadcast
-        auto softmax = E / std::move(Z);       // (V, N)
-        // Per-column weight applied to (softmax - onehot).
-        return hadmd(softmax - output, oneK1 * wrow);
-    }
-
-    void eval(const Matrix<D>& input) override {
-        auto mx = col_max(input);                          // (1, N)
-        auto lse = log(sum(exp(input - oneK1 * mx), 0)) + mx;   // (1, N)
-        auto dot = sum(hadmd(input, output), 0);           // (1, N) <z, y>
-        auto ce = lse - dot;                               // (1, N) per-token CE
-        Layer<D>::val = sum(hadmd(wrow, ce), 1);           // (1, 1) weighted sum
-    }
-};
+// Shared masked loss supports both legacy and gradient-only training.
 
 // ── enwik8 corpus loading (identical policy to demo_transformer.cu) ──────────
 static string embedded_corpus() {
@@ -314,7 +272,7 @@ int compute() {
     LinearLayer<FLOAT> best_proj(V, d_model, 1);
 
     // Layer list: front = last layer (proj), back = first (embed); forward()
-    // and backward_update() run back()->front(), so data flows embed -> blocks -> proj.
+    // runs back()->front(), so data flows embed -> blocks -> proj.
     auto build_net = [&](vector<unique_ptr<TF>>& bl,
                          LinearLayer<FLOAT>& emb, LinearLayer<FLOAT>& pr) {
         list<Layer<FLOAT>*> net;
@@ -323,7 +281,11 @@ int compute() {
         net.push_back(&emb);
         return net;
     };
-    list<Layer<FLOAT>*> trainnn = build_net(blocks, embed, proj);
+    Sequential<FLOAT> trainnn(build_net(blocks, embed, proj));
+    AdamWOptions optimizer_options;
+    optimizer_options.lr = lr_at(0);
+    optimizer_options.weight_decay = 0.0f; // Preserve the existing Adam training rule.
+    AdamW<FLOAT> optimizer(trainnn.parameters(), optimizer_options);
 
     auto save_best = [&]() {
         copy_linear_weights(best_embed, embed);
@@ -336,12 +298,6 @@ int compute() {
         for (int i = 0; i < num_blocks; ++i) copy_tf_weights(*blocks[i], *best_blocks[i]);
     };
     save_best();
-
-    auto set_all_lr = [&](float lr) {
-        embed.adamWstate().alpha = lr; embed.adambstate().alpha = lr;
-        proj.adamWstate().alpha  = lr; proj.adambstate().alpha  = lr;
-        for (int i = 0; i < num_blocks; ++i) blocks[i]->set_lr(lr);
-    };
 
     // Fill one training/eval batch: given window offsets and a per-sequence mask
     // level t, produce the corrupted input X (in_dim,N), the one-hot target
@@ -426,7 +382,7 @@ int compute() {
     int   best_step = 0, stale = 0;
 
     for (int step = 0; step < steps; ++step) {
-        set_all_lr(lr_at(step));
+        optimizer.set_lr(lr_at(step));
 
         // Sample a fresh mini-batch: random windows, stratified per-sequence
         // mask levels, then corrupt.
@@ -435,11 +391,11 @@ int compute() {
         fill_batch(offs, tlvl, Xh, Yh, Wh, true_idx, masked);
 
         auto X = Matrix<FLOAT>(Xh);
-        forward(trainnn, X);
+        optimizer.zero_grad();
+        const auto& logits = trainnn.eval(X);
         MaskedCELayer<FLOAT> loss(N, Matrix<FLOAT>(Yh), Matrix<FLOAT>(Wh));
-        trainnn.push_front(&loss);
-        backward_update(trainnn, X);
-        trainnn.pop_front();
+        trainnn.backward(loss.backward(logits, Matrix<FLOAT>::ones(1, 1)));
+        optimizer.step();
 
         if (step % log_every == 0 || step == steps - 1) {
             auto [tr_l, tr_bpc, tr_a] = eval_batch(train_lo, train_windows, 4);

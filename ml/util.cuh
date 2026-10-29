@@ -132,6 +132,9 @@ struct adam_state{
     int iteration;
     float alpha, beta1, beta2, eps;
     Matrix<T> m, v;
+    // Empty state for base layers without dense parameters; no tensor allocation.
+    adam_state()
+        :iteration(1), alpha(0.0001), beta1(0.9), beta2(0.999), eps(1e-8), m(nullptr), v(nullptr) {}
     adam_state(const Matrix<T> &theta)
         :iteration(1), alpha(0.01), beta1(0.9), beta2(0.999), eps(1e-8){
         m = zeros_like(theta);

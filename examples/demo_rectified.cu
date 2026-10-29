@@ -26,6 +26,7 @@
 // #define CPU_ONLY
 #include "../cpp/juzhen.hpp"
 #include "../ml/layer.hpp"
+#include "../ml/optimizer.hpp"
 
 #include <ftxui/component/component.hpp>
 #include <ftxui/component/screen_interactive.hpp>
@@ -316,10 +317,11 @@ int compute()
                          L2(128, 128, batchsize);
         LinearLayer<FLOAT> L3(d, 128, batchsize);
         list<Layer<FLOAT>*> trainnn({&L3, &L2, &L1, &L0});
-        for (auto* l : trainnn) {
-            l->adamWstate().alpha = lr;
-            l->adambstate().alpha = lr;
-        }
+        Sequential<FLOAT> network(trainnn);
+        AdamWOptions options;
+        options.lr = lr;
+        options.weight_decay = 0;
+        AdamW<FLOAT> optimizer(network.parameters(), options);
 
         auto t_start = Clock::now();
         float ema_loss = 0.0f;
@@ -333,10 +335,12 @@ int compute()
             auto Xt_i  = hadmd(X0_i, ones(d, 1) * (1 - t)) + hadmd(X1_i, ones(d, 1) * t);
             auto inp_i = vs({Xt_i, t});
             LossLayer<FLOAT> L11(batchsize, X1_i - X0_i);
-            trainnn.push_front(&L11);
-            float loss = item(forward(trainnn, inp_i));
-            backward_update(trainnn, inp_i);
-            trainnn.pop_front();
+            optimizer.zero_grad();
+            const auto& prediction = network.eval(inp_i);
+            L11.eval(prediction);
+            float loss = item(L11.value());
+            network.backward(L11.backward(prediction, Matrix<FLOAT>::ones(1, 1)));
+            optimizer.step();
 
             if (!ema_init) { ema_loss = loss; ema_init = true; }
             else           { ema_loss = 0.95f * ema_loss + 0.05f * loss; }

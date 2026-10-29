@@ -65,6 +65,9 @@ public:
     explicit Matrix<MPSfloat>(const Matrix<float>& M);
     Matrix<MPSfloat>(const char* name, size_t numrow, size_t numcol)
         : Matrix<MPSfloat>(name, numrow, numcol, 0){};
+    // Empty state for non-affine layers: no device allocation or fill kernel.
+    explicit Matrix<MPSfloat>(std::nullptr_t)
+        : numcol(0), numrow(0), transpose(false), name("empty"), elements(nullptr) {}
     Matrix<MPSfloat>() : Matrix<MPSfloat>("un_init", 2, 2, 0){};
 
     // copy and move constructors, assignment operators
