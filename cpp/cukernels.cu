@@ -89,6 +89,25 @@ __global__ void copyKernel(float *d_out, float *d_in, size_t numElements,
     }
 }
 
+__global__ void copySliceAssignKernel(float* dst, const float* src,
+                                       size_t rows, size_t cols,
+                                       size_t dst_numrow, bool dst_transpose,
+                                       size_t src_numrow, bool src_transpose,
+                                       size_t rstart, size_t cstart) {
+    const size_t count = rows * cols;
+    // Traverse the target's physical columns for contiguous writes. A source
+    // with the same layout is contiguous too; otherwise swap its coordinates.
+    const size_t physical_rows = dst_transpose ? cols : rows;
+    const size_t row_offset = dst_transpose ? cstart : rstart;
+    const size_t col_offset = dst_transpose ? rstart : cstart;
+    for (size_t k = size_t(blockIdx.x) * blockDim.x + threadIdx.x; k < count;
+         k += size_t(blockDim.x) * gridDim.x) {
+        const size_t i = k % physical_rows, j = k / physical_rows;
+        const size_t src_idx = dst_transpose == src_transpose ? k : i * src_numrow + j;
+        dst[(i + row_offset) + (j + col_offset) * dst_numrow] = src[src_idx];
+    }
+}
+
 // Indexed copying with a bounded launch and 64-bit grid-stride arithmetic.
 __global__ void copyDexKernel(float* output,const float* input,const size_t* rows,
                              const size_t* cols,size_t nr,size_t nc,size_t stride,bool transposed){
