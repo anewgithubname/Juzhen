@@ -486,9 +486,9 @@ set_tests_properties(all_layer_training_api PROPERTIES
     LABELS "unit;gradient;training;convolution" TIMEOUT 180 SKIP_RETURN_CODE 77
     ENVIRONMENT "NVIDIA_TF32_OVERRIDE=0;NVIDIA_TF32=0;OPENBLAS_NUM_THREADS=1;OMP_NUM_THREADS=1")
 
-GENERATE_PROJ(testMaskedLossAPI tests/testMaskedLossAPI.cu)
-add_test(NAME masked_loss_api COMMAND testMaskedLossAPI)
-set_tests_properties(masked_loss_api PROPERTIES
+GENERATE_PROJ(testLossFunctions tests/testLossFunctions.cu)
+add_test(NAME loss_functions COMMAND testLossFunctions)
+set_tests_properties(loss_functions PROPERTIES
     LABELS "unit;ml;training;loss" TIMEOUT 120
     ENVIRONMENT "NVIDIA_TF32_OVERRIDE=0;NVIDIA_TF32=0;OPENBLAS_NUM_THREADS=1;OMP_NUM_THREADS=1")
 

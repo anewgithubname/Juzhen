@@ -6,7 +6,7 @@
  *     datasets/corpus.txt, else an embedded public-domain passage (Alice)
  *   - byte/char-level: one-hot character input plus one-hot position features
  *   - embed -> two TransformerLayer blocks -> projection
- *   - MINI-BATCH next-character training with the framework LogisticLayer
+ *   - MINI-BATCH next-character training with the framework softmax_cross_entropy
  *     (random windows sampled each step, so the corpus size is unbounded and
  *      memory per step is constant)
  *   - 90/10 train/validation split; reported val loss/acc measure
@@ -15,6 +15,7 @@
  */
 
 #include "../ml/layer.hpp"
+#include "../ml/loss.hpp"
 #include "../ml/optimizer.hpp"
 #include "../cpp/juzhen.hpp"
 
@@ -338,10 +339,8 @@ int compute() {
     // Evaluate a fixed batch (no weight update): returns {loss, accuracy%}.
     auto eval_batch = [&](const Matrix<float>& Xh, const Matrix<float>& Yh) {
         auto Xb = Matrix<FLOAT>(Xh);
-        LogisticLayer<FLOAT> el(N, Matrix<FLOAT>(Yh));
         auto net = build_net(blocks, embed, proj);
-        net.push_front(&el);
-        const float loss = as_host(forward(net, Xb)).elem(0, 0);
+        const float loss = as_host(softmax_cross_entropy(forward(net, Xb), Matrix<FLOAT>(Yh)).value).elem(0, 0);
         auto logits = as_host(proj.value());
         int correct = 0;
         for (int i = 0; i < N; ++i) {
@@ -375,8 +374,7 @@ int compute() {
         auto X = Matrix<FLOAT>(X_h);
         optimizer.zero_grad();
         const auto& logits = trainnn.eval(X);
-        LogisticLayer<FLOAT> loss(N, Matrix<FLOAT>(Y_h));
-        trainnn.backward(loss.backward(logits, Matrix<FLOAT>::ones(1, 1)));
+        trainnn.backward(softmax_cross_entropy(logits, Matrix<FLOAT>(Y_h)).grad);
         optimizer.step();
 
         if (step % log_every == 0 || step == steps - 1) {

@@ -31,6 +31,7 @@
  */
 
 #include "../ml/layer.hpp"
+#include "../ml/loss.hpp"
 #include "../ml/optimizer.hpp"
 #include "../cpp/juzhen.hpp"
 #include "../external/httplib.h"
@@ -198,12 +199,12 @@ int compute() {
                     auto t = Matrix<FLOAT>::rand(1, batchsize);
                     auto Xt = hadmd(X0, ones21 * (1 - t)) + hadmd(X1, ones21 * t);
                     auto inp = vs({Xt, t});
-                    LossLayer<FLOAT> ls(batchsize, X1 - X0);
                     optimizer.zero_grad();
                     const auto& prediction = network.eval(inp);
-                    ls.eval(prediction);
-                    float loss = item(ls.value());
-                    network.backward(ls.backward(prediction, Matrix<FLOAT>::ones(1, 1)));
+                    // regress the velocity X1 - X0
+                    auto [loss_value, dprediction] = mse(prediction, X1 - X0);
+                    float loss = item(loss_value);
+                    network.backward(std::move(dprediction));
                     optimizer.step();
 
                     if (i % 200 == 0 || i == iters - 1) {

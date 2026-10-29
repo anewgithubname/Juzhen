@@ -5,6 +5,7 @@
 
 #include "../cpp/juzhen.hpp"
 #include "../ml/layer.hpp"
+#include "../ml/loss.hpp"
 
 #include <algorithm>
 #include <cmath>
@@ -131,14 +132,8 @@ int compute() {
         return 1;
     }
 
-    LossLayer<float> loss_h(batch, target_h);
-    LossLayer<MPSfloat> loss_m(batch, Matrix<MPSfloat>(target_h));
-
-    std::list<Layer<float>*> eval_h = {&loss_h, &L3_h, &L2_h, &L1_h, &L0_h};
-    std::list<Layer<MPSfloat>*> eval_m = {&loss_m, &L3_m, &L2_m, &L1_m, &L0_m};
-
-    const float scalar_h = item(forward(eval_h, inp_h));
-    const float scalar_m = item(forward(eval_m, inp_m));
+    const float scalar_h = item(mse(forward(net_h, inp_h), target_h).value);
+    const float scalar_m = item(mse(forward(net_m, inp_m), Matrix<MPSfloat>(target_h)).value);
     const float loss_abs = std::fabs(scalar_h - scalar_m);
     const float loss_rel = loss_abs / std::max(std::fabs(scalar_h), 1e-12f);
 

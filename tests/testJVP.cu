@@ -5,7 +5,7 @@
  * Two independent checks per network:
  *   (a) adjoint consistency against the existing backprop:
  *           <W, J u> == <J^T W, u>
- *       where J^T W comes from the free function grad() — both sides
+ *       where J^T W comes from backward(net, x, W) — both sides
  *       linearize at the same point, so agreement is at fp32 rounding level;
  *   (b) central finite differences along u (looser: fp32 + ReLU kinks).
  *
@@ -51,7 +51,10 @@ int check_network(list<Layer<D>*> nn, int d_in, int nb, const string& name,
 
     // (a) adjoint consistency with backprop.
     auto W = Matrix<D>::randn(Ju.num_row(), Ju.num_col());
-    auto JTW = grad(nn, x, W);
+    freeze(nn);  // only the input gradient is wanted
+    forward(nn, x);
+    auto JTW = backward(nn, x, Matrix<D>(W));
+    unfreeze(nn);
     const float lhs = dotf(W, Ju), rhs = dotf(JTW, u);
     const float adj_err = std::abs(lhs - rhs) / (std::abs(lhs) + 1e-12f);
 

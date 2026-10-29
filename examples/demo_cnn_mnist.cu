@@ -5,6 +5,7 @@
  */
 
 #include "../ml/layer.hpp"
+#include "../ml/loss.hpp"
 #include "../ml/optimizer.hpp"
 #include "../ml/dataloader.hpp"
 
@@ -286,11 +287,10 @@ int compute() {
 
                 optimizer.zero_grad();
                 const auto& prediction = network.eval(X_i);
-                LogisticLayer<D> loss_layer(batchsize, std::move(Y_i));
-                loss_layer.eval(prediction);
-                float cur_loss = item(loss_layer.value());
+                auto [loss, dprediction] = softmax_cross_entropy(prediction, Y_i);
+                float cur_loss = item(loss);
                 loss_history.push_back(cur_loss);
-                network.backward(loss_layer.backward(prediction, Matrix<D>::ones(1, 1)));
+                network.backward(std::move(dprediction));
                 optimizer.step();
 
                 float elapsed = (float)time_in_ms(t_start, Clock::now()) / 1000.0f;
@@ -332,9 +332,8 @@ int compute() {
                 if (XT_b_cpu.num_col() != static_cast<size_t>(batchsize)) continue;
                 auto XT_b = Matrix<D>(XT_b_cpu / 255.0f);
                 auto YT_b = Matrix<D>(one_hot(yT_b_idx, k));
-                ZeroOneLayer<D> eval_loss(batchsize, std::move(YT_b));
-                list<Layer<D>*> evalnn = { &eval_loss, &L2, &L1, &conv3, &conv2, &conv1 };
-                total_err += as_host(forward(evalnn, XT_b)).elem(0, 0);
+                list<Layer<D>*> evalnn = { &L2, &L1, &conv3, &conv2, &conv1 };
+                total_err += as_host(error_rate(forward(evalnn, XT_b), YT_b)).elem(0, 0);
             }
             std::lock_guard<std::mutex> lk(mtx);
             s_acc = 1.0f - total_err / (float)n_test_batches;

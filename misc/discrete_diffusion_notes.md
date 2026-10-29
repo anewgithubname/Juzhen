@@ -13,7 +13,7 @@ trained on text8 / enwik8. Records what we tried, the numbers, and the lessons.
 - **Bidirectional transformer denoiser.** Added a `causal` flag to
   `TransformerLayer` (`ml/layer.hpp`, default `true` so the autoregressive demo is
   unchanged); the diffusion demo builds blocks with `causal=false`.
-- **Custom masked cross-entropy** (`MaskedCELayer`): stable softmax CE, supervised
+- **Custom masked cross-entropy** (`masked_softmax_cross_entropy` in `ml/loss.hpp`): stable softmax CE, supervised
   **only at masked positions**, each weighted by `1/t` — the continuous-time MDLM
   ELBO weight for a linear schedule. Reported as bits-per-character (an upper bound
   on the true NLL).

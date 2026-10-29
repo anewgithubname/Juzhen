@@ -26,6 +26,7 @@
 // #define CPU_ONLY
 
 #include "../ml/layer.hpp"
+#include "../ml/loss.hpp"
 #include "../ml/optimizer.hpp"
 #include "../cpp/juzhen.hpp"
 #include <math.h>
@@ -101,11 +102,9 @@ int compute() {
     // define layers
     Layer<FLOAT> L0(4096, d, batchsize), L1(128, 4096, batchsize);
     LinearLayer<FLOAT> L2(k, 128, batchsize);
-    // least sqaure loss
-    ZeroOneLayer<FLOAT> L3t(XT.num_col(), std::move(YT));
 
-    // nns are linked lists containing layers
-    list<Layer<FLOAT>*> trainnn({ &L2, &L1, &L0 }), testnn({ &L3t, &L2, &L1, &L0 });
+    // nns are linked lists containing layers, output layer first
+    list<Layer<FLOAT>*> trainnn({ &L2, &L1, &L0 });
     Sequential<FLOAT> network(trainnn);
     AdamWOptions options;
     options.weight_decay = 0; // Preserve the original Adam update.
@@ -129,14 +128,13 @@ int compute() {
         // Compute gradients, then update all parameters together.
         optimizer.zero_grad();
         const auto& prediction = network.eval(X_i);
-        LogisticLayer<FLOAT> L3(batchsize, std::move(Y_i));
-        network.backward(L3.backward(prediction, Matrix<FLOAT>::ones(1, 1)));
+        network.backward(softmax_cross_entropy(prediction, Y_i).grad);
         optimizer.step();
         if (iter % 1000 == 0) {
 #if defined(CUDA) || defined(APPLE_SILICON)
-            cout << "Misclassification Rate: " << forward(testnn, XT).to_host().elem(0, 0) << endl;
+            cout << "Misclassification Rate: " << error_rate(forward(trainnn, XT), YT).to_host().elem(0, 0) << endl;
 #else
-            cout << "Misclassification Rate: " << forward(testnn, XT).elem(0, 0) << endl;
+            cout << "Misclassification Rate: " << error_rate(forward(trainnn, XT), YT).elem(0, 0) << endl;
 #endif
         }
 

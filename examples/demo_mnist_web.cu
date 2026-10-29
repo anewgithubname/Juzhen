@@ -23,6 +23,7 @@
 // #define CPU_ONLY
 
 #include "../ml/layer.hpp"
+#include "../ml/loss.hpp"
 #include "../ml/optimizer.hpp"
 #include "../external/httplib.h"
 
@@ -102,9 +103,8 @@ int compute() {
     // define layers, same architecture as demo_mnist
     Layer<FLOAT> L0(1024, d, batchsize), L1(128, 1024, batchsize);
     LinearLayer<FLOAT> L2(k, 128, batchsize);
-    ZeroOneLayer<FLOAT> L3t(XT.num_col(), YT);
 
-    list<Layer<FLOAT> *> trainnn({&L2, &L1, &L0}), testnn({&L3t, &L2, &L1, &L0});
+    list<Layer<FLOAT> *> trainnn({&L2, &L1, &L0});
     Sequential<FLOAT> network(trainnn);
     AdamWOptions options;
     options.weight_decay = 0; // Preserve the original Adam update.
@@ -125,14 +125,13 @@ int compute() {
 
         optimizer.zero_grad();
         const auto& prediction = network.eval(X_i);
-        LogisticLayer<FLOAT> L3(batchsize, std::move(Y_i));
-        network.backward(L3.backward(prediction, Matrix<FLOAT>::ones(1, 1)));
+        network.backward(softmax_cross_entropy(prediction, Y_i).grad);
         optimizer.step();
         if (iter % 1000 == 0) {
 #if defined(CUDA) || defined(ROCM_HIP) || defined(APPLE_SILICON)
-            cout << "Misclassification Rate: " << forward(testnn, XT).to_host().elem(0, 0) << endl;
+            cout << "Misclassification Rate: " << error_rate(forward(trainnn, XT), YT).to_host().elem(0, 0) << endl;
 #else
-            cout << "Misclassification Rate: " << forward(testnn, XT).elem(0, 0) << endl;
+            cout << "Misclassification Rate: " << error_rate(forward(trainnn, XT), YT).elem(0, 0) << endl;
 #endif
         }
 
@@ -140,9 +139,9 @@ int compute() {
     }
 
 #if defined(CUDA) || defined(ROCM_HIP) || defined(APPLE_SILICON)
-    float testerr = forward(testnn, XT).to_host().elem(0, 0);
+    float testerr = error_rate(forward(trainnn, XT), YT).to_host().elem(0, 0);
 #else
-    float testerr = forward(testnn, XT).elem(0, 0);
+    float testerr = error_rate(forward(trainnn, XT), YT).elem(0, 0);
 #endif
     cout << "Training done. Final misclassification rate: " << testerr << endl;
 

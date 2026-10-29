@@ -122,8 +122,8 @@ namespace Juzhen
 			return dx;
 		}
 
-        // Layer itself is a trainable tanh dense layer. Unknown subclasses
-        // still opt in explicitly: their grad() may mean a loss derivative.
+        // Layer itself is a trainable tanh dense layer. Subclasses must opt in
+        // explicitly by overriding this together with backward().
         virtual bool supports_backward() const { return typeid(*this) == typeid(Layer<D>); }
 
         // Explicit training API: return the input gradient and collect the
@@ -266,174 +266,6 @@ namespace Juzhen
 
     };
 
-	
-	/*
-	* least square layer 
-	*/
-	template <class D>
-	class LossLayer : public Layer<D> {
-		// you cannot change the output once you set it. 
-		Matrix<D> output;
-	public:
-		LossLayer(int nb, const Matrix<D>& output) : Layer<D>(1, 1, nb), output(output) { // copy from the output
-		}
-
-		LossLayer(int nb, Matrix<D>&& output) : Layer<D>(1, 1, nb), output(output) { // move the output to the output owned by the layer
-		}
-
-        bool supports_backward() const override { return true; }
-        std::vector<ParameterRef<D>> parameters() override { return {}; }
-        std::vector<std::pair<std::string, Matrix<D>*>> checkpoint_parameters() override { return {}; }
-        std::vector<std::pair<std::string, adam_state<D>*>> checkpoint_optimizers() override { return {}; }
-
-        Matrix<D> backward(const Matrix<D>& input, Matrix<D>&& upstream) override {
-            if (upstream.num_row() != 1 || upstream.num_col() != 1 ||
-                input.num_row() != output.num_row() || input.num_col() != output.num_col())
-                throw std::invalid_argument("loss backward shape mismatch");
-            auto scale = Matrix<D>::ones(input.num_row(), 1) * upstream
-                       * Matrix<D>::ones(1, input.num_col());
-            return hadmd(grad(input), std::move(scale));
-        }
-
-		Matrix<D> grad(const Matrix<D>& input) const override {
-			return 2.0 * (input - output) / Layer<D>::nb;
-		}
-
-		Matrix<D> jvp(const Matrix<D>&, const Matrix<D>&) override {
-			LOG_ERROR("jvp is not defined for loss heads: their grad() is the loss gradient, not an activation derivative. Call jvp on the network list without the loss layer.");
-			ERROR_OUT;
-		}
-
-		void eval(const Matrix<D>& input) override {
-			// square -> sum over features -> sum over batch
-			Layer<D>::val = sum(sum(square(output - input), 0), 1) / Layer<D>::nb;
-		}
-	};
-
-	/*
-	* logistic layer
-	*/
-	template <class D>
-	class LogisticLayer : public Layer<D> {
-		// you cannot change the output once you set it. 
-		Matrix<D> output;
-		Matrix<D> oneK1;
-        // input must have the same shape as the one-hot labels in `output`
-        void check_input(const Matrix<D>& input) const {
-            if (!Layer<D>::nb || !output.num_row() || output.num_col() != Layer<D>::nb ||
-                input.num_row() != output.num_row() || input.num_col() != output.num_col())
-                throw std::invalid_argument("logistic loss input shape mismatch");
-        }
-	public:
-		LogisticLayer(size_t nb, const Matrix<D>& output) : 
-			Layer<D>(2, 2, nb), 
-			output(output), 
-			oneK1("oneK1", output.num_row(), 1) {
-			oneK1.ones();
-		}
-
-		LogisticLayer(size_t nb, Matrix<D>&& output) : 
-			Layer<D>(2, 2, nb), 
-			output(output), 
-			oneK1("oneK1", output.num_row(), 1) {
-			oneK1.ones();
-		}
-
-        bool supports_backward() const override { return true; }
-        std::vector<ParameterRef<D>> parameters() override { return {}; }
-        Matrix<D> backward(const Matrix<D>& input, Matrix<D>&& upstream) override {
-            if (!Layer<D>::nb || upstream.num_row() != 1 || upstream.num_col() != 1 ||
-                input.num_row() != output.num_row() || input.num_col() != output.num_col() ||
-                input.num_col() != Layer<D>::nb)
-                throw std::invalid_argument("logistic loss backward shape mismatch");
-            // broadcast the 1x1 upstream gradient to the input's shape
-            auto scale = Matrix<D>::ones(input.num_row(), 1) * upstream * Matrix<D>::ones(1, input.num_col());
-            return hadmd(grad(input), std::move(scale));
-        }
-		Matrix<D> grad(const Matrix<D>& input) const override {
-			// Numerically stable softmax: subtract column-wise max before exp.
-            check_input(input);
-			auto mx = reduce(
-				[] __GPU_CPU__(float* v, float* vdes, int lenv, int) {
-					float m = -1e30f;
-					for (int i = 0; i < lenv; i++) m = m > v[i] ? m : v[i];
-					vdes[0] = m;
-				}, input, 0, 1);                       // (1, N)
-			auto shifted = input - oneK1 * mx;         // (K, N)
-			auto E = exp(std::move(shifted));
-			auto Z = oneK1 * sum(E, 0);
-			return - (output - E / std::move(Z)) / Layer<D>::nb;
-		}
-
-		Matrix<D> jvp(const Matrix<D>&, const Matrix<D>&) override {
-			LOG_ERROR("jvp is not defined for loss heads: their grad() is the loss gradient, not an activation derivative. Call jvp on the network list without the loss layer.");
-			ERROR_OUT;
-		}
-
-		void eval(const Matrix<D>& input) override {
-			// Numerically stable log-sum-exp: max subtraction prevents overflow.
-            check_input(input);
-			auto mx = reduce(
-				[] __GPU_CPU__(float* v, float* vdes, int lenv, int) {
-					float m = -1e30f;
-					for (int i = 0; i < lenv; i++) m = m > v[i] ? m : v[i];
-					vdes[0] = m;
-				}, input, 0, 1);                       // (1, N)
-			auto shifted = input - oneK1 * mx;         // (K, N)
-			auto lse = log(sum(exp(std::move(shifted)), 0)) + mx; // (1, N)
-			Layer<D>::val = sum(hadmd(input, output), 0) - lse;
-			Layer<D>::val = - sum(Layer<D>::val, 1) / Layer<D>::nb;
-		}
-	};
-
-
-	/*
-	* zero-one layer
-	*/
-	template <class D>
-	class ZeroOneLayer : public Layer<D> {
-		// you cannot change the output once you set it. 
-		Matrix<D> output;
-		Matrix<D> oneK1;
-
-	public:
-        bool supports_backward() const override { return false; }
-        std::vector<ParameterRef<D>> parameters() override { return {}; }
-        Matrix<D> backward(const Matrix<D>&, Matrix<D>&&) override {
-            throw std::logic_error("ZeroOneLayer is an evaluation metric and cannot be differentiated");
-        }
-		ZeroOneLayer(size_t nb, const Matrix<D>& output) :
-			Layer<D>(1, 1, nb),
-			output(output),
-			oneK1("oneK1", output.num_row(), 1) {
-			oneK1.ones();
-			std::cout << "copied" << std::endl;
-		}
-		ZeroOneLayer(size_t nb, Matrix<D>&& output) :
-			Layer<D>(1, 1, nb),
-			output(output),
-			oneK1("oneK1", output.num_row(), 1) {
-			oneK1.ones();
-			// std::cout << "moved" << std::endl;
-		}
-
-		Matrix<D> grad(const Matrix<D>&) const override {
-			LOG_ERROR("you cannot differentiate zero-one layer!");
-			ERROR_OUT;
-		}
-
-		Matrix<D> jvp(const Matrix<D>&, const Matrix<D>&) override {
-			LOG_ERROR("you cannot differentiate zero-one layer!");
-			ERROR_OUT;
-		}
-
-		void eval(const Matrix<D>& input) override {
-			// compute test accuracy
-			auto pred = predict_one_hot(input);
-			Layer<D>::val = 1 - sum(sum(hadmd(pred, output), 0),1)/input.num_col();
-		}
-	};
-
 	// evaluate a neural network, with input. 
 	template <class D>
 	const Matrix<D>& forward(std::list<Layer<D>*> neuralnet, const Matrix<D>& input) {
@@ -509,15 +341,11 @@ template<class D> Matrix<D> backward(const std::list<Layer<D>*>& net, const Matr
         }
         const Matrix<D>& eval(const Matrix<D>&&) = delete;
 
+        // `upstream` is the gradient of the loss with respect to the network
+        // output, e.g. the `grad` returned by softmax_cross_entropy (loss.hpp).
         Matrix<D> backward(Matrix<D> upstream) {
             if (!input_) throw std::logic_error("evaluate Sequential before backward");
             return Juzhen::backward(layers_, *input_, std::move(upstream));
-        }
-        Matrix<D> backward() {
-            const auto& output = value();
-            if (output.num_row() != 1 || output.num_col() != 1)
-                throw std::logic_error("non-scalar output requires an upstream gradient");
-            return backward(Matrix<D>::ones(1, 1));
         }
         const Matrix<D>& value() const {
             if (!input_) throw std::logic_error("evaluate Sequential before reading its value");
@@ -535,8 +363,7 @@ template<class D> Matrix<D> backward(const std::list<Layer<D>*>& net, const Matr
 	// pass (layers with activation masks read them from val, which must match
 	// the linearization point), so afterwards the last layer's value() holds
 	// the primal output. Weights are never touched — suitable for pretrained
-	// networks. Pass the list you would pass to forward() for inference,
-	// i.e. without loss heads.
+	// networks. Pass the same list you would pass to forward().
 	template <class D>
 	Matrix<D> jvp(std::list<Layer<D>*> neuralnet, const Matrix<D>& input, const Matrix<D>& tangent) {
 		if (neuralnet.empty()) {
@@ -547,65 +374,6 @@ template<class D> Matrix<D> backward(const std::list<Layer<D>*>& net, const Matr
 		layer->eval(input);
 		auto tangent_out = layer->jvp(input, tangent);
 		return jvp(neuralnet, layer->value(), tangent_out);
-	}
-
-	// updating the parameters in neural network.
-	template <class D>
-	Matrix<D> backward_update(std::list<Layer<D>*> neuralnet, const Matrix<D>& input) {
-		auto tt = neuralnet.back();
-		neuralnet.pop_back();
-		if (neuralnet.empty()) {
-			return tt->grad(input);
-		}
-		else {
-			auto WT_prev_grad = backward_update(neuralnet, tt->value());
-			return tt->backward_update(input, std::move(WT_prev_grad));
-		}
-	}
-
-	template <class D>
-	Matrix<D> grad(std::list<Layer<D>*> neuralnet, const Matrix<D> &input, const Matrix<D> &W){
-		/*
-		* least square layer 
-		*/
-		class SumLayer : public Layer<D> {
-			// you cannot change the output once you set it.
-			const Matrix<D>& W;
-		public:
-            explicit SumLayer(const Matrix<D> &W): Layer<D>(2, 2, 2), W(W) {
-			}
-            bool supports_backward() const override { return true; }
-            std::vector<ParameterRef<D>> parameters() override { return {}; }
-            Matrix<D> backward(const Matrix<D>& input, Matrix<D>&& upstream) override {
-                if (input.num_row() != W.num_row() || input.num_col() != W.num_col() ||
-                    upstream.num_row() != 1 || upstream.num_col() != 1)
-                    throw std::invalid_argument("weighted sum backward shape mismatch");
-                // broadcast the 1x1 upstream gradient to W's shape
-                auto scale = Matrix<D>::ones(W.num_row(), 1) * upstream * Matrix<D>::ones(1, W.num_col());
-                return hadmd(W, std::move(scale));
-            }
-
-			Matrix<D> grad(const Matrix<D>&) const override {
-				return W;
-			}
-
-			void eval(const Matrix<D>& input) override {
-				Layer<D>::val = sum(sum(hadmd(W, input),1),0);
-			}
-		};
-
-        freeze(neuralnet);
-        
-		// forward-backward pass
-		forward(neuralnet, input);
-        SumLayer sumL(W);
-        neuralnet.push_front(&sumL);
-        auto ret = backward_update(neuralnet, input);
-        neuralnet.pop_front();
-
-        unfreeze(neuralnet);
-		
-		return ret;
 	}
 
 	template <class D>
