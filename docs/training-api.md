@@ -1,8 +1,10 @@
 # Training API
 
-`backward` computes input and parameter gradients without updating weights.
-`layer.backward_update(input, upstream)` retains the previous combined
-backpropagation and Adam update for a single layer.
+`backward` computes input and parameter gradients without updating weights; an
+optimizer (`AdamW` in `ml/optimizer.hpp`) then applies the update. This is the
+only training path. The earlier `backward_update`, which updated each layer's
+weights during backpropagation, has been removed together with `adam_update`,
+`setlr` and the per-layer learning-rate fields.
 
 `Sequential` borrows a native Juzhen list, in its established output-first order.
 The network contains only layers; the loss is a function applied to its output:
@@ -83,20 +85,21 @@ weights and biases; CPU convolution supports matrix transpose views.
 `AdamW` supports CPU `float`, CUDA `CUDAfloat`, Metal `MPSfloat`, and ROCm
 `ROCMfloat`, with parameter freezing, shared parameter registrations,
 learning-rate changes and optional global gradient clipping. CPU and CUDA use
-their optimized updates; Metal and ROCm use device matrix operations. The latter
-two backends have not been exercised on hardware for this migration. It borrows existing layer Adam states so checkpoint storage stays
-compatible. Weight decay excludes parameters registered with `decay=false`.
+their optimized updates; Metal and ROCm use device matrix operations. ROCm has
+been run on hardware; Metal has not. The optimizer keeps its moments in the
+layers' Adam states, so they are saved and restored by checkpoints. Weight decay
+excludes parameters registered with `decay=false`.
 
 The `demo_training` target provides a complete regression example.
 The `training_api` test checks finite-difference gradients, native-list and
-Sequential equivalence, accumulation, legacy Adam equivalence, error handling,
+Sequential equivalence, accumulation, error handling,
 gradient clipping and normalization against scalar references.
 
 The `all_layer_training_api` regression exercises activation, convolution and transpose
 convolution layers through the explicit training API. `loss_functions` checks
 every loss function against independent FP64 references and finite differences,
 including soft labels, extreme logits, zero-weight columns, shape and weight
-validation, and a short training run, on CPU and CUDA.
+validation, and a short training run, on CPU, CUDA and ROCm.
 
 `LayerNormLayer<D>(features, columns)` supports both standalone and layer-list
 use. `forward(input)` returns a new output matrix by value and updates the
@@ -107,13 +110,11 @@ new normalization. Backward and JVP always use the statistics from the most
 recent successful normalization, so do not mix entries between a network's
 `eval` and its backward pass.
 
-Standalone calls remain `backward(std::move(upstream), enabled)`,
-`backward_update(std::move(upstream), enabled)`, and `jvp(tangent)`; layer-list
-calls use the usual `backward(input, std::move(upstream))` and
-`jvp(input, tangent)` overloads. Gradient-only backward accumulates gamma and
-beta gradients; updating backward keeps the previous Adam behavior. Freezing a
-layer disables its parameter gradients and updates while preserving input
-gradients. The public `trainable` flag can also disable gamma and beta training.
+Standalone calls are `backward(std::move(upstream), enabled)` and
+`jvp(tangent)`; layer-list calls use the usual `backward(input, std::move(upstream))`
+and `jvp(input, tangent)` overloads. Backward accumulates gamma and beta
+gradients. Freezing a layer disables its parameter gradients while preserving
+input gradients. The public `trainable` flag can also disable gamma and beta training.
 
 The previous `LayerNorm<D>` name is removed without an alias. Rename standalone
 instances to `LayerNormLayer<D>`, and replace wrapper member access such as

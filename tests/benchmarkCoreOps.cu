@@ -4,6 +4,7 @@
  */
 #include "../cpp/juzhen.hpp"
 #include "../ml/layer.hpp"
+#include "../ml/optimizer.hpp"
 #include <chrono>
 #include <cstdlib>
 #include <iomanip>
@@ -94,13 +95,15 @@ Result attention(int w, int n) {
 
 Result adam(int w, int n) {
     constexpr int elements=1<<20;
+    auto weight = Matrix<Backend>::randn(elements, 1);
     adam_state<Backend> state(1e-3, elements, 1);
-    auto gradient = Matrix<Backend>::randn(elements, 1);
-    const double ms = measure_ms([&] {
-        auto updated = adam_update(std::move(gradient), state);
-        gradient = std::move(updated);
-    }, w, n);
-    return {"Adam update", "1048576 elements", ms, elements/(ms*1000.0), "Melem/s"};
+    GradientBuffer<Backend> gradient{Matrix<Backend>::randn(elements, 1), true};
+    bool trainable = true;
+    AdamWOptions options; options.lr = 1e-3f; options.weight_decay = 0;
+    AdamW<Backend> optimizer({{"weight", &weight, &gradient, &state, &trainable}}, options);
+    // the gradient stays registered, so every call performs a full update
+    const double ms = measure_ms([&] { optimizer.step(); }, w, n);
+    return {"AdamW step", "1048576 elements", ms, elements/(ms*1000.0), "Melem/s"};
 }
 }
 

@@ -36,7 +36,7 @@ template<class D> struct ParameterRef {
 };
 
 // No buffers or Adam copies are allocated merely by constructing a layer.
-// Copying a legacy layer does not copy registrations bound to the old object.
+// Copying a layer does not copy registrations bound to the old object.
 template<class D> class GradientStore {
     std::map<Matrix<D>*, std::unique_ptr<GradientBuffer<D>>> buffers_;
 

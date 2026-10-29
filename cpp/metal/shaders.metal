@@ -293,32 +293,6 @@ kernel void add_bias_rm_kernel(
     y[gid] += b[gid / N];
 }
 
-// Fused Adam step (elementwise, layout-agnostic): updates m, v in place and
-// rewrites g with the step alpha * m_hat / (sqrt(v_hat) + eps). bc1/bc2 are
-// the host-computed bias corrections 1/(1-beta^t).
-kernel void adam_update_kernel(
-    device float* g       [[buffer(0)]],
-    device float* m       [[buffer(1)]],
-    device float* v       [[buffer(2)]],
-    constant float& alpha [[buffer(3)]],
-    constant float& beta1 [[buffer(4)]],
-    constant float& beta2 [[buffer(5)]],
-    constant float& eps   [[buffer(6)]],
-    constant float& bc1   [[buffer(7)]],
-    constant float& bc2   [[buffer(8)]],
-    uint i [[thread_position_in_grid]])
-{
-    // Keep (1 - beta2) intact instead of reassociating the moment update
-    // into a subtraction of nearly equal values under Metal fast math.
-    #pragma clang fp reassociate(off)
-    const float gi = g[i];
-    const float mi = beta1 * m[i] + (1.0f - beta1) * gi;
-    const float vi = beta2 * v[i] + (1.0f - beta2) * gi * gi;
-    m[i] = mi;
-    v[i] = vi;
-    g[i] = alpha * (mi * bc1) / (sqrt(vi * bc2) + eps);
-}
-
 // ── batched multi-head attention helpers ───────────────────────────────────
 // The packed layout stores one (seq x d_h) row-major matrix per (head, batch)
 // block, concatenated: packed[((h*B + b)*seq + s)*d_h + e] = X[h*d_h + e, b*seq + s]

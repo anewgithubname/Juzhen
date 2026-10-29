@@ -31,8 +31,6 @@ int Rocm_layernorm_forward(const float* x, const float* gamma, const float* beta
 int Rocm_layernorm_backward(const float* dy, const float* gamma, const float* xhat,
     const float* inv_std, float* dx, int dim, int N);
 int Rocm_add_bias(float* y, const float* b, int rows, size_t total);
-int Rocm_adam_update(float* g, float* m, float* v, float alpha, float beta1,
-    float beta2, float eps, float bc1, float bc2, size_t n);
 
 int RocmFill(float* dst_device, std::size_t count, float value);
 int RocmCausalMask(float* scores, int seq_len, bool transpose, float value);

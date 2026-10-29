@@ -11,6 +11,7 @@
 
 #include "../ml/layer.hpp"
 #include "../ml/loss.hpp"
+#include "../ml/optimizer.hpp"
 #include "../ml/dataloader.hpp"
 #include <cmath>
 #include <cstdlib>
@@ -43,17 +44,21 @@ static constexpr int N_ITERS = 100;
 static const std::string REF_FILE =
     std::string(PROJECT_DIR) + "/tests/cnn_train_ref.txt";
 
-// One training step on the per-layer updating path: compute the softmax CE
-// gradient of the network output, then let every layer, from the output back
-// to the input, update its own Adam state. Returns the batch loss.
+// Plain Adam (no weight decay) at the layers' default learning rate.
+static AdamWOptions adam_options() {
+    AdamWOptions options;
+    options.weight_decay = 0;
+    return options;
+}
+
+// One training step: softmax CE gradient of the network output, backward
+// through the network, then one optimizer update. Returns the batch loss.
 template<class D>
-float train_step(const std::list<Layer<D>*>& net, const Matrix<D>& X, const Matrix<D>& Y) {
+float train_step(const std::list<Layer<D>*>& net, AdamW<D>& optimizer, const Matrix<D>& X, const Matrix<D>& Y) {
+    optimizer.zero_grad();
     auto [loss, grad] = softmax_cross_entropy(forward(net, X), Y);
-    for (auto i = net.begin(); i != net.end(); ++i) {
-        auto next = std::next(i);
-        const auto& input = next == net.end() ? X : (*next)->value();
-        grad = (*i)->backward_update(input, std::move(grad));
-    }
+    backward(net, X, std::move(grad));
+    optimizer.step();
     if constexpr (std::is_same_v<D, float>) return loss.elem(0, 0);
     else return loss.to_host().elem(0, 0);
 }
@@ -91,6 +96,7 @@ int compute() {
     std::list<Layer<CUDAfloat>*> net;
     net.push_back(&L2); net.push_back(&L1);
     net.push_back(&c3); net.push_back(&c2); net.push_back(&c1);
+    AdamW<CUDAfloat> optimizer(parameters(net), adam_options());
 
     std::vector<float> gpu_losses;
     gpu_losses.reserve(N_ITERS);
@@ -99,7 +105,7 @@ int compute() {
         auto Xg = Matrix<CUDAfloat>(Xs[iter]);
         auto Yg = Matrix<CUDAfloat>(Ys[iter]);
 
-        gpu_losses.push_back(train_step(net, Xg, Yg));
+        gpu_losses.push_back(train_step(net, optimizer, Xg, Yg));
     }
 
     // Try to load CPU reference
@@ -165,6 +171,7 @@ int compute() {
     std::list<Layer<ROCMfloat>*> net;
     net.push_back(&L2); net.push_back(&L1);
     net.push_back(&c3); net.push_back(&c2); net.push_back(&c1);
+    AdamW<ROCMfloat> optimizer(parameters(net), adam_options());
 
     std::vector<float> gpu_losses;
     gpu_losses.reserve(N_ITERS);
@@ -173,7 +180,7 @@ int compute() {
         auto Xg = Matrix<ROCMfloat>(Xs[iter]);
         auto Yg = Matrix<ROCMfloat>(Ys[iter]);
 
-        gpu_losses.push_back(train_step(net, Xg, Yg));
+        gpu_losses.push_back(train_step(net, optimizer, Xg, Yg));
     }
 
     std::ifstream ref(REF_FILE);
@@ -238,6 +245,7 @@ int compute() {
     std::list<Layer<MPSfloat>*> net;
     net.push_back(&L2); net.push_back(&L1);
     net.push_back(&c3); net.push_back(&c2); net.push_back(&c1);
+    AdamW<MPSfloat> optimizer(parameters(net), adam_options());
 
     std::vector<float> gpu_losses;
     gpu_losses.reserve(N_ITERS);
@@ -246,7 +254,7 @@ int compute() {
         auto Xg = Matrix<MPSfloat>(Xs[iter]);
         auto Yg = Matrix<MPSfloat>(Ys[iter]);
 
-        gpu_losses.push_back(train_step(net, Xg, Yg));
+        gpu_losses.push_back(train_step(net, optimizer, Xg, Yg));
     }
 
     std::ifstream ref(REF_FILE);
@@ -320,6 +328,7 @@ int compute() {
     std::list<Layer<float>*> net;
     net.push_back(&L2); net.push_back(&L1);
     net.push_back(&c3); net.push_back(&c2); net.push_back(&c1);
+    AdamW<float> optimizer(parameters(net), adam_options());
 
     std::ofstream out(REF_FILE);
     std::cout << "CPU training (100 iters) — writing reference to " << REF_FILE << "\n";
@@ -329,7 +338,7 @@ int compute() {
         const Matrix<float>& Xh = Xs[iter];
         const Matrix<float>& Yh = Ys[iter];
 
-        const float lv = train_step(net, Xh, Yh);
+        const float lv = train_step(net, optimizer, Xh, Yh);
         out << lv << "\n";
 
         std::cout << std::setw(5) << iter

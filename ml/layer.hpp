@@ -60,8 +60,6 @@ namespace Juzhen
 		Matrix<D> weights, bias, val;
 		//batch size
         size_t nb;
-		// learning rates for w and b
-		double lrW, lrb;
 		// do we need to update weights and bias?
 		bool need_update = true;
 
@@ -70,7 +68,13 @@ namespace Juzhen
 
         // Derived layers with their own parameters need no dense tensors or RNG.
         explicit Layer(size_t batch)
-            : weights(nullptr), bias(nullptr), val(nullptr), nb(batch), lrW(.01), lrb(.01) {}
+            : weights(nullptr), bias(nullptr), val(nullptr), nb(batch) {}
+
+        // hand the gradients of the dense weights and bias to the optimizer
+        void add_parameter_gradients(Matrix<D>&& dW, Matrix<D>&& db) {
+            parameter_gradients.add(weights, std::move(dW));
+            parameter_gradients.add(bias, std::move(db));
+        }
 
 	public:
 		
@@ -87,8 +91,6 @@ namespace Juzhen
 			weights = Matrix<D>::randn(m, n) * .001;
 			bias = Matrix<D>::randn(m, 1) * .001;
 			val.zeros();
-			lrW = .01;
-			lrb = .01;
 		}
 		virtual Matrix<D> grad(const Matrix<D>& input) const {
 			// TODO: each time make a new matrix, not efficient
@@ -106,28 +108,12 @@ namespace Juzhen
 			return hadmd(grad(input), weights * tangent);
 		}
 
-		// Full backward pass for this layer: computes weight updates and returns
-		// the gradient to propagate to the previous layer.
-		// Default implementation covers all fully-connected layers.
-		virtual Matrix<D> backward_update(const Matrix<D>& input, Matrix<D>&& upstream_grad) {
-			auto curr_grad = grad(input);
-			auto t = hadmd(curr_grad, std::move(upstream_grad));
-			auto gW = t * input.T();
-			auto gb = sum(t, 1);
-			// Propagate through the weights used by eval(), before Adam changes them.
-			auto dx = W().T() * t;
-			if (need_update) {
-				update(std::move(gW), std::move(gb));
-			}
-			return dx;
-		}
-
         // Layer itself is a trainable tanh dense layer. Subclasses must opt in
         // explicitly by overriding this together with backward().
         virtual bool supports_backward() const { return typeid(*this) == typeid(Layer<D>); }
 
-        // Explicit training API: return the input gradient and collect the
-        // parameter gradients for an optimizer instead of updating in place.
+        // Return the input gradient and collect the parameter gradients for an
+        // optimizer (see optimizer.hpp); weights are not changed here.
         virtual Matrix<D> backward(const Matrix<D>& input, Matrix<D>&& upstream) {
             if (!supports_backward())
                 throw std::logic_error("this layer does not support gradient-only backward");
@@ -139,10 +125,8 @@ namespace Juzhen
             // t = dL/d(Wx + b), going back through the activation
             auto t = hadmd(grad(input), std::move(upstream));
             auto dx = weights.T() * t;
-            if (need_update) {
-                parameter_gradients.add(weights, t * input.T());
-                parameter_gradients.add(bias, sum(t, 1));
-            }
+            if (need_update)
+                add_parameter_gradients(t * input.T(), sum(t, 1));
             return dx;
         }
 
@@ -153,17 +137,6 @@ namespace Juzhen
             return {parameter_gradients.parameter("weight", weights, adamW, need_update),
                     parameter_gradients.parameter("bias", bias, adamb, need_update, false)};
         }
-
-		// this function will destroy gW and gb
-		void update(Matrix<D>&& gW, Matrix<D>&& gb) {
-			// adam update
-			weights -= adam_update(std::move(gW), adamW);
-			bias -= adam_update(std::move(gb), adamb);
-			
-			// //sgd update
-			// weights -= lrW * std::move(gW);
-			// bias -= lrb * std::move(gb);
-		}
 
 		virtual void eval(const Matrix<D>& input) {
 			// TODO: each time make a new matrix, not efficient
@@ -188,20 +161,14 @@ namespace Juzhen
 
 		void print() {
 			using namespace std;
-			cout << weights << endl << bias << endl << lrW << endl << lrb << endl;
+			cout << weights << endl << bias << endl;
 		}
 
 		template <class Data>
-		friend void setlr(std::list<Layer<Data>*> neuralnet, double lr);
-
-		template <class Data> 
 		friend void freeze(std::list<Layer<Data>*> neuralnet);
 
-		template <class Data> 
-		friend void unfreeze(std::list<Layer<Data>*> neuralnet);
-
 		template <class Data>
-		friend Matrix<Data> backward_update(std::list<Layer<Data>*> neuralnet, const Matrix<Data>& input);
+		friend void unfreeze(std::list<Layer<Data>*> neuralnet);
 	};
 
 	/**
@@ -224,10 +191,8 @@ namespace Juzhen
                 input.num_col() != dy.num_col())
                 throw std::invalid_argument("linear backward shape mismatch");
             auto dx = this->weights.T() * dy;
-            if (this->need_update) {
-                this->parameter_gradients.add(this->weights, dy * input.T());
-                this->parameter_gradients.add(this->bias, sum(dy, 1));
-            }
+            if (this->need_update)
+                this->add_parameter_gradients(dy * input.T(), sum(dy, 1));
             return dx;
         }
 
@@ -374,15 +339,6 @@ template<class D> Matrix<D> backward(const std::list<Layer<D>*>& net, const Matr
 		layer->eval(input);
 		auto tangent_out = layer->jvp(input, tangent);
 		return jvp(neuralnet, layer->value(), tangent_out);
-	}
-
-	template <class D>
-	void setlr(std::list<Layer<D>*> neuralnet, double lr)
-	{
-		for(auto& l : neuralnet) {
-			l->lrW = lr;
-			l->lrb = lr;
-		}
 	}
 
 	template <class D>
@@ -597,15 +553,6 @@ template<class D> Matrix<D> backward(const std::list<Layer<D>*>& net, const Matr
 				throw std::logic_error("convolution with ReLU requires eval before backward or JVP");
 		}
 
-		void finish_parameter_gradients(Matrix<D>&& dW, Matrix<D>&& db, bool collect) {
-			if (collect) {
-				this->parameter_gradients.add(this->weights, std::move(dW));
-				this->parameter_gradients.add(this->bias, std::move(db));
-			} else {
-				this->update(std::move(dW), std::move(db));
-			}
-		}
-
 	public:
 		/**
 		 * @param N       Batch size
@@ -780,14 +727,6 @@ template<class D> Matrix<D> backward(const std::list<Layer<D>*>& net, const Matr
 			        this->parameter_gradients.parameter("bias", this->bias, this->adamb, this->need_update, false)};
 		}
 		Matrix<D> backward(const Matrix<D>& input, Matrix<D>&& upstream_grad) override {
-			return backward_impl(input, std::move(upstream_grad), true);
-		}
-		Matrix<D> backward_update(const Matrix<D>& input, Matrix<D>&& upstream_grad) override {
-			return backward_impl(input, std::move(upstream_grad), false);
-		}
-
-	private:
-		Matrix<D> backward_impl(const Matrix<D>& input, Matrix<D>&& upstream_grad, bool collect) {
 			check_input(input);
 			if (upstream_grad.num_row() != size_t(C_out * H_out * W_out) || upstream_grad.num_col() != size_t(batchN))
 				throw std::invalid_argument("convolution upstream gradient shape mismatch");
@@ -829,7 +768,7 @@ template<class D> Matrix<D> backward(const std::list<Layer<D>*>& net, const Matr
 				&beta, b_desc, ptr(db)));
 
 			if (this->need_update)
-				finish_parameter_gradients(std::move(dW), std::move(db), collect);
+				this->add_parameter_gradients(std::move(dW), std::move(db));
 
 			return dx;
 		}
@@ -919,15 +858,6 @@ template<class D> Matrix<D> backward(const std::list<Layer<D>*>& net, const Matr
 		void check_cached_activation() const {
 			if (use_relu && !has_forward)
 				throw std::logic_error("transposed convolution with ReLU requires eval before backward or JVP");
-		}
-
-		void finish_parameter_gradients(Matrix<D>&& dW, Matrix<D>&& db, bool collect) {
-			if (collect) {
-				this->parameter_gradients.add(this->weights, std::move(dW));
-				this->parameter_gradients.add(this->bias, std::move(db));
-			} else {
-				this->update(std::move(dW), std::move(db));
-			}
 		}
 
 	public:
@@ -1092,14 +1022,6 @@ template<class D> Matrix<D> backward(const std::list<Layer<D>*>& net, const Matr
 			        this->parameter_gradients.parameter("bias", this->bias, this->adamb, this->need_update, false)};
 		}
 		Matrix<D> backward(const Matrix<D>& input, Matrix<D>&& upstream_grad) override {
-			return backward_impl(input, std::move(upstream_grad), true);
-		}
-		Matrix<D> backward_update(const Matrix<D>& input, Matrix<D>&& upstream_grad) override {
-			return backward_impl(input, std::move(upstream_grad), false);
-		}
-
-	private:
-		Matrix<D> backward_impl(const Matrix<D>& input, Matrix<D>&& upstream_grad, bool collect) {
 			check_input(input);
 			if (upstream_grad.num_row() != size_t(C_out * H_out * W_out) || upstream_grad.num_col() != size_t(batchN))
 				throw std::invalid_argument("transposed convolution upstream gradient shape mismatch");
@@ -1138,7 +1060,7 @@ template<class D> Matrix<D> backward(const std::list<Layer<D>*>& net, const Matr
 				&beta, b_desc, ptr(db)));
 
 			if (this->need_update)
-				finish_parameter_gradients(std::move(dW), std::move(db), collect);
+				this->add_parameter_gradients(std::move(dW), std::move(db));
 
 			return dx;
 		}
@@ -1453,15 +1375,6 @@ template<class D> Matrix<D> backward(const std::list<Layer<D>*>& net, const Matr
 				throw std::logic_error("convolution with ReLU requires eval before backward or JVP");
 		}
 
-		void finish_parameter_gradients(Matrix<D>&& dW, Matrix<D>&& db, bool collect) {
-			if (collect) {
-				this->parameter_gradients.add(this->weights, std::move(dW));
-				this->parameter_gradients.add(this->bias, std::move(db));
-			} else {
-				this->update(std::move(dW), std::move(db));
-			}
-		}
-
 	public:
 		ConvLayer(int N, int C_in, int H_in, int W_in,
 		          int C_out, int kH, int kW,
@@ -1544,14 +1457,6 @@ template<class D> Matrix<D> backward(const std::list<Layer<D>*>& net, const Matr
 			        this->parameter_gradients.parameter("bias", this->bias, this->adamb, this->need_update, false)};
 		}
 		Matrix<D> backward(const Matrix<D>& input, Matrix<D>&& upstream_grad) override {
-			return backward_impl(input, std::move(upstream_grad), true);
-		}
-		Matrix<D> backward_update(const Matrix<D>& input, Matrix<D>&& upstream_grad) override {
-			return backward_impl(input, std::move(upstream_grad), false);
-		}
-
-	private:
-		Matrix<D> backward_impl(const Matrix<D>& input, Matrix<D>&& upstream_grad, bool collect) {
 			check_input(input);
 			if (upstream_grad.num_row() != size_t(C_out * H_out * W_out) || upstream_grad.num_col() != size_t(batchN))
 				throw std::invalid_argument("convolution upstream gradient shape mismatch");
@@ -1586,7 +1491,7 @@ template<class D> Matrix<D> backward(const std::list<Layer<D>*>& net, const Matr
 			auto dW2d_h = dW2d.to_host();
 
 			if (this->need_update) {
-				finish_parameter_gradients(Matrix<D>(pack_weight_grad(dW2d_h)), std::move(db), collect);
+				this->add_parameter_gradients(Matrix<D>(pack_weight_grad(dW2d_h)), std::move(db));
 			}
 
 			return dx;
@@ -1661,15 +1566,6 @@ template<class D> Matrix<D> backward(const std::list<Layer<D>*>& net, const Matr
 		void check_cached_activation() const {
 			if (use_relu && !has_forward)
 				throw std::logic_error("transposed convolution with ReLU requires eval before backward or JVP");
-		}
-
-		void finish_parameter_gradients(Matrix<D>&& dW, Matrix<D>&& db, bool collect) {
-			if (collect) {
-				this->parameter_gradients.add(this->weights, std::move(dW));
-				this->parameter_gradients.add(this->bias, std::move(db));
-			} else {
-				this->update(std::move(dW), std::move(db));
-			}
 		}
 
 	public:
@@ -1757,14 +1653,6 @@ template<class D> Matrix<D> backward(const std::list<Layer<D>*>& net, const Matr
 			        this->parameter_gradients.parameter("bias", this->bias, this->adamb, this->need_update, false)};
 		}
 		Matrix<D> backward(const Matrix<D>& input, Matrix<D>&& upstream_grad) override {
-			return backward_impl(input, std::move(upstream_grad), true);
-		}
-		Matrix<D> backward_update(const Matrix<D>& input, Matrix<D>&& upstream_grad) override {
-			return backward_impl(input, std::move(upstream_grad), false);
-		}
-
-	private:
-		Matrix<D> backward_impl(const Matrix<D>& input, Matrix<D>&& upstream_grad, bool collect) {
 			check_input(input);
 			if (upstream_grad.num_row() != size_t(C_out * H_out * W_out) || upstream_grad.num_col() != size_t(batchN))
 				throw std::invalid_argument("transposed convolution upstream gradient shape mismatch");
@@ -1797,7 +1685,7 @@ template<class D> Matrix<D> backward(const std::list<Layer<D>*>& net, const Matr
 			Matrix<D> db = sum(t2d, 1);
 
 			if (this->need_update) {
-				finish_parameter_gradients(pack_weight_grad(dW2d), std::move(db), collect);
+				this->add_parameter_gradients(pack_weight_grad(dW2d), std::move(db));
 			}
 
 			return dx;
@@ -1848,15 +1736,6 @@ template<class D> Matrix<D> backward(const std::list<Layer<D>*>& net, const Matr
 		void check_cached_activation() const {
 			if (use_relu && !has_forward)
 				throw std::logic_error("convolution with ReLU requires eval before backward or JVP");
-		}
-
-		void finish_parameter_gradients(Matrix<D>&& dW, Matrix<D>&& db, bool collect) {
-			if (collect) {
-				this->parameter_gradients.add(this->weights, std::move(dW));
-				this->parameter_gradients.add(this->bias, std::move(db));
-			} else {
-				this->update(std::move(dW), std::move(db));
-			}
 		}
 
 	public:
@@ -1957,14 +1836,6 @@ template<class D> Matrix<D> backward(const std::list<Layer<D>*>& net, const Matr
 			        this->parameter_gradients.parameter("bias", this->bias, this->adamb, this->need_update, false)};
 		}
 		Matrix<D> backward(const Matrix<D>& input, Matrix<D>&& upstream_grad) override {
-			return backward_impl(input, std::move(upstream_grad), true);
-		}
-		Matrix<D> backward_update(const Matrix<D>& input, Matrix<D>&& upstream_grad) override {
-			return backward_impl(input, std::move(upstream_grad), false);
-		}
-
-	private:
-		Matrix<D> backward_impl(const Matrix<D>& input, Matrix<D>&& upstream_grad, bool collect) {
 			check_input(input);
 			if (upstream_grad.num_row() != size_t(C_out * H_out * W_out) || upstream_grad.num_col() != size_t(batchN))
 				throw std::invalid_argument("convolution upstream gradient shape mismatch");
@@ -2014,7 +1885,7 @@ template<class D> Matrix<D> backward(const std::list<Layer<D>*>& net, const Matr
 			Matrix<D> db = sum(t2d, 1);
 
 			if (this->need_update)
-				finish_parameter_gradients(std::move(dW), std::move(db), collect);
+				this->add_parameter_gradients(std::move(dW), std::move(db));
 
 			return dx;
 		}
@@ -2059,15 +1930,6 @@ template<class D> Matrix<D> backward(const std::list<Layer<D>*>& net, const Matr
 		void check_cached_activation() const {
 			if (use_relu && !has_forward)
 				throw std::logic_error("transposed convolution with ReLU requires eval before backward or JVP");
-		}
-
-		void finish_parameter_gradients(Matrix<D>&& dW, Matrix<D>&& db, bool collect) {
-			if (collect) {
-				this->parameter_gradients.add(this->weights, std::move(dW));
-				this->parameter_gradients.add(this->bias, std::move(db));
-			} else {
-				this->update(std::move(dW), std::move(db));
-			}
 		}
 
 	public:
@@ -2162,14 +2024,6 @@ template<class D> Matrix<D> backward(const std::list<Layer<D>*>& net, const Matr
 			        this->parameter_gradients.parameter("bias", this->bias, this->adamb, this->need_update, false)};
 		}
 		Matrix<D> backward(const Matrix<D>& input, Matrix<D>&& upstream_grad) override {
-			return backward_impl(input, std::move(upstream_grad), true);
-		}
-		Matrix<D> backward_update(const Matrix<D>& input, Matrix<D>&& upstream_grad) override {
-			return backward_impl(input, std::move(upstream_grad), false);
-		}
-
-	private:
-		Matrix<D> backward_impl(const Matrix<D>& input, Matrix<D>&& upstream_grad, bool collect) {
 			check_input(input);
 			if (upstream_grad.num_row() != size_t(C_out * H_out * W_out) || upstream_grad.num_col() != size_t(batchN))
 				throw std::invalid_argument("transposed convolution upstream gradient shape mismatch");
@@ -2219,7 +2073,7 @@ template<class D> Matrix<D> backward(const std::list<Layer<D>*>& net, const Matr
 			Matrix<D> db = sum(t2d, 1);
 
 			if (this->need_update)
-				finish_parameter_gradients(std::move(dW), std::move(db), collect);
+				this->add_parameter_gradients(std::move(dW), std::move(db));
 
 			return dx;
 		}
@@ -2385,15 +2239,6 @@ template<class D> Matrix<D> backward(const std::list<Layer<D>*>& net, const Matr
 				throw std::logic_error("convolution with ReLU requires eval before backward or JVP");
 		}
 
-		void finish_parameter_gradients(Matrix<D>&& dW, Matrix<D>&& db, bool collect) {
-			if (collect) {
-				this->parameter_gradients.add(this->weights, std::move(dW));
-				this->parameter_gradients.add(this->bias, std::move(db));
-			} else {
-				this->update(std::move(dW), std::move(db));
-			}
-		}
-
 	public:
 		ConvLayer(int N, int C_in, int H_in, int W_in,
 		          int C_out, int kH, int kW,
@@ -2459,14 +2304,6 @@ template<class D> Matrix<D> backward(const std::list<Layer<D>*>& net, const Matr
 			        this->parameter_gradients.parameter("bias", this->bias, this->adamb, this->need_update, false)};
 		}
 		Matrix<D> backward(const Matrix<D>& input, Matrix<D>&& upstream_grad) override {
-			return backward_impl(input, std::move(upstream_grad), true);
-		}
-		Matrix<D> backward_update(const Matrix<D>& input, Matrix<D>&& upstream_grad) override {
-			return backward_impl(input, std::move(upstream_grad), false);
-		}
-
-	private:
-		Matrix<D> backward_impl(const Matrix<D>& input, Matrix<D>&& upstream_grad, bool collect) {
 			check_input(input);
 			if (upstream_grad.num_row() != size_t(C_out * H_out * W_out) || upstream_grad.num_col() != size_t(batchN))
 				throw std::invalid_argument("convolution upstream gradient shape mismatch");
@@ -2485,7 +2322,7 @@ template<class D> Matrix<D> backward(const std::list<Layer<D>*>& net, const Matr
 			Matrix<D> dx = col2im(dx_col);
 
 			if (this->need_update) {
-				finish_parameter_gradients(pack_weight_grad(dW2d), std::move(db), collect);
+				this->add_parameter_gradients(pack_weight_grad(dW2d), std::move(db));
 			}
 
 			return dx;
@@ -2655,15 +2492,6 @@ template<class D> Matrix<D> backward(const std::list<Layer<D>*>& net, const Matr
 				throw std::logic_error("transposed convolution with ReLU requires eval before backward or JVP");
 		}
 
-		void finish_parameter_gradients(Matrix<D>&& dW, Matrix<D>&& db, bool collect) {
-			if (collect) {
-				this->parameter_gradients.add(this->weights, std::move(dW));
-				this->parameter_gradients.add(this->bias, std::move(db));
-			} else {
-				this->update(std::move(dW), std::move(db));
-			}
-		}
-
 	public:
 		convtransLayer(int N, int C_in, int H_in, int W_in,
 		               int C_out, int kH, int kW,
@@ -2728,14 +2556,6 @@ template<class D> Matrix<D> backward(const std::list<Layer<D>*>& net, const Matr
 			        this->parameter_gradients.parameter("bias", this->bias, this->adamb, this->need_update, false)};
 		}
 		Matrix<D> backward(const Matrix<D>& input, Matrix<D>&& upstream_grad) override {
-			return backward_impl(input, std::move(upstream_grad), true);
-		}
-		Matrix<D> backward_update(const Matrix<D>& input, Matrix<D>&& upstream_grad) override {
-			return backward_impl(input, std::move(upstream_grad), false);
-		}
-
-	private:
-		Matrix<D> backward_impl(const Matrix<D>& input, Matrix<D>&& upstream_grad, bool collect) {
 			check_input(input);
 			if (upstream_grad.num_row() != size_t(C_out * H_out * W_out) || upstream_grad.num_col() != size_t(batchN))
 				throw std::invalid_argument("transposed convolution upstream gradient shape mismatch");
@@ -2765,7 +2585,7 @@ template<class D> Matrix<D> backward(const std::list<Layer<D>*>& net, const Matr
 			Matrix<D> dx = unpack_dx_from_2d(dx2d);
 
 			if (this->need_update) {
-				finish_parameter_gradients(pack_weight_grad(dW2d), std::move(db), collect);
+				this->add_parameter_gradients(pack_weight_grad(dW2d), std::move(db));
 			}
 
 			return dx;
@@ -3320,29 +3140,16 @@ template<class D> Matrix<D> backward(const std::list<Layer<D>*>& net, const Matr
             this->val = forward(input);
         }
 
-        // The overloads without `input` are used inside Transformer, which has
+        // The overload without `input` is used inside Transformer, which has
         // already run forward(). `enabled` lets the caller freeze this layer.
-
-        // explicit training API: only collect gradients for the optimizer
         Matrix<D> backward(Matrix<D>&& upstream, bool enabled = true) {
             check_upstream(upstream);
-            const bool update = enabled && this->need_update && trainable;
-            return backward_impl(std::move(upstream), update, true);
+            const bool collect = enabled && this->need_update && trainable;
+            return backward_impl(std::move(upstream), collect);
         }
         Matrix<D> backward(const Matrix<D>& input, Matrix<D>&& upstream) override {
             check_input(input);
             return backward(std::move(upstream));
-        }
-
-        // legacy path: compute gradients and apply Adam right away
-        Matrix<D> backward_update(Matrix<D>&& upstream, bool enabled) {
-            check_upstream(upstream);
-            const bool update = enabled && this->need_update && trainable;
-            return backward_impl(std::move(upstream), update, false);
-        }
-        Matrix<D> backward_update(const Matrix<D>& input, Matrix<D>&& upstream) override {
-            check_input(input);
-            return backward_update(std::move(upstream), true);
         }
 
         Matrix<D> jvp(const Matrix<D>& input, const Matrix<D>& tangent) override {
@@ -3361,7 +3168,8 @@ template<class D> Matrix<D> backward(const std::list<Layer<D>*>& net, const Matr
             return {{"adam_gamma", &adam_g}, {"adam_beta", &adam_b}};
         }
     private:
-		Matrix<D> backward_impl(Matrix<D>&& dy, bool update, bool collect) {
+		// returns dx; also collects the gamma/beta gradients when `collect`
+		Matrix<D> backward_impl(Matrix<D>&& dy, bool collect) {
 			Matrix<D> dx("ln_dx", dim, (int)dy.num_col());
 			bool fused = false;
 #ifdef CUDA
@@ -3414,15 +3222,9 @@ template<class D> Matrix<D> backward(const std::list<Layer<D>*>& net, const Matr
 				dx = hadmd(ones_d1 * cached_inv,
 					dxhat - ones_d1 * m1 - hadmd(cached_xhat, ones_d1 * m2));
 			}
-			// Parameter gradients read gamma/xhat, so dx (above) comes first.
-			if (update) {
-				if (collect) {
-					this->parameter_gradients.add(gamma, sum(hadmd(dy, cached_xhat), 1));
-					this->parameter_gradients.add(beta, sum(dy, 1));
-				} else {
-					gamma -= adam_update(sum(hadmd(dy, cached_xhat), 1), adam_g);
-					beta  -= adam_update(sum(dy, 1), adam_b);
-				}
+			if (collect) {
+				this->parameter_gradients.add(gamma, sum(hadmd(dy, cached_xhat), 1));
+				this->parameter_gradients.add(beta, sum(dy, 1));
 			}
 			return dx;
 		}
@@ -4126,12 +3928,6 @@ template<class D> Matrix<D> backward(const std::list<Layer<D>*>& net, const Matr
             return result;
         }
 
-        // legacy path: compute gradients and apply Adam right away
-        Matrix<D> backward_update(const Matrix<D>& input, Matrix<D>&& dy) override {
-            return backward_impl(input, std::move(dy), false);
-        }
-
-        // explicit training API: only collect gradients for the optimizer
         Matrix<D> backward(const Matrix<D>& input, Matrix<D>&& dy) override {
             if (!has_forward)
                 throw std::logic_error("Transformer backward requires eval");
@@ -4141,11 +3937,11 @@ template<class D> Matrix<D> backward(const std::list<Layer<D>*>& net, const Matr
                                 && dy.num_col() == input.num_col();
             if (!shapes_ok)
                 throw std::invalid_argument("Transformer backward shape mismatch");
-            return backward_impl(input, std::move(dy), true);
+            return backward_impl(input, std::move(dy));
         }
 
     private:
-        Matrix<D> backward_impl(const Matrix<D>& input, Matrix<D>&& upstream_grad, bool collect) {
+        Matrix<D> backward_impl(const Matrix<D>& input, Matrix<D>&& upstream_grad) {
 			const int N = seq_len * batchN;
 			auto dout = std::move(upstream_grad);         // (d_model, N)
 
@@ -4175,8 +3971,7 @@ template<class D> Matrix<D> backward(const std::list<Layer<D>*>& net, const Matr
 			auto db1 = sum(dF1, 1);                         // (d_ff, 1)
 			auto dx2 = W1.T() * dF1;                        // (d_model, N) — grad wrt LN2 output
 			// Back through LN2, then add residual-1 path (out = R + F).
-			auto dR = (collect ? ln2.backward(std::move(dx2), this->need_update)
-			                   : ln2.backward_update(std::move(dx2), this->need_update)) + dout;
+			auto dR = ln2.backward(std::move(dx2), this->need_update) + dout;
 
 			// ── Attention output projection backward ──────────────────────
 			// O = Wo * H + bo  →  dR is dO (read-only here); it also flows
@@ -4430,34 +4225,19 @@ template<class D> Matrix<D> backward(const std::list<Layer<D>*>& net, const Matr
 			// Grad wrt LN1 output, back through LN1, plus the residual path
 			// (R = x + attention output, so dR flows straight into dx).
 			auto dx1 = Wq.T() * dQ + Wk.T() * dK + Wv.T() * dV;
-			auto dx = (collect ? ln1.backward(std::move(dx1), this->need_update)
-			                   : ln1.backward_update(std::move(dx1), this->need_update)) + dR;
+			auto dx = ln1.backward(std::move(dx1), this->need_update) + dR;
 
-			// ── Parameter updates ─────────────────────────────────────────
+			// ── Parameter gradients, collected for the optimizer ──────────
 			if (this->need_update) {
-				if (collect) {
-					// explicit training API: hand gradients to the optimizer
-					this->parameter_gradients.add(Wq, std::move(dWq));
-					this->parameter_gradients.add(Wk, std::move(dWk));
-					this->parameter_gradients.add(Wv, std::move(dWv));
-					this->parameter_gradients.add(Wo, std::move(dWo));
-					this->parameter_gradients.add(bo, std::move(dbo));
-					this->parameter_gradients.add(W1, std::move(dW1));
-					this->parameter_gradients.add(b1, std::move(db1));
-					this->parameter_gradients.add(W2, std::move(dW2));
-					this->parameter_gradients.add(b2, std::move(db2));
-				} else {
-					// legacy backward_update: apply Adam immediately
-					Wq -= adam_update(std::move(dWq), adam_Wq);
-					Wk -= adam_update(std::move(dWk), adam_Wk);
-					Wv -= adam_update(std::move(dWv), adam_Wv);
-					Wo -= adam_update(std::move(dWo), adam_Wo);
-					bo -= adam_update(std::move(dbo), adam_bo);
-					W1 -= adam_update(std::move(dW1), adam_W1);
-					b1 -= adam_update(std::move(db1), adam_b1);
-					W2 -= adam_update(std::move(dW2), adam_W2);
-					b2 -= adam_update(std::move(db2), adam_b2);
-				}
+				this->parameter_gradients.add(Wq, std::move(dWq));
+				this->parameter_gradients.add(Wk, std::move(dWk));
+				this->parameter_gradients.add(Wv, std::move(dWv));
+				this->parameter_gradients.add(Wo, std::move(dWo));
+				this->parameter_gradients.add(bo, std::move(dbo));
+				this->parameter_gradients.add(W1, std::move(dW1));
+				this->parameter_gradients.add(b1, std::move(db1));
+				this->parameter_gradients.add(W2, std::move(dW2));
+				this->parameter_gradients.add(b2, std::move(db2));
 			}
 
 			return dx;

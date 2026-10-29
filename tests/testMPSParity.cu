@@ -6,6 +6,7 @@
 #include "../cpp/juzhen.hpp"
 #include "../ml/layer.hpp"
 #include "../ml/loss.hpp"
+#include "../ml/optimizer.hpp"
 
 #include <algorithm>
 #include <array>
@@ -221,15 +222,6 @@ int compute() {
     l1_mps.W() = Matrix<MPSfloat>(l1_cpu.W());
     l1_mps.b() = Matrix<MPSfloat>(l1_cpu.b());
 
-    for (auto* l : std::list<Layer<float>*>{&l1_cpu, &l0_cpu}) {
-        l->adamWstate().alpha = lr;
-        l->adambstate().alpha = lr;
-    }
-    for (auto* l : std::list<Layer<MPSfloat>*>{&l1_mps, &l0_mps}) {
-        l->adamWstate().alpha = lr;
-        l->adambstate().alpha = lr;
-    }
-
     auto x_h = Matrix<float>::randn(in_dim, batch);
     auto y_h = Matrix<float>::randn(out_dim, batch);
 
@@ -249,9 +241,16 @@ int compute() {
         return 1;
     }
 
-    // One updating step on each backend, starting from the MSE gradient.
-    (void)l0_cpu.backward_update(x_h, l1_cpu.backward_update(l0_cpu.value(), mse(l1_cpu.value(), y_h).grad));
-    (void)l0_mps.backward_update(x_m, l1_mps.backward_update(l0_mps.value(), mse(l1_mps.value(), y_m).grad));
+    // One Adam step on each backend, starting from the MSE gradient.
+    AdamWOptions options;
+    options.lr = lr;
+    options.weight_decay = 0;
+    AdamW<float> optimizer_cpu(parameters(net_cpu), options);
+    AdamW<MPSfloat> optimizer_mps(parameters(net_mps), options);
+    backward(net_cpu, x_h, mse(l1_cpu.value(), y_h).grad);
+    backward(net_mps, x_m, mse(l1_mps.value(), y_m).grad);
+    optimizer_cpu.step();
+    optimizer_mps.step();
 
     compare_matrix(l0_cpu.W(), l0_mps.W().to_host(), "l0.W after step", max_abs, rel_l2);
     if (max_abs > 5e-3f || rel_l2 > 5e-3f) {

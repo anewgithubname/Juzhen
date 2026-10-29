@@ -243,7 +243,7 @@ int compute() {
     // eps can be small because the reference runs in double; this keeps the
     // check accurate even when a ReLU pre-activation is near its kink.
     tf.eval(Matrix<BackendT>(x_h));
-    auto got_dx = as_host(tf.backward_update(Matrix<BackendT>(x_h), Matrix<BackendT>(g_h)));
+    auto got_dx = as_host(tf.backward(Matrix<BackendT>(x_h), Matrix<BackendT>(g_h)));
 
     const double eps = 1e-6;
     DMat num_dx(c.d_model, N);
@@ -257,12 +257,12 @@ int compute() {
         }
     }
 
-    compare_matrix(got_dx, num_dx, "backward_update (dx) vs reference", max_abs, rel_l2);
+    compare_matrix(got_dx, num_dx, "backward (dx) vs reference", max_abs, rel_l2);
     if (max_abs > 1e-3f || rel_l2 > 1e-3f) {
-        std::cout << "[FAIL] backward_update (dx) vs reference\n";
+        std::cout << "[FAIL] backward (dx) vs reference\n";
         ret = 1;
     } else {
-        std::cout << "[PASS] backward_update (dx) vs reference\n";
+        std::cout << "[PASS] backward (dx) vs reference\n";
     }
 
     unfreeze(layers);

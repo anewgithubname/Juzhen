@@ -1,5 +1,6 @@
 /** Same Juzhen FP32 workloads on CPU and ROCm, timed to completion. */
 #include "../ml/layer.hpp"
+#include "../ml/optimizer.hpp"
 #include <algorithm>
 #include <chrono>
 #include <cstdint>
@@ -96,7 +97,8 @@ static void transformer(int d, int seq, int batch, const std::string& tag) {
         else if (name.find("beta") != std::string::npos || name[0]=='b') param->zeros();
         else *param=Matrix<D>(input(param->num_row(),param->num_col(),++seed,1.0f/std::sqrt(float(d))));
     }
-    layer.set_lr(1e-4f);
+    AdamWOptions options; options.lr=1e-4f; options.weight_decay=0;
+    AdamW<D> optimizer(layer.parameters(),options);
     Matrix<D> x(input(d,seq*batch,33)), u(input(d,seq*batch,44));
     Matrix<D> result("result",d,seq*batch);
     measure(tag+"_forward",[&] { layer.eval(x); });
@@ -106,7 +108,9 @@ static void transformer(int d, int seq, int batch, const std::string& tag) {
     dump(tag+"_cached_jvp",result);
     measure(tag+"_forward_jvp",[&] { layer.eval(x); result=layer.jvp(x,u); });
     dump(tag+"_forward_jvp",result);
-    measure(tag+"_train",[&] { layer.eval(x); result=layer.backward_update(x,Matrix<D>(u)); });
+    measure(tag+"_train",[&] {
+        optimizer.zero_grad(); layer.eval(x); result=layer.backward(x,Matrix<D>(u)); optimizer.step();
+    });
     dump(tag+"_train_dx",result);
     // Also validate actual updates, not merely that the training loop ran.
     for (auto& [name,param] : layer.checkpoint_parameters()) dump(tag+"_train_"+name,*param);

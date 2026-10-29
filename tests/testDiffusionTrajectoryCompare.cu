@@ -4,6 +4,7 @@
  */
 
 #include "../ml/layer.hpp"
+#include "../ml/optimizer.hpp"
 #include "../ml/dataloader.hpp"
 
 #include <algorithm>
@@ -134,6 +135,14 @@ public:
     Matrix<BackendT> e2;
     Matrix<BackendT> c_cat;
 
+    AdamW<BackendT> optimizer;
+
+    static AdamWOptions plain_adam() {
+        AdamWOptions options;
+        options.weight_decay = 0;
+        return options;
+    }
+
     explicit UNetScore(int bs)
         : enc1(bs, 3, 32, 32, 16, 3, 3, 1, 1, true),
           enc2(bs, 16, 32, 32, 32, 3, 3, 1, 2, true),
@@ -142,18 +151,14 @@ public:
           head(bs, 16, 32, 32, 1, 3, 3, 1, 1, false),
           e1("e1", 16 * d, bs),
           e2("e2", 32 * 16 * 16, bs),
-          c_cat("cc", 32 * d, bs) {}
+          c_cat("cc", 32 * d, bs),
+          optimizer(Juzhen::parameters(layers()), plain_adam()) {}
 
     std::list<Layer<BackendT>*> layers() {
         return {&head, &dec1, &up1, &enc2, &enc1};
     }
 
-    void set_lr(float alpha) {
-        for (auto* l : layers()) {
-            l->adamWstate().alpha = alpha;
-            l->adambstate().alpha = alpha;
-        }
-    }
+    void set_lr(float alpha) { optimizer.set_lr(alpha); }
 
     void reinit_from_host(float wstd) {
         for (auto* l : layers()) {
@@ -182,26 +187,30 @@ public:
         return head.value();
     }
 
+    // backpropagate g through the skip connection, then take one Adam step
     void bwd(const Matrix<BackendT>& inp, Matrix<BackendT>&& g) {
-        auto g2 = head.backward_update(dec1.value(), std::move(g));
-        auto g_cat = dec1.backward_update(c_cat, std::move(g2));
+        optimizer.zero_grad();
+        auto g2 = head.backward(dec1.value(), std::move(g));
+        auto g_cat = dec1.backward(c_cat, std::move(g2));
         const size_t up_sz = 16ULL * d;
         auto g_up = g_cat.rows(0, up_sz);
         auto g_skip = g_cat.rows(up_sz, g_cat.num_row());
-        auto g_e2 = up1.backward_update(e2, std::move(g_up));
-        auto g_e1 = enc2.backward_update(e1, std::move(g_e2));
+        auto g_e2 = up1.backward(e2, std::move(g_up));
+        auto g_e1 = enc2.backward(e1, std::move(g_e2));
         auto g_inp = g_e1 + g_skip;
-        enc1.backward_update(inp, std::move(g_inp));
+        enc1.backward(inp, std::move(g_inp));
+        optimizer.step();
     }
 
     BackwardProbe bwd_probe(const Matrix<BackendT>& inp, Matrix<BackendT>&& g) {
         BackwardProbe p;
+        optimizer.zero_grad();
         p.g_out_rms = matrix_rms_host(g);
 
-        auto g2 = head.backward_update(dec1.value(), std::move(g));
+        auto g2 = head.backward(dec1.value(), std::move(g));
         p.g2_rms = matrix_rms_host(g2);
 
-        auto g_cat = dec1.backward_update(c_cat, std::move(g2));
+        auto g_cat = dec1.backward(c_cat, std::move(g2));
         p.g_cat_rms = matrix_rms_host(g_cat);
 
         const size_t up_sz = 16ULL * d;
@@ -210,16 +219,17 @@ public:
         p.g_up_rms = matrix_rms_host(g_up);
         p.g_skip_rms = matrix_rms_host(g_skip);
 
-        auto g_e2 = up1.backward_update(e2, std::move(g_up));
+        auto g_e2 = up1.backward(e2, std::move(g_up));
         p.g_e2_rms = matrix_rms_host(g_e2);
 
-        auto g_e1 = enc2.backward_update(e1, std::move(g_e2));
+        auto g_e1 = enc2.backward(e1, std::move(g_e2));
         p.g_e1_rms = matrix_rms_host(g_e1);
 
         auto g_inp = g_e1 + g_skip;
         p.g_inp_rms = matrix_rms_host(g_inp);
 
-        enc1.backward_update(inp, std::move(g_inp));
+        enc1.backward(inp, std::move(g_inp));
+        optimizer.step();
         return p;
     }
 };
