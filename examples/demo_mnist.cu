@@ -95,13 +95,6 @@ int compute() {
     options.weight_decay = 0; // Preserve the original Adam update.
     AdamW<FLOAT> optimizer(network.parameters(), options);
 
-    // //if file exists, load weights
-    // FILE *fp = fopen((std::string(PROJECT_DIR) + "/mnist.weights").c_str(), "r");
-    // if (fp) {
-    //     fclose(fp);
-    //     loadweights(trainnn, std::string(PROJECT_DIR) + "/mnist.weights");
-    // }
-
     // sgd
     int iter = 0;
     while (iter < 10000) {
@@ -131,8 +124,6 @@ int compute() {
 
         iter++;
     }
-
-    // dumpweights(trainnn, std::string(PROJECT_DIR) + "/mnist.weights");
 
     auto t2 = std::chrono::high_resolution_clock::now();
     auto elapsed = time_in_ms(t1, t2);

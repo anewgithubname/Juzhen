@@ -191,11 +191,6 @@ __global__ void ElemInvInplaceKernel(float* out, std::size_t n, float l) {
     if (idx < n) out[idx] = l / out[idx];
 }
 
-__global__ void CopyKernel(float* out, const float* in, std::size_t n) {
-    const std::size_t idx = static_cast<std::size_t>(blockIdx.x) * blockDim.x + threadIdx.x;
-    if (idx < n) out[idx] = in[idx];
-}
-
 __global__ void TanhKernel(float* out, const float* in, std::size_t n) {
     const std::size_t idx = static_cast<std::size_t>(blockIdx.x) * blockDim.x + threadIdx.x;
     if (idx < n) out[idx] = tanhf(in[idx]);

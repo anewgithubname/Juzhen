@@ -113,10 +113,6 @@ int RocmGemv(const float* A_device, const float* x_device, float* y_device,
              float alpha = 1.0f,
              float beta = 0.0f);
 
-// C = alpha * A(m x k) * B(k x n) + beta * C(m x n)
-int RocmGemmNN(const float* A_device, const float* B_device, float* C_device,
-               int m, int n, int k, float alpha = 1.0f, float beta = 0.0f);
-
 // ── Convolution primitives ──────────────────────────────────────────────
 
 int RocmIm2col(const float* input, float* col,

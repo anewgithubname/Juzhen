@@ -4,8 +4,6 @@ add_subdirectory(external/spdlog)
 
 # set the project directory as a macro, so that we can use it in the code
 add_definitions(-DPROJECT_DIR="${CMAKE_SOURCE_DIR}")
-# if you have a benchmark server running, you can specify it here
-add_definitions(-DBENCHMARKSERVER="DONOTKNOW")
 
 # do you need GPU support?
 option(NVIDIA_CUDA "Build with NVIDIA CUDA backend" ON)
@@ -55,8 +53,6 @@ elseif(ROCM_HIP)
     find_package(hipblas CONFIG QUIET)
     find_package(rocblas CONFIG QUIET)
     find_package(rocrand CONFIG QUIET)
-    find_package(rocsolver CONFIG QUIET)
-    find_package(MIOpen CONFIG QUIET)
 
     set(ROCM_BACKEND_LIBS "")
     if(TARGET hip::hipblas)
@@ -81,12 +77,6 @@ elseif(ROCM_HIP)
     endif()
     if(TARGET roc::rocrand)
         list(APPEND ROCM_BACKEND_LIBS roc::rocrand)
-    endif()
-    if(TARGET roc::rocsolver)
-        list(APPEND ROCM_BACKEND_LIBS roc::rocsolver)
-    endif()
-    if(TARGET MIOpen)
-        list(APPEND ROCM_BACKEND_LIBS MIOpen)
     endif()
 
 elseif(APPLE_SILICON)
@@ -140,8 +130,6 @@ else() # if we are on windows, use the provided OpenBLAS library
     set(OpenBLAS_INCLUDE_DIRS "external/OpenBLAS/include")
 endif()
 
-set(spdlog_INCLUDE_DIRS "${PROJECT_SOURCE_DIR}/external/spdlog/include")
-
 if(NVIDIA_CUDA) # add relevant backend implementations for CUDA
     add_library(juzhen cpp/launcher.cu cpp/cumatrix.cu cpp/cukernels.cu)
 elseif(ROCM_HIP) # add relevant backend implementations for ROCm/HIP
@@ -160,7 +148,7 @@ target_include_directories(juzhen PUBLIC ${OpenBLAS_INCLUDE_DIRS})
 if(NVIDIA_CUDA) # if we are on GPU, we need to include the cuda headers
     target_include_directories(juzhen PUBLIC ${CUDAToolkit_INCLUDE_DIRS})
     target_compile_options(juzhen PRIVATE $<$<COMPILE_LANGUAGE:CUDA>:--extended-lambda>)
-    set(CUDA_EXTRA_LIBS CUDA::cudart CUDA::cublas CUDA::curand CUDA::cusolver)
+    set(CUDA_EXTRA_LIBS CUDA::cudart CUDA::cublas CUDA::curand)
 
     set(CUDNN_SEARCH_INCLUDE_HINTS
         /usr/local/cuda-12.6/include
@@ -226,24 +214,24 @@ macro(GENERATE_PROJ TARGETNAME FILE)
         if(WIN32)
             target_link_libraries(${TARGETNAME} spdlog::spdlog ${BLAS_LIBRARIES} ${OpenBLAS_LIBRARIES} juzhen ${CUDA_EXTRA_LIBS})
         else()
-            target_link_libraries(${TARGETNAME} ftxui::screen ftxui::dom ftxui::component spdlog::spdlog ${BLAS_LIBRARIES} ${OpenBLAS_LIBRARIES} juzhen ${CUDA_EXTRA_LIBS})
+            target_link_libraries(${TARGETNAME} spdlog::spdlog ${BLAS_LIBRARIES} ${OpenBLAS_LIBRARIES} juzhen ${CUDA_EXTRA_LIBS})
         endif()
         target_compile_options(${TARGETNAME} PRIVATE
             $<$<COMPILE_LANGUAGE:CUDA>:--extended-lambda>
             $<$<COMPILE_LANGUAGE:CUDA>:--forward-unknown-to-host-compiler>)
     elseif(ROCM_HIP)
-        target_link_libraries(${TARGETNAME} ftxui::screen ftxui::dom ftxui::component spdlog::spdlog ${BLAS_LIBRARIES} ${OpenBLAS_LIBRARIES} juzhen ${ROCM_BACKEND_LIBS})
+        target_link_libraries(${TARGETNAME} spdlog::spdlog ${BLAS_LIBRARIES} ${OpenBLAS_LIBRARIES} juzhen ${ROCM_BACKEND_LIBS})
         set_source_files_properties(${FILE} PROPERTIES LANGUAGE CXX COMPILE_FLAGS "-x hip")
         set_target_properties(${TARGETNAME} PROPERTIES LINKER_LANGUAGE CXX)
         if(CMAKE_CXX_COMPILER_ID MATCHES "Clang" AND ROCM_OFFLOAD_ARCH)
             target_compile_options(${TARGETNAME} PRIVATE "--offload-arch=${ROCM_OFFLOAD_ARCH}")
         endif()
     elseif(APPLE_SILICON)
-        target_link_libraries(${TARGETNAME} ftxui::screen ftxui::dom ftxui::component spdlog::spdlog ${BLAS_LIBRARIES} "-framework Metal" "-framework Foundation" "-framework MetalPerformanceShaders" juzhen)
+        target_link_libraries(${TARGETNAME} spdlog::spdlog ${BLAS_LIBRARIES} "-framework Metal" "-framework Foundation" "-framework MetalPerformanceShaders" juzhen)
         set_source_files_properties(${FILE} PROPERTIES LANGUAGE CXX)
         set_target_properties(${TARGETNAME} PROPERTIES LINKER_LANGUAGE CXX)
     else()
-        target_link_libraries(${TARGETNAME} ftxui::screen ftxui::dom ftxui::component spdlog::spdlog ${BLAS_LIBRARIES} ${OpenBLAS_LIBRARIES} juzhen)
+        target_link_libraries(${TARGETNAME} spdlog::spdlog ${BLAS_LIBRARIES} ${OpenBLAS_LIBRARIES} juzhen)
         set_source_files_properties(${FILE} PROPERTIES LANGUAGE CXX)
         set_target_properties(${TARGETNAME} PROPERTIES LINKER_LANGUAGE CXX)
 
@@ -295,10 +283,12 @@ find_package(Threads REQUIRED)
 target_link_libraries(demo_mnist_web Threads::Threads)
 GENERATE_PROJ(pagerank examples/pagerank.cu)
 GENERATE_PROJ(demo_rectified examples/demo_rectified.cu)
+target_link_libraries(demo_rectified ftxui::screen ftxui::dom ftxui::component)
 GENERATE_PROJ(demo_zeroflow_web examples/demo_zeroflow_web.cu)
 target_link_libraries(demo_zeroflow_web Threads::Threads)
 GENERATE_PROJ(demo_gemm examples/demo_gemm.cu)
 GENERATE_PROJ(demo_cnn_mnist examples/demo_cnn_mnist.cu)
+target_link_libraries(demo_cnn_mnist ftxui::screen ftxui::dom ftxui::component)
 GENERATE_PROJ(demo_cnn_rectified examples/demo_cnn_rectified.cu)
 GENERATE_PROJ(demo_transformer examples/demo_transformer.cu)
 GENERATE_PROJ(demo_transformer_web examples/demo_transformer_web.cu)

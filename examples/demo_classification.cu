@@ -141,6 +141,5 @@ int compute() {
         iter++;
     }
 
-    // dumpweights(trainnn, std::string(PROJECT_DIR) + "/classify.weights");
     return 0;
 }

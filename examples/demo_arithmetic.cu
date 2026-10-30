@@ -106,8 +106,7 @@ static void copy_linear_weights(LinearLayer<FLOAT>& dst, LinearLayer<FLOAT>& src
 }
 
 // ── Model (de)serialization ──────────────────────────────────────────────────
-// dumpweights()/loadweights() only handle the base-class weights, which are
-// dummies for TransformerLayer, so the demo serializes all parameters itself.
+// The demo serializes every TransformerLayer parameter itself.
 static void write_mat(FILE* fp, const Matrix<float>& m) {
     const int32_t r = (int32_t)m.num_row(), c = (int32_t)m.num_col();
     fwrite(&r, sizeof(int32_t), 1, fp);

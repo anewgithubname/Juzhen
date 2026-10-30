@@ -357,126 +357,6 @@ template<class D> Matrix<D> backward(const std::list<Layer<D>*>& net, const Matr
 		}
 	}
 
-	template <class D>
-	void dumpweights(std::list<Layer<D>*> neuralnet, std::string filename)
-	{
-		FILE *fp = fopen(filename.c_str(), "wb");
-		if (!fp) {
-			LOG_ERROR("dumpweights: cannot open file '{}'", filename);
-			ERROR_OUT;
-		}
-
-		for(auto& l : neuralnet) {
-			auto layertype = typeid(*l).name();
-			fwrite(layertype, sizeof(char), strlen(layertype), fp);
-			write(fp, l->W());
-			write(fp, l->b());
-			
-			// now dump the adam state
-			fwrite(&l->adamWstate().iteration, sizeof(int), 1, fp);
-			fwrite(&l->adamWstate().alpha, sizeof(float), 1, fp);
-			fwrite(&l->adamWstate().beta1, sizeof(float), 1, fp);
-			fwrite(&l->adamWstate().beta2, sizeof(float), 1, fp);
-			fwrite(&l->adamWstate().eps, sizeof(float), 1, fp);
-
-			write(fp, l->adamWstate().m);
-			write(fp, l->adamWstate().v);
-
-
-			fwrite(&l->adambstate().iteration, sizeof(int), 1, fp);
-			fwrite(&l->adambstate().alpha, sizeof(float), 1, fp);
-			fwrite(&l->adambstate().beta1, sizeof(float), 1, fp);
-			fwrite(&l->adambstate().beta2, sizeof(float), 1, fp);
-			fwrite(&l->adambstate().eps, sizeof(float), 1, fp);
-
-			write(fp, l->adambstate().m);
-			write(fp, l->adambstate().v);
-		}
-		
-		fclose(fp);
-	}
-
-	template <class D>
-	void loadweights(std::list<Layer<D>*> neuralnet, std::string filename){
-		FILE *fp = fopen(filename.c_str(), "rb");
-		if (!fp) {
-			LOG_ERROR("loadweights: cannot open file '{}'", filename);
-			ERROR_OUT;
-		}
-
-		for(auto& l : neuralnet) {
-			auto layertype = typeid(*l).name();
-			size_t typelen = strlen(layertype);
-			std::vector<char> buf(typelen + 1, '\0');
-			fread(buf.data(), sizeof(char), typelen, fp);
-			if(strcmp(buf.data(), layertype) != 0) {
-				LOG_ERROR("layer type mismatch");
-				ERROR_OUT;
-			}
-			read(fp, l->W());
-			read(fp, l->b());
-
-			std::cout << "before dump adam state" << std::endl;
-			l->adamWstate().print_stats();
-			// now load the adam state
-			fread(&l->adamWstate().iteration, sizeof(int), 1, fp);
-			fread(&l->adamWstate().alpha, sizeof(float), 1, fp);
-			fread(&l->adamWstate().beta1, sizeof(float), 1, fp);
-			fread(&l->adamWstate().beta2, sizeof(float), 1, fp);
-			fread(&l->adamWstate().eps, sizeof(float), 1, fp);
-
-			read(fp, l->adamWstate().m);
-			read(fp, l->adamWstate().v);
-
-			fread(&l->adambstate().iteration, sizeof(int), 1, fp);
-			fread(&l->adambstate().alpha, sizeof(float), 1, fp);
-			fread(&l->adambstate().beta1, sizeof(float), 1, fp);
-			fread(&l->adambstate().beta2, sizeof(float), 1, fp);
-			fread(&l->adambstate().eps, sizeof(float), 1, fp);
-
-			read(fp, l->adambstate().m);
-			read(fp, l->adambstate().v);
-			std::cout << "after dump adam state" << std::endl;
-			l->adamWstate().print_stats();
-
-		}
-		
-		fclose(fp);
-	}
-
-	template <class T>
-	std::vector<Matrix<T>> euler_integration(const Matrix<T>& Z0, std::list<Layer<T>*>& trainnn, int steps) {
-		// start euler integration
-		//std::cout << "start euler integration: " << std::endl;
-		std::string base = PROJECT_DIR;
-		//Profiler p("int");
-		
-		std::vector<Matrix<T>> ret;
-
-		auto Zt = Z0;
-		int n = Z0.num_col();
-
-		float dt = 1.0f / steps;
-		
-		for (int i = 0; i < steps; i++){
-			if(i % 10 == 0) {
-				ret.push_back(Zt);
-			}
-			
-			float t = (float)i/steps;    
-#if !defined(CUDA) && !defined(APPLE_SILIICON)
-			auto inpt = vstack<float>({Zt, Matrix<T>::ones(1, n)*t});
-#else
-			auto inpt = vstack({Zt, Matrix<T>::ones(1, n)*t});
-#endif
-			
-			Zt += forward(trainnn, inpt) * dt;
-		}
-
-		ret.push_back(Zt);
-		return ret;
-	}
-
 #if defined(CUDA) && defined(CUDNN_AVAILABLE)
 	// cuDNN returns candidate algorithms best-first. Pick the first one that is
 	// both usable and deterministic (needed for exact checkpoint recovery).
@@ -3327,7 +3207,7 @@ template<class D> Matrix<D> backward(const std::list<Layer<D>*>& net, const Matr
 		Matrix<D> cached_A;
 
 		// Reusable buffers to avoid repeated allocation in hot loops.
-		Matrix<D> ones_1N, ones_seq1, ones_1seq;
+		Matrix<D> ones_1N, ones_1seq;
 		Matrix<D> attn_scores_scratch, attn_dAiT_scratch, attn_dS_scratch;
 
 		// Pre-norm LayerNorms: LN1 before attention, LN2 before FFN.
@@ -3424,7 +3304,7 @@ template<class D> Matrix<D> backward(const std::list<Layer<D>*>& net, const Matr
 			  cached_x1("tx1", d_model, seq_len * batch), cached_x2("tx2", d_model, seq_len * batch),
 			  cached_F1("tf1", d_ff, seq_len * batch), cached_F1_relu("tf1r", d_ff, seq_len * batch),
 			  cached_A("ta", seq_len, seq_len * batch * heads),
-			  ones_1N("ones_1N", 1, seq_len * batch), ones_seq1("ones_seq1", seq_len, 1),
+			  ones_1N("ones_1N", 1, seq_len * batch),
 			  ones_1seq("ones_1seq", 1, seq_len),
 			  attn_scores_scratch("attn_scores", seq_len, seq_len * batch * heads),
 			  attn_dAiT_scratch("attn_dAiT", seq_len, seq_len * batch * heads),
@@ -3441,7 +3321,6 @@ template<class D> Matrix<D> backward(const std::list<Layer<D>*>& net, const Matr
 			this->adamW   = adam_state<D>(0.0001, 1, 1);
 			this->adamb   = adam_state<D>(0.0001, 1, 1);
 			ones_1N.ones();
-			ones_seq1.ones();
 			ones_1seq.ones();
 		}
 
@@ -4287,17 +4166,6 @@ template<class D> Matrix<D> backward(const std::list<Layer<D>*>& net, const Matr
 			        {"adam_b1",&adam_b1},{"adam_W2",&adam_W2},{"adam_b2",&adam_b2},
 			        {"ln1_adam_gamma",&ln1.adam_g},{"ln1_adam_beta",&ln1.adam_b},
 			        {"ln2_adam_gamma",&ln2.adam_g},{"ln2_adam_beta",&ln2.adam_b}};
-		}
-
-		// Set the Adam learning rate for every parameter group in this block
-		// (attention, FFN, and both LayerNorms). Used to drive an LR schedule.
-		void set_lr(float lr) {
-			adam_Wq.alpha = lr; adam_Wk.alpha = lr; adam_Wv.alpha = lr;
-			adam_Wo.alpha = lr; adam_bo.alpha = lr;
-			adam_W1.alpha = lr; adam_b1.alpha = lr;
-			adam_W2.alpha = lr; adam_b2.alpha = lr;
-			ln1.adam_g.alpha = lr; ln1.adam_b.alpha = lr;
-			ln2.adam_g.alpha = lr; ln2.adam_b.alpha = lr;
 		}
 	};
 
