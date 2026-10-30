@@ -46,7 +46,7 @@ static id<MTLComputePipelineState> adamwPipelineState = nil;
 // encodes, so cache them by shape. Training loops repeat a handful of shapes,
 // making the hit rate ~100%; entries live until mpsDestroy().
 static std::map<std::tuple<bool, bool, int, int, int>, MPSMatrixMultiplication*> gemmKernelCache;
-static std::map<std::tuple<bool, bool, int, int, int, float>, MPSMatrixMultiplication*> gemmBatchedKernelCache;
+static std::map<std::tuple<bool, bool, int, int, int, float, float>, MPSMatrixMultiplication*> gemmBatchedKernelCache;
 static std::map<std::tuple<bool, int, int>, MPSMatrixVectorMultiplication*> gemvKernelCache;
 
 // One uniform generator feeds both rand and randn (via Box-Muller), so a
@@ -740,7 +740,7 @@ void mpsCausalMask(float* S, int n, bool transpose, float maskVal) {
 
 void mpsGemmBatched(const float* A, const float* B, float* C, int batch,
                     int rowA, int colA, int rowB, int colB,
-                    bool transposeA, bool transposeB, float alpha) {
+                    bool transposeA, bool transposeB, float alpha, float beta) {
     id<MTLCommandBuffer> cb = currentMPSCommandBuffer();
 
     auto matA = [[MPSMatrix alloc] initWithBuffer:bufferMap[(float *) A]
@@ -761,14 +761,14 @@ void mpsGemmBatched(const float* A, const float* B, float* C, int batch,
             matrices:batch rowBytes:resultColumns*sizeof(float)
             matrixBytes:(NSUInteger)resultRows*resultColumns*sizeof(float) dataType:MPSDataTypeFloat32]];
 
-    const auto key = std::make_tuple(transposeA, transposeB, resultRows, resultColumns, interiorColumns, alpha);
+    const auto key = std::make_tuple(transposeA, transposeB, resultRows, resultColumns, interiorColumns, alpha, beta);
     MPSMatrixMultiplication* gemmKernel;
     auto it = gemmBatchedKernelCache.find(key);
     if (it != gemmBatchedKernelCache.end()) {
         gemmKernel = it->second;
     } else {
         gemmKernel = [[MPSMatrixMultiplication alloc] initWithDevice:device
-            transposeLeft:transposeA transposeRight:transposeB resultRows:resultRows resultColumns:resultColumns interiorColumns:interiorColumns alpha:alpha beta:0.0f];
+            transposeLeft:transposeA transposeRight:transposeB resultRows:resultRows resultColumns:resultColumns interiorColumns:interiorColumns alpha:alpha beta:beta];
         gemmBatchedKernelCache[key] = gemmKernel;
     }
     [gemmKernel encodeToCommandBuffer:cb leftMatrix:matA rightMatrix:matB resultMatrix:matC];

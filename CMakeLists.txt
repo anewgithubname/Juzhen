@@ -430,8 +430,7 @@ set_tests_properties(cpu_linalg PROPERTIES LABELS "unit")
 
 # Forward-mode (JVP) correctness: adjoint consistency vs backprop + finite
 # differences on MLP / transformer / CNN+MLP / conv-transpose networks, plus
-# CPU/GPU parity of the JVP itself in CUDA and ROCm builds. Runs on CPU,
-# CUDA and ROCm backends; skips (77) on MPS.
+# CPU/GPU parity of the JVP itself in CUDA, ROCm and Metal builds.
 add_test(NAME jvp_correctness COMMAND testJVP)
 set_tests_properties(jvp_correctness PROPERTIES LABELS "unit" SKIP_RETURN_CODE 77)
 

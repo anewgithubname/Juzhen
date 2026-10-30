@@ -35,12 +35,12 @@ void mpsSoftmaxCol(const float* src, float* dst, int rows, int cols, bool transp
 void mpsCausalMask(float* S, int n, bool transpose, float maskVal);
 
 // ── batched multi-head attention ────────────────────────────────────────────
-// C_i = alpha * op(A_i) * op(B_i) for i in [0, batch): each operand is a
-// contiguous batch of row-major matrices (A_i is rowA x colA at
+// C_i = alpha * op(A_i) * op(B_i) + beta * C_i for i in [0, batch): each
+// operand is a contiguous batch of row-major matrices (A_i is rowA x colA at
 // A + i*rowA*colA, etc.).
 void mpsGemmBatched(const float* A, const float* B, float* C, int batch,
                     int rowA, int colA, int rowB, int colB,
-                    bool transposeA, bool transposeB, float alpha);
+                    bool transposeA, bool transposeB, float alpha, float beta = 0.0f);
 // Repack a (d_k x batch*seq) row-major projection into batch*heads contiguous
 // (seq x d_h) row-major matrices (one per head/sequence block), and back.
 void mpsAttnPack(const float* src, float* dst, int d_h, int heads, int seq, int batch);

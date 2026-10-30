@@ -3557,12 +3557,6 @@ template<class D> Matrix<D> backward(const std::list<Layer<D>*>& net, const Matr
 		// wiring as the forward pass; the bias terms (bo, b1, b2, beta)
 		// are constants and contribute nothing.
 		Matrix<D> jvp(const Matrix<D>&, const Matrix<D>& tangent) override {
-#ifdef APPLE_SILICON
-			if constexpr (std::is_same_v<D, MPSfloat>) {
-				LOG_ERROR("TransformerLayer jvp is not implemented on the Metal backend: its fused attention stores cached_A in a packed batch layout that the generic per-block tangent below cannot read.");
-				ERROR_OUT;
-			} else
-#endif
 			{
 				const float scale = 1.0f / sqrtf((float)d_h);
 
@@ -3746,6 +3740,45 @@ template<class D> Matrix<D> backward(const std::list<Layer<D>*>& net, const Matr
 							dh_ptr + hh * d_h, d_k, stride_qkv,
 							batchN));
 					}
+				} else
+#endif
+#ifdef APPLE_SILICON
+				if constexpr (std::is_same_v<D, MPSfloat>) {
+					// Batched tangent pass mirroring the batched forward:
+					// cached_A holds the packed softmax batch, so all math is
+					// the packed-transposed form of the per-block formulas
+					// below (Xp_i = X_i^T is a (seq x d_h) block).
+					const int BH = batchN * num_heads;
+					auto p = [](const Matrix<D>& m) {
+						return const_cast<float*>(reinterpret_cast<const float*>(m.data()));
+					};
+					auto pack = [&](const Matrix<D>& m) {
+						Matrix<D> packed("jvp_packed", (size_t)BH * seq_len, d_h);
+						mpsAttnPack(p(m), p(packed), d_h, num_heads, seq_len, batchN);
+						return packed;
+					};
+					auto Qp = pack(cached_Q), Kp = pack(cached_K), Vp = pack(cached_V);
+					auto dQp = pack(dQ), dKp = pack(dK), dVp = pack(dV);
+
+					// dS_i = dQp_i Kp_i^T + Qp_i dKp_i^T, unscaled: the softmax
+					// JVP is linear in dS, so scale folds into that kernel.
+					mpsGemmBatched(p(dQp), p(Kp), p(attn_dAiT_scratch), BH,
+					               seq_len, d_h, seq_len, d_h, false, true, 1.0f);
+					mpsGemmBatched(p(Qp), p(dKp), p(attn_dAiT_scratch), BH,
+					               seq_len, d_h, seq_len, d_h, false, true, 1.0f, 1.0f);
+					// dA_i = A_i .* (scale*dS_i - rowsum(A_i .* scale*dS_i)); the
+					// softmax Jacobian is symmetric, so the backward kernel
+					// computes exactly the JVP.
+					mpsSoftmaxBackwardRowsBatched(p(cached_A), p(attn_dAiT_scratch),
+					                              p(attn_dS_scratch), seq_len,
+					                              BH * seq_len, scale);
+					// dHp_i = A_i dVp_i + dA_i Vp_i  (= dH_i^T); unpack into dH
+					Matrix<D> dHp("jvp_dHp", (size_t)BH * seq_len, d_h);
+					mpsGemmBatched(p(cached_A), p(dVp), p(dHp), BH,
+					               seq_len, seq_len, seq_len, d_h, false, false, 1.0f);
+					mpsGemmBatched(p(attn_dS_scratch), p(Vp), p(dHp), BH,
+					               seq_len, seq_len, seq_len, d_h, false, false, 1.0f, 1.0f);
+					mpsAttnUnpack(p(dHp), p(dH), d_h, num_heads, seq_len, batchN);
 				} else
 #endif
 				for (int hh = 0; hh < num_heads; ++hh) {
