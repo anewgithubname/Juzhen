@@ -325,26 +325,28 @@ void mpsFree(float* ptr) {
     }
 }
 // MPSMatrixMultiplication writes a band of NaNs into its result when the
-// result buffer straddles a 2 GiB-aligned GPU virtual address. Reproduced on
-// an M2 (macOS 27.0.1) in a standalone Metal program; the operands, MPS gemv,
-// MTGP32 and our own kernels are unaffected by the same placement. Such
-// results are computed into scratch buffers that avoid the boundary, in blocks
-// of at most kGemmScratchBytes, and copied into place with our copy kernel.
+// result spans a 2 GiB-aligned GPU virtual address, and also when it ends less
+// than about 8 MiB below one. Reproduced on an M2 (macOS 27.0.1) in a
+// standalone Metal program; the operands, MPS gemv, MTGP32 and our own kernels
+// are unaffected by the same placement. Such results are computed into scratch
+// buffers that keep clear of the boundary, in blocks of at most
+// kGemmScratchBytes, and copied into place with our copy kernel.
 static const unsigned long long kGemmBoundary = 1ull << 31;
+static const unsigned long long kGemmGuardBytes = 16ull << 20;  // twice the measured 8 MiB
 static const NSUInteger kGemmScratchBytes = 256u << 20;
 
-static bool crossesGemmBoundary(id<MTLBuffer> buffer, NSUInteger offset, NSUInteger bytes) {
+static bool nearGemmBoundary(id<MTLBuffer> buffer, NSUInteger offset, NSUInteger bytes) {
     if (bytes == 0) return false;
     const unsigned long long lo = buffer.gpuAddress + offset, hi = lo + bytes - 1;
-    return lo / kGemmBoundary != hi / kGemmBoundary;
+    return lo / kGemmBoundary != (hi + kGemmGuardBytes) / kGemmBoundary;
 }
 
-// A registered buffer of `bytes` (well below 2 GiB) that avoids the boundary:
+// A registered buffer of `bytes` (well below 2 GiB) clear of the boundary:
 // a rejected allocation is held until the next one lands elsewhere.
 static float* gemmScratch(NSUInteger bytes) {
     std::vector<float*> rejected;
     float* p = mpsMalloc(bytes);
-    while (crossesGemmBoundary(bufferMap[p], 0, bytes)) {
+    while (nearGemmBoundary(bufferMap[p], 0, bytes)) {
         rejected.push_back(p);
         p = mpsMalloc(bytes);
     }
@@ -388,7 +390,7 @@ void mpsGemm(const float* A, const float* B, float* C, int rowA, int colA, int r
     id<MTLCommandBuffer> cb = currentMPSCommandBuffer();
     MPSMatrix* matB = matrixView(bufferMap[(float*)B], 0, rowB, colB, colB * sizeof(float));
 
-    if (!crossesGemmBoundary(bufferC, 0, resultRows * rowBytesC)) {
+    if (!nearGemmBoundary(bufferC, 0, resultRows * rowBytesC)) {
         MPSMatrix* matA = matrixView(bufferA, 0, rowA, colA, colA * sizeof(float));
         MPSMatrix* matC = matrixView(bufferC, 0, resultRows, resultColumns, rowBytesC);
         [gemmKernel(transposeA, transposeB, resultRows, resultColumns, interiorColumns)
@@ -871,7 +873,7 @@ void mpsGemmBatched(const float* A, const float* B, float* C, int batch,
                 matrixBytes:(NSUInteger)rows*columns*sizeof(float) dataType:MPSDataTypeFloat32]];
     };
 
-    if (!crossesGemmBoundary(bufferC, 0, batch * bytesC)) {
+    if (!nearGemmBoundary(bufferC, 0, batch * bytesC)) {
         MPSMatrix* matA = batchView(bufferA, 0, batch, rowA, colA);
         MPSMatrix* matB = batchView(bufferB, 0, batch, rowB, colB);
         MPSMatrix* matC = batchView(bufferC, 0, batch, resultRows, resultColumns);
