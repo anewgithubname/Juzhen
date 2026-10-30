@@ -9,6 +9,9 @@
  * and just below it (by recycling a pool buffer at that address) and compares
  * plain, transposed, row-blocked and batched products with host references.
  * Untouched placeholder buffers cost address space only.
+ *
+ * Built with -DJUZHEN_MPS_GEMM_WORKAROUND=OFF, the test checks MPS itself: a
+ * pass means macOS no longer has the bug and the workaround can be removed.
  */
 #include "../cpp/juzhen.hpp"
 
@@ -121,6 +124,9 @@ static void batched_case(int batch, int n, float beta, Placement where, std::str
 }
 
 int compute() {
+#if defined(JUZHEN_MPS_GEMM_WORKAROUND) && !JUZHEN_MPS_GEMM_WORKAROUND
+    std::cout << "MPS GEMM workaround disabled: testing MPS itself\n";
+#endif
     try {
         const auto across = Placement::Across, below = Placement::JustBelow;
         gemm_case(6000, 2500, 64, false, across, "GEMM");

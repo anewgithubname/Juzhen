@@ -82,6 +82,12 @@ elseif(ROCM_HIP)
 elseif(APPLE_SILICON)
     message("BUILD WITH APPLE SILICON SUPPORT! ")
     add_definitions(-DAPPLE_SILICON)
+    # Temporary workaround for an MPS GEMM bug near 2 GiB GPU addresses (see
+    # cpp/metal/MPSWrapper.mm). Turn it off to check whether macOS has fixed it.
+    option(JUZHEN_MPS_GEMM_WORKAROUND "Keep MPS GEMM results away from 2 GiB GPU addresses" ON)
+    if(NOT JUZHEN_MPS_GEMM_WORKAROUND)
+        add_definitions(-DJUZHEN_MPS_GEMM_WORKAROUND=0)
+    endif()
     project(animated_octo_sniffle LANGUAGES CXX OBJCXX)
     set(CMAKE_OBJCXX_STANDARD 20)
     set(CMAKE_OBJCXX_STANDARD_REQUIRED ON)
