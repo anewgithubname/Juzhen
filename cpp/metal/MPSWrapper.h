@@ -10,6 +10,8 @@ void mpsDestroy();
 
 float* mpsMalloc(size_t size);
 void mpsFree(float* ptr);
+// GPU virtual address of the buffer behind a pointer from mpsMalloc (0 if unknown).
+unsigned long long mpsGpuAddress(const float* ptr);
 
 void mpsGemm(const float* A, const float* B, float* C, int rowA, int colA, int rowB, int colB, bool transposeA, bool transposeB);
 // C = b*B + a*A(optionally transposed); B and C share a layout. In-place: B == C.

@@ -4,6 +4,7 @@
 #import <MetalPerformanceShaders/MetalPerformanceShaders.h>
 #include "MPSWrapper.h"
 #include <iostream>
+#include <algorithm>
 #include <map>
 #include <string>
 #include <tuple>
@@ -311,6 +312,11 @@ float* mpsMalloc(size_t size) {
     return ptr;
 }
 
+unsigned long long mpsGpuAddress(const float* ptr) {
+    auto it = bufferMap.find((float*)ptr);
+    return it == bufferMap.end() ? 0 : it->second.gpuAddress;
+}
+
 void mpsFree(float* ptr) {
     auto it = bufferMap.find(ptr);
     if(it != bufferMap.end()) {
@@ -318,6 +324,53 @@ void mpsFree(float* ptr) {
         bufferMap.erase(it);
     }
 }
+// MPSMatrixMultiplication writes a band of NaNs into its result when the
+// result buffer straddles a 2 GiB-aligned GPU virtual address. Reproduced on
+// an M2 (macOS 27.0.1) in a standalone Metal program; the operands, MPS gemv,
+// MTGP32 and our own kernels are unaffected by the same placement. Such
+// results are computed into scratch buffers that avoid the boundary, in blocks
+// of at most kGemmScratchBytes, and copied into place with our copy kernel.
+static const unsigned long long kGemmBoundary = 1ull << 31;
+static const NSUInteger kGemmScratchBytes = 256u << 20;
+
+static bool crossesGemmBoundary(id<MTLBuffer> buffer, NSUInteger offset, NSUInteger bytes) {
+    if (bytes == 0) return false;
+    const unsigned long long lo = buffer.gpuAddress + offset, hi = lo + bytes - 1;
+    return lo / kGemmBoundary != hi / kGemmBoundary;
+}
+
+// A registered buffer of `bytes` (well below 2 GiB) that avoids the boundary:
+// a rejected allocation is held until the next one lands elsewhere.
+static float* gemmScratch(NSUInteger bytes) {
+    std::vector<float*> rejected;
+    float* p = mpsMalloc(bytes);
+    while (crossesGemmBoundary(bufferMap[p], 0, bytes)) {
+        rejected.push_back(p);
+        p = mpsMalloc(bytes);
+    }
+    for (float* r : rejected) mpsFree(r);
+    return p;
+}
+
+static MPSMatrix* matrixView(id<MTLBuffer> buffer, NSUInteger offset, NSUInteger rows,
+                             NSUInteger columns, NSUInteger rowBytes) {
+    return [[MPSMatrix alloc] initWithBuffer:buffer offset:offset
+        descriptor:[MPSMatrixDescriptor matrixDescriptorWithRows:rows columns:columns
+                                                         rowBytes:rowBytes dataType:MPSDataTypeFloat32]];
+}
+
+static MPSMatrixMultiplication* gemmKernel(bool transposeA, bool transposeB, int resultRows,
+                                           int resultColumns, int interiorColumns) {
+    const auto key = std::make_tuple(transposeA, transposeB, resultRows, resultColumns, interiorColumns);
+    auto it = gemmKernelCache.find(key);
+    if (it != gemmKernelCache.end()) return it->second;
+    MPSMatrixMultiplication* kernel = [[MPSMatrixMultiplication alloc] initWithDevice:device
+        transposeLeft:transposeA transposeRight:transposeB resultRows:resultRows resultColumns:resultColumns
+        interiorColumns:interiorColumns alpha:1.0f beta:0.0f];
+    gemmKernelCache[key] = kernel;
+    return kernel;
+}
+
 /**
  * MPSMatrixMultiplication
  * @param A: M x K
@@ -325,35 +378,45 @@ void mpsFree(float* ptr) {
  * @param C: M x N
  */
 void mpsGemm(const float* A, const float* B, float* C, int rowA, int colA, int rowB, int colB, bool transposeA, bool transposeB) {
+    const int resultRows = transposeA ? colA : rowA;
+    const int resultColumns = transposeB ? rowB : colB;
+    const int interiorColumns = transposeA ? rowA : colA;
+    if (resultRows <= 0 || resultColumns <= 0) return;
+    id<MTLBuffer> bufferA = bufferMap[(float*)A], bufferC = bufferMap[C];
+    const NSUInteger rowBytesC = (NSUInteger)resultColumns * sizeof(float);
+
     id<MTLCommandBuffer> cb = currentMPSCommandBuffer();
+    MPSMatrix* matB = matrixView(bufferMap[(float*)B], 0, rowB, colB, colB * sizeof(float));
 
-    auto matA = [[MPSMatrix alloc] initWithBuffer:bufferMap[(float *) A]
-        descriptor:[MPSMatrixDescriptor matrixDescriptorWithRows:rowA columns:colA rowBytes:colA*sizeof(float) dataType:MPSDataTypeFloat32]];
-
-    auto matB = [[MPSMatrix alloc] initWithBuffer:bufferMap[(float *) B]
-        descriptor:[MPSMatrixDescriptor matrixDescriptorWithRows:rowB columns:colB rowBytes:colB*sizeof(float) dataType:MPSDataTypeFloat32]];
-
-    int resultRows = transposeA ? colA : rowA;
-    int resultColumns = transposeB ? rowB : colB;
-    int interiorColumns = transposeA ? rowA : colA;
-    auto matC = [[MPSMatrix alloc] initWithBuffer:bufferMap[C]
-        descriptor:[MPSMatrixDescriptor matrixDescriptorWithRows:resultRows columns:resultColumns rowBytes:resultColumns*sizeof(float) dataType:MPSDataTypeFloat32]];
-
-    const auto key = std::make_tuple(transposeA, transposeB, resultRows, resultColumns, interiorColumns);
-    MPSMatrixMultiplication* gemmKernel;
-    auto it = gemmKernelCache.find(key);
-    if (it != gemmKernelCache.end()) {
-        gemmKernel = it->second;
-    } else {
-        gemmKernel = [[MPSMatrixMultiplication alloc] initWithDevice:device
-            transposeLeft:transposeA transposeRight:transposeB resultRows:resultRows resultColumns:resultColumns interiorColumns:interiorColumns alpha:1.0f beta:0.0f];
-        gemmKernelCache[key] = gemmKernel;
+    if (!crossesGemmBoundary(bufferC, 0, resultRows * rowBytesC)) {
+        MPSMatrix* matA = matrixView(bufferA, 0, rowA, colA, colA * sizeof(float));
+        MPSMatrix* matC = matrixView(bufferC, 0, resultRows, resultColumns, rowBytesC);
+        [gemmKernel(transposeA, transposeB, resultRows, resultColumns, interiorColumns)
+            encodeToCommandBuffer:cb leftMatrix:matA rightMatrix:matB resultMatrix:matC];
+        opEncoded();
+        [matA release]; [matB release]; [matC release];
+        return;
     }
-    [gemmKernel encodeToCommandBuffer:cb leftMatrix:matA rightMatrix:matB resultMatrix:matC];
 
-    opEncoded();
-
-    [matA release]; [matB release]; [matC release];
+    // Row blocks of the result: block rows of op(A) are rows of A, or columns
+    // of A when it is transposed.
+    const int block = (int)std::max<NSUInteger>(1, std::min<NSUInteger>(resultRows, kGemmScratchBytes / rowBytesC));
+    float* scratch = gemmScratch(block * rowBytesC);
+    for (int r0 = 0; r0 < resultRows; r0 += block) {
+        const int rows = std::min(block, resultRows - r0);
+        MPSMatrix* matA = transposeA
+            ? matrixView(bufferA, (NSUInteger)r0 * sizeof(float), rowA, rows, colA * sizeof(float))
+            : matrixView(bufferA, (NSUInteger)r0 * colA * sizeof(float), rows, colA, colA * sizeof(float));
+        MPSMatrix* matC = matrixView(bufferMap[scratch], 0, rows, resultColumns, rowBytesC);
+        [gemmKernel(transposeA, transposeB, rows, resultColumns, interiorColumns)
+            encodeToCommandBuffer:currentMPSCommandBuffer() leftMatrix:matA rightMatrix:matB resultMatrix:matC];
+        opEncoded();
+        [matA release]; [matC release];
+        mpsCopyMatrixBlock(scratch, C, rows, resultColumns, false, 0, 0, rows, resultColumns,
+                           resultRows, resultColumns, false, r0, 0);
+    }
+    [matB release];
+    mpsFree(scratch);  // pending command buffers keep it alive until they finish
 }
 
 void mpsAdd(const float* A, const float* B, float* C, int rowA, int colA, bool transpose, float a, float b){
@@ -782,25 +845,14 @@ void mpsCausalMask(float* S, int n, bool transpose, float maskVal) {
 void mpsGemmBatched(const float* A, const float* B, float* C, int batch,
                     int rowA, int colA, int rowB, int colB,
                     bool transposeA, bool transposeB, float alpha, float beta) {
-    id<MTLCommandBuffer> cb = currentMPSCommandBuffer();
-
-    auto matA = [[MPSMatrix alloc] initWithBuffer:bufferMap[(float *) A]
-        descriptor:[MPSMatrixDescriptor matrixDescriptorWithRows:rowA columns:colA
-            matrices:batch rowBytes:colA*sizeof(float)
-            matrixBytes:(NSUInteger)rowA*colA*sizeof(float) dataType:MPSDataTypeFloat32]];
-
-    auto matB = [[MPSMatrix alloc] initWithBuffer:bufferMap[(float *) B]
-        descriptor:[MPSMatrixDescriptor matrixDescriptorWithRows:rowB columns:colB
-            matrices:batch rowBytes:colB*sizeof(float)
-            matrixBytes:(NSUInteger)rowB*colB*sizeof(float) dataType:MPSDataTypeFloat32]];
-
-    int resultRows = transposeA ? colA : rowA;
-    int resultColumns = transposeB ? rowB : colB;
-    int interiorColumns = transposeA ? rowA : colA;
-    auto matC = [[MPSMatrix alloc] initWithBuffer:bufferMap[C]
-        descriptor:[MPSMatrixDescriptor matrixDescriptorWithRows:resultRows columns:resultColumns
-            matrices:batch rowBytes:resultColumns*sizeof(float)
-            matrixBytes:(NSUInteger)resultRows*resultColumns*sizeof(float) dataType:MPSDataTypeFloat32]];
+    const int resultRows = transposeA ? colA : rowA;
+    const int resultColumns = transposeB ? rowB : colB;
+    const int interiorColumns = transposeA ? rowA : colA;
+    if (batch <= 0 || resultRows <= 0 || resultColumns <= 0) return;
+    const NSUInteger bytesA = (NSUInteger)rowA * colA * sizeof(float);
+    const NSUInteger bytesB = (NSUInteger)rowB * colB * sizeof(float);
+    const NSUInteger bytesC = (NSUInteger)resultRows * resultColumns * sizeof(float);
+    id<MTLBuffer> bufferA = bufferMap[(float*)A], bufferB = bufferMap[(float*)B], bufferC = bufferMap[C];
 
     const auto key = std::make_tuple(transposeA, transposeB, resultRows, resultColumns, interiorColumns, alpha, beta);
     MPSMatrixMultiplication* gemmKernel;
@@ -812,11 +864,43 @@ void mpsGemmBatched(const float* A, const float* B, float* C, int batch,
             transposeLeft:transposeA transposeRight:transposeB resultRows:resultRows resultColumns:resultColumns interiorColumns:interiorColumns alpha:alpha beta:beta];
         gemmBatchedKernelCache[key] = gemmKernel;
     }
-    [gemmKernel encodeToCommandBuffer:cb leftMatrix:matA rightMatrix:matB resultMatrix:matC];
+    auto batchView = [](id<MTLBuffer> buffer, NSUInteger offset, int count, int rows, int columns) {
+        return [[MPSMatrix alloc] initWithBuffer:buffer offset:offset
+            descriptor:[MPSMatrixDescriptor matrixDescriptorWithRows:rows columns:columns
+                matrices:count rowBytes:columns*sizeof(float)
+                matrixBytes:(NSUInteger)rows*columns*sizeof(float) dataType:MPSDataTypeFloat32]];
+    };
 
-    opEncoded();
+    if (!crossesGemmBoundary(bufferC, 0, batch * bytesC)) {
+        MPSMatrix* matA = batchView(bufferA, 0, batch, rowA, colA);
+        MPSMatrix* matB = batchView(bufferB, 0, batch, rowB, colB);
+        MPSMatrix* matC = batchView(bufferC, 0, batch, resultRows, resultColumns);
+        [gemmKernel encodeToCommandBuffer:currentMPSCommandBuffer() leftMatrix:matA rightMatrix:matB resultMatrix:matC];
+        opEncoded();
+        [matA release]; [matB release]; [matC release];
+        return;
+    }
 
-    [matA release]; [matB release]; [matC release];
+    // Groups of whole matrices through a boundary-free scratch buffer (see
+    // mpsGemm); with beta != 0 the scratch starts from the current result.
+    const int group = (int)std::max<NSUInteger>(1, std::min<NSUInteger>(batch, kGemmScratchBytes / bytesC));
+    float* scratch = gemmScratch(group * bytesC);
+    const int elementsC = resultRows * resultColumns;
+    for (int b0 = 0; b0 < batch; b0 += group) {
+        const int count = std::min(group, batch - b0);
+        const int span = count * elementsC;
+        if (beta != 0.0f)
+            mpsCopyMatrixBlock(C, scratch, 1, batch * elementsC, false, 0, b0 * elementsC, 1, span,
+                               1, span, false, 0, 0);
+        MPSMatrix* matA = batchView(bufferA, b0 * bytesA, count, rowA, colA);
+        MPSMatrix* matB = batchView(bufferB, b0 * bytesB, count, rowB, colB);
+        MPSMatrix* matC = batchView(bufferMap[scratch], 0, count, resultRows, resultColumns);
+        [gemmKernel encodeToCommandBuffer:currentMPSCommandBuffer() leftMatrix:matA rightMatrix:matB resultMatrix:matC];
+        opEncoded();
+        [matA release]; [matB release]; [matC release];
+        mpsCopyMatrixBlock(scratch, C, 1, span, false, 0, 0, 1, span, 1, batch * elementsC, false, 0, b0 * elementsC);
+    }
+    mpsFree(scratch);
 }
 
 // Shared encode path for the attention pack/unpack gather kernels.
