@@ -3005,8 +3005,14 @@ template<class D> Matrix<D> backward(const std::list<Layer<D>*>& net, const Matr
 			}
 #endif
 			const float invdim = 1.0f / (float)dim;
-			auto mu  = sum(x, 0) * invdim;                       // (1,N) column means
-			auto xc  = x - ones_d1 * mu;                         // (dim,N) centered
+			// Shift each column by its first entry before summing: when the
+			// values share a large offset (tiny variance), a plain FP32 sum
+			// loses the mean to rounding, and the transposed-storage gemv
+			// accumulates sequentially, so that error reaches xhat amplified
+			// by 1/sqrt(eps). The shift itself is exact for nearby values.
+			auto xs  = x - ones_d1 * x.rows(0, 1);               // (dim,N) shifted
+			auto mu  = sum(xs, 0) * invdim;                      // (1,N) shifted column means
+			auto xc  = xs - ones_d1 * mu;                        // (dim,N) centered
 			auto var = sum(hadmd(xc, xc), 0) * invdim;           // (1,N)
 			cached_inv = elemwise(
 				[] __GPU_CPU__(float v) { return 1.0f / sqrtf(v + 1e-5f); }, std::move(var));
