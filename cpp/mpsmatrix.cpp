@@ -44,6 +44,14 @@ Matrix<MPSfloat>::Matrix(const char* name, size_t numrow, size_t numcol, int tra
 
 }
 
+// Device-to-device copy of a whole buffer, encoded in the command stream like
+// CUDA's cudaMemcpyDeviceToDevice: no host wait. Readers on the host
+// synchronize first (to_host(), operator<<), and later GPU work is ordered.
+static void copy_storage(const MPSfloat* src, MPSfloat* dst, size_t count) {
+    mpsCopyMatrixBlock((const float*) src, (float*) dst, 1, (int) count, false, 0, 0,
+                       1, (int) count, 1, (int) count, false, 0, 0);
+}
+
 Matrix<MPSfloat>::Matrix(const Matrix<MPSfloat>& M) {
     LOG_DEBUG("mps copy constructor called");
     this->name = "copy of" + M.name;
@@ -55,9 +63,7 @@ Matrix<MPSfloat>::Matrix(const Matrix<MPSfloat>& M) {
             Memory<MPSfloat>::free(p);
         });
 
-    mpsSynchronize();
-    memcpy(elements.get(), M.elements.get(), numcol * numrow * sizeof(float));
-
+    copy_storage(M.elements.get(), elements.get(), numcol * numrow);
 }
 
 Matrix<MPSfloat>::Matrix(Matrix<MPSfloat>&& M) noexcept {
@@ -81,10 +87,8 @@ Matrix<MPSfloat>& Matrix<MPSfloat>::operator=(const Matrix<MPSfloat>& M) {
         Memory<MPSfloat>::allocate(  numcol * numrow), [](MPSfloat* p) {
             Memory<MPSfloat>::free(p);
         });
-    
-    mpsSynchronize();
-    memcpy(elements.get(), M.elements.get(), numcol * numrow * sizeof(float));
 
+    copy_storage(M.elements.get(), elements.get(), numcol * numrow);
     return *this;
 }
 
@@ -380,10 +384,8 @@ void copy(Matrix<MPSfloat>& dest, const Matrix<MPSfloat>& src) {
     const size_t count = src.numrow * src.numcol;
     auto storage = std::shared_ptr<MPSfloat[]>(Memory<MPSfloat>::allocate(count),
                                                [](MPSfloat* p) { Memory<MPSfloat>::free(p); });
-    // Copy the physical buffer as a single row; the layout flag carries over.
-    mpsCopyMatrixBlock((const float*) src.elements.get(), (float*) storage.get(),
-                       1, (int) count, false, 0, 0, 1, (int) count,
-                       1, (int) count, false, 0, 0);
+    // Copy the physical buffer; the layout flag carries over.
+    copy_storage(src.elements.get(), storage.get(), count);
     dest.numrow = src.numrow;
     dest.numcol = src.numcol;
     dest.transpose = src.transpose;
