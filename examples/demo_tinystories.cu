@@ -15,7 +15,7 @@
  *     kernel scatters the ones directly in device memory and the embedding
  *     is the existing LinearLayer GEMM (no new trainable layers)
  *   - trains embed -> N x causal TransformerLayer -> proj with the framework
- *     LogisticLayer (softmax CE over the 4096-token vocabulary)
+ *     softmax_cross_entropy loss (over the 4096-token vocabulary)
  *   - caches weights (TS_WEIGHTS env overrides; checkpointed every >=5000
  *     steps during training, so an interrupted run still yields a model)
  *   - after training (or from the cache), generates sample stories seeded
@@ -38,6 +38,7 @@
  */
 
 #include "../ml/layer.hpp"
+#include "../ml/loss.hpp"
 #include "../ml/optimizer.hpp"
 #include "../cpp/juzhen.hpp"
 
@@ -452,10 +453,8 @@ int compute() {
             fill_ids(val_ids, offs);
             auto X = make_X(xids);
             auto Y = make_Y(yids);
-            LogisticLayer<FLOAT> el(N, std::move(Y));
             auto net = build_net(blocks, embed, proj);
-            net.push_front(&el);
-            const float loss = as_host(forward(net, X)).elem(0, 0);
+            const float loss = as_host(softmax_cross_entropy(forward(net, X), Y).value).elem(0, 0);
             auto logits = as_host(proj.value());
             long correct = 0;
             for (int i = 0; i < N; ++i) {
@@ -481,8 +480,7 @@ int compute() {
 
             optimizer.zero_grad();
             const auto& logits = trainnn.eval(X);
-            LogisticLayer<FLOAT> loss(N, std::move(Y));
-            trainnn.backward(loss.backward(logits, Matrix<FLOAT>::ones(1, 1)));
+            trainnn.backward(softmax_cross_entropy(logits, Y).grad);
             optimizer.step();
 
             if (step % log_every == 0 || step == steps - 1) {

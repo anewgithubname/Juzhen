@@ -30,7 +30,7 @@
 
 #include "../ml/layer.hpp"
 #include "../ml/optimizer.hpp"
-#include "../ml/masked_cross_entropy.hpp"
+#include "../ml/loss.hpp"
 #include "../cpp/juzhen.hpp"
 
 #include <algorithm>
@@ -87,8 +87,8 @@ static void copy_linear_weights(LinearLayer<FLOAT>& dst,
 // ────────────────────────────────────────────────────────────────────────────
 // Custom loss: masked, 1/t-weighted softmax cross-entropy.
 //
-// This mirrors the framework's LogisticLayer (stable softmax cross-entropy) but
-// attaches a per-column weight w (shape 1xN). Columns are (position, sequence)
+// This is softmax_cross_entropy (stable softmax cross-entropy) with a
+// per-column weight w (shape 1xN). Columns are (position, sequence)
 // pairs. For an unmasked token w=0, so it contributes neither loss nor gradient
 // — the denoiser still *reads* it (bidirectional attention) but is not
 // supervised there. For a masked token in a sequence noised at level t, we set
@@ -97,7 +97,7 @@ static void copy_linear_weights(LinearLayer<FLOAT>& dst,
 //   loss   = sum_c  w_c * ( logsumexp(z_c) - <z_c, y_c> )
 //   dloss/dz_c = w_c * ( softmax(z_c) - y_c )
 // ────────────────────────────────────────────────────────────────────────────
-// Shared masked loss supports both legacy and gradient-only training.
+// It is implemented by masked_softmax_cross_entropy in ml/loss.hpp.
 
 // ── enwik8 corpus loading (identical policy to demo_transformer.cu) ──────────
 static string embedded_corpus() {
@@ -355,10 +355,9 @@ int compute() {
             fill_batch(offs, tlvl, Xh, Yh, Wh, true_idx, masked);
 
             auto Xb = Matrix<FLOAT>(Xh);
-            MaskedCELayer<FLOAT> el(N, Matrix<FLOAT>(Yh), Matrix<FLOAT>(Wh));
             auto net = build_net(blocks, embed, proj);
-            net.push_front(&el);
-            loss_sum += as_host(forward(net, Xb)).elem(0, 0);
+            loss_sum += as_host(masked_softmax_cross_entropy(forward(net, Xb), Matrix<FLOAT>(Yh),
+                                                             Matrix<FLOAT>(Wh)).value).elem(0, 0);
 
             auto logits = as_host(proj.value());
             for (int i = 0; i < N; ++i) {
@@ -393,8 +392,7 @@ int compute() {
         auto X = Matrix<FLOAT>(Xh);
         optimizer.zero_grad();
         const auto& logits = trainnn.eval(X);
-        MaskedCELayer<FLOAT> loss(N, Matrix<FLOAT>(Yh), Matrix<FLOAT>(Wh));
-        trainnn.backward(loss.backward(logits, Matrix<FLOAT>::ones(1, 1)));
+        trainnn.backward(masked_softmax_cross_entropy(logits, Matrix<FLOAT>(Yh), Matrix<FLOAT>(Wh)).grad);
         optimizer.step();
 
         if (step % log_every == 0 || step == steps - 1) {

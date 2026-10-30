@@ -1,40 +1,59 @@
 # Training API
 
 `backward` computes input and parameter gradients without updating weights.
-`backward_update` retains the previous combined backpropagation and Adam update.
-Existing calls to `backprop(net, x)` migrate to `backward_update(net, x)`;
-existing layer calls that update weights migrate to `layer.backward_update(...)`.
+`layer.backward_update(input, upstream)` retains the previous combined
+backpropagation and Adam update for a single layer.
 
-`Sequential` borrows a native Juzhen list, in its established output-first order:
+`Sequential` borrows a native Juzhen list, in its established output-first order.
+The network contains only layers; the loss is a function applied to its output:
 
 ```cpp
 #include "ml/layer.hpp"
+#include "ml/loss.hpp"
 #include "ml/optimizer.hpp"
 using namespace Juzhen;
 
 LinearLayer<float> linear(1, 2, batch_size);
-LossLayer<float> loss(batch_size, targets);
-Sequential<float> network{&loss, &linear};
+Sequential<float> network{&linear};
 AdamWOptions options;
 options.weight_decay = 0;  // Adam without weight decay.
 AdamW<float> optimizer(network.parameters(), options);
 
 for (int step = 0; step < steps; ++step) {
     optimizer.zero_grad();
-    network.eval(inputs);
-    network.backward();
+    auto [loss, dprediction] = mse(network.eval(inputs), targets);
+    network.backward(std::move(dprediction));
     optimizer.step();
 }
 ```
 
 `inputs` is an lvalue matrix with two rows and `batch_size` columns; `targets`
 has one row and `batch_size` columns. Both matrices and all layers must outlive
-their use by the network. `LossLayer` keeps a copy of its targets, as before.
-The loss sums squared errors over output features and divides by batch size.
+their use by the network.
 
-`eval` returns the final layer value. `backward()` seeds a scalar output with
-one; a non-scalar output requires `backward(upstream_gradient)`. Backward uses
-cached values and does not reevaluate layers. Repeated backward calls accumulate
+## Loss functions
+
+`ml/loss.hpp` provides each loss as a plain function. It takes the network output
+(one column per sample) and returns a `LossResult` holding `value`, the scalar
+loss as a 1x1 matrix that stays on the device, and `grad`, the gradient with
+respect to that output, ready to pass to `backward`:
+
+| Function | Value | Gradient |
+|---|---|---|
+| `mse(prediction, target)` | sum of squared errors / N | 2 (prediction - target) / N |
+| `softmax_cross_entropy(logits, labels)` | mean cross-entropy over the batch | (softmax(logits) - labels) / N |
+| `masked_softmax_cross_entropy(logits, labels, weights)` | sum over columns of w × cross-entropy | (softmax(logits) - labels) × w |
+| `error_rate(scores, labels)` | fraction of misclassified columns | none; evaluation only |
+
+N is the number of columns. Labels are one-hot columns or normalized probability
+distributions. Masked weights have shape (1, N), must be finite and nonnegative,
+and already contain any desired normalization: no batch averaging is applied, and
+a zero weight removes its column from both the loss and the gradient. When only
+the gradient is needed, write `network.backward(softmax_cross_entropy(logits, labels).grad)`.
+
+`eval` returns the final layer value. `backward(upstream)` takes the gradient of
+the loss with respect to that value, for example a loss function's `grad`; scaling
+it scales every gradient. Backward uses cached values and does not reevaluate layers. Repeated backward calls accumulate
 gradients until `optimizer.zero_grad()`. Input and cached layer values must remain
 unchanged between evaluation and backward. A failed evaluation invalidates the
 wrapper's cached input. The wrapper does not own layers or the input.
@@ -43,23 +62,20 @@ The list-level forms remain available as `Juzhen::forward(net, inputs)`,
 `Juzhen::backward(net, inputs, std::move(upstream))`, and
 `Juzhen::parameters(net)`. The gradient-only path supports the fully connected
 `Layer` (tanh), `ReluLayer`, `LinearLayer`, `ConvLayer`, `ConvTransLayer`,
-`TransformerLayer`, and the `LossLayer`, `LogisticLayer`, and `MaskedCELayer` loss
-heads. `LayerNormLayer<D>` is the single normalization implementation used both
-inside `TransformerLayer` and directly inside `Sequential`.
-`MaskedCELayer` is provided by `ml/masked_cross_entropy.hpp` and shared by the
-three discrete-diffusion demos. Its per-column weights include the desired
-normalization, so the layer applies no additional batch averaging. Targets must
-be one-hot columns or normalized probability distributions; weights must be
-finite and nonnegative. Loss heads accept a scalar upstream gradient and
-register no trainable parameters. Their legacy checkpoint layouts are retained.
+`TransformerLayer` and `LayerNormLayer`. `LayerNormLayer<D>` is the single
+normalization implementation used both inside `TransformerLayer` and directly
+inside `Sequential`.
 
-`ZeroOneLayer` reports classification error for evaluation only; it is
-nondifferentiable and cannot be used in a training network. Direct subclasses of
-`Layer` must explicitly implement and advertise gradient-only backward before
-joining this path. Subclasses that change an adapted layer's computation must
-also provide the corresponding backward implementation.
-Networks containing unsupported layers are rejected before
-gradient traversal. Existing `backward_update` training loops remain supported.
+Direct subclasses of `Layer` must explicitly implement and advertise
+gradient-only backward before joining this path. Subclasses that change an
+adapted layer's computation must also provide the corresponding backward
+implementation. Networks containing unsupported layers are rejected before
+gradient traversal.
+
+Losses used to be layers (`LossLayer`, `LogisticLayer`, `MaskedCELayer`,
+`ZeroOneLayer`) placed at the front of the network list; they have been replaced
+by the functions above. Checkpoints saved from a network list that contained one
+of those layers no longer load, because the list no longer includes the loss.
 Convolution inputs, upstream gradients and JVP tangents must match the configured
 dimensions. GPU convolution paths require non-transposed tensors, including
 weights and biases; CPU convolution supports matrix transpose views.
@@ -77,10 +93,10 @@ Sequential equivalence, accumulation, legacy Adam equivalence, error handling,
 gradient clipping and normalization against scalar references.
 
 The `all_layer_training_api` regression exercises activation, convolution and transpose
-convolution layers through the explicit training API. `masked_loss_api` checks
-masked cross-entropy against independent scalar loss and finite-difference
-references, zero-weight columns, scalar upstream scaling, extreme logits, shape
-and weight validation, and legacy Adam parity on CPU and CUDA.
+convolution layers through the explicit training API. `loss_functions` checks
+every loss function against independent FP64 references and finite differences,
+including soft labels, extreme logits, zero-weight columns, shape and weight
+validation, and a short training run, on CPU and CUDA.
 
 `LayerNormLayer<D>(features, columns)` supports both standalone and layer-list
 use. `forward(input)` returns a new output matrix by value and updates the
@@ -112,27 +128,23 @@ They explicitly set `options.weight_decay = 0` to preserve their original Adam
 training rule; `AdamWOptions` otherwise defaults to nonzero weight decay.
 Existing learning-rate schedules use `optimizer.set_lr(...)`.
 
-When targets change every batch, a persistent prediction network can be combined
-with a temporary loss head:
+Because a loss is a function of the prediction and the targets, targets can
+change every batch without constructing anything:
 
 ```cpp
-Sequential<float> network{&linear};
-AdamWOptions options;
-options.weight_decay = 0;
-AdamW<float> optimizer(network.parameters(), options);
-
 // inputs and targets remain alive through this step.
 optimizer.zero_grad();
 const auto& prediction = network.eval(inputs);
-LossLayer<float> loss(inputs.num_col(), targets);
-network.backward(loss.backward(prediction, Matrix<float>::ones(1, 1)));
+auto [loss, dprediction] = softmax_cross_entropy(prediction, targets);
+network.backward(std::move(dprediction));
 optimizer.step();
 ```
 
-Call `loss.eval(prediction)` to read the loss via `loss.value()` when needed.
-The loss backward uses the supplied prediction directly and does not repeat the
-network's forward pass. Finish backward before running validation or inference
-through the same layers, because those calls replace the forward caches.
+The loss uses the supplied prediction directly and does not repeat the network's
+forward pass. Finish backward before running validation or inference through the
+same layers, because those calls replace the forward caches. To evaluate, apply
+a loss function to the network output, for example
+`error_rate(forward(net, test_inputs), test_labels)`.
 
 The CNN rectified-flow example has skip connections and therefore keeps its
 explicit graph traversal: `net.eval(input)`, `net.backward(input, upstream)` and

@@ -1,5 +1,6 @@
 /** Core training API: finite differences, accumulation, Adam, clipping and normalization. */
 #include "../ml/layer.hpp"
+#include "../ml/loss.hpp"
 #include "../ml/optimizer.hpp"
 #include <iostream>
 #include <limits>
@@ -49,26 +50,23 @@ template<class D> void ordinary_loss_checks(bool use_sequential) {
     hidden.W()=Matrix<D>(w1);hidden.b()=Matrix<D>(b1);
     readout.W()=Matrix<D>(w2);readout.b()=Matrix<D>(b2);
     Matrix<D> x(xh),y(yh);
-    LossLayer<D> loss(batch,y);
-    std::list<Layer<D>*> net{&loss,&readout,&hidden};
+    std::list<Layer<D>*> net{&readout,&hidden};
     Sequential<D> model(net);
     AdamWOptions settings;settings.weight_decay=0;
     AdamW<D> optimizer(model.parameters(),settings);
-    require(optimizer.parameters().size()==4,"loss registers no trainable parameters");
-    require(loss.checkpoint_parameters().empty()&&loss.checkpoint_optimizers().empty(),"loss has no checkpoint parameter state");
-    static_assert(!std::is_constructible_v<LossLayer<D>,int,const Matrix<D>&,
-                  const std::list<Layer<D>*>&,const Matrix<D>&>);
-    static_assert(!std::is_constructible_v<LossLayer<D>,int,const Matrix<D>&,
-                  Sequential<D>&,const Matrix<D>&>);
+    require(optimizer.parameters().size()==4,"network registers both layers' parameters");
     static_assert(std::is_same_v<decltype(model.eval(x)),const Matrix<D>&>);
-    rejects([&]{model.backward();},"Sequential backward needs eval");
+    rejects([&]{model.backward(Matrix<D>::zeros(2,batch));},"Sequential backward needs eval");
     rejects([&]{model.value();},"Sequential value needs eval");
     auto eval=[&]() -> const Matrix<D>& {
         return use_sequential?model.eval(x):Juzhen::forward(net,x);
     };
-    auto backward=[&] {
-        return use_sequential?model.backward():Juzhen::backward(net,x,Matrix<D>::ones(1,1));
+    // The MSE gradient of the most recent eval is the upstream gradient.
+    Matrix<D> dprediction("dprediction",2,batch);
+    auto backward_with=[&](Matrix<D> upstream) {
+        return use_sequential?model.backward(std::move(upstream)):Juzhen::backward(net,x,std::move(upstream));
     };
+    auto backward=[&] { return backward_with(Matrix<D>(dprediction)); };
     auto reference=[&] {
         double result=0;
         for(int j=0;j<batch;++j)for(int o=0;o<2;++o) {
@@ -82,10 +80,12 @@ template<class D> void ordinary_loss_checks(bool use_sequential) {
         }
         return result;
     };
-    optimizer.zero_grad();eval();
+    optimizer.zero_grad();
+    const auto& prediction=eval();
     require(hidden.calls==1&&readout.calls==1,"network evaluates every layer once");
-    if(use_sequential)close(host(model.value()),host(loss.value()),"Sequential output is loss",0);
-    require(std::abs(host(loss.value()).elem(0,0)-reference())<3e-6,"ordinary loss scalar reference");
+    if(use_sequential)close(host(model.value()),host(prediction),"Sequential output is the prediction",0);
+    auto [loss,dpred]=mse(prediction,y);dprediction=std::move(dpred);
+    require(std::abs(host(loss).elem(0,0)-reference())<3e-6,"ordinary loss scalar reference");
     auto dx=host(backward());
     require(hidden.calls==1&&readout.calls==1,"backward does not rerun eval");
     // Independent scalar FP64 finite differences check both layers and input.
@@ -110,37 +110,32 @@ template<class D> void ordinary_loss_checks(bool use_sequential) {
     backward();
     for(size_t k=0;k<refs.size();++k)close(host(refs[k].grad()),first_gradients[k]*2,"network accumulates gradients");
     optimizer.zero_grad();
-    auto seed=Matrix<D>::ones(1,1)*-.25f;
-    auto scaled_dx=use_sequential?model.backward(std::move(seed)):Juzhen::backward(net,x,std::move(seed));
-    close(host(scaled_dx),dx*-.25f,"scalar upstream scales input gradient");
-    for(size_t k=0;k<refs.size();++k)close(host(refs[k].grad()),first_gradients[k]*-.25f,"scalar upstream scales parameter gradient");
+    auto scaled_dx=backward_with(dprediction*-.25f);
+    close(host(scaled_dx),dx*-.25f,"scaled upstream scales input gradient");
+    for(size_t k=0;k<refs.size();++k)close(host(refs[k].grad()),first_gradients[k]*-.25f,"scaled upstream scales parameter gradient");
     optimizer.zero_grad();backward();
-    // The original list-based updating driver still agrees with separate Adam.
+    // Per-layer updating backward still agrees with separate Adam.
     LinearLayer<D> old_hidden(2,2,batch),old_readout(2,2,batch);
     old_hidden.W()=Matrix<D>(w1);old_hidden.b()=Matrix<D>(b1);
     old_readout.W()=Matrix<D>(w2);old_readout.b()=Matrix<D>(b2);
-    LossLayer<D> old_loss(batch,y);
-    std::list<Layer<D>*> old_net{&old_loss,&old_readout,&old_hidden};
-    Juzhen::forward(old_net,x);
-    close(host(Juzhen::backward_update(old_net,x)),dx,"updating network input gradient");
+    std::list<Layer<D>*> old_net{&old_readout,&old_hidden};
+    auto old_dprediction=mse(Juzhen::forward(old_net,x),y).grad;
+    auto old_dx=old_hidden.backward_update(x,old_readout.backward_update(old_hidden.value(),std::move(old_dprediction)));
+    close(host(old_dx),dx,"updating network input gradient");
     require(optimizer.step()==4,"Adam updates only trainable layers");
     const Matrix<D>* updated[]={&old_hidden.W(),&old_hidden.b(),&old_readout.W(),&old_readout.b()};
     for(size_t k=0;k<refs.size();++k)close(host(*refs[k].value),host(*updated[k]),"ordinary loss legacy Adam parity",2e-6f);
-    LossLayer<D> legacy(batch,y);legacy.eval(readout.value());
-    close(host(legacy.value()),host(loss.value()),"original LossLayer eval",0);
-    rejects([&]{loss.backward(readout.value(),Matrix<D>::ones(1,2));},"loss requires a scalar upstream gradient");
-    UnadaptedLayer<D> unsupported(2,2,batch);std::list<Layer<D>*> bad{&loss,&readout,&unsupported};
+    rejects([&]{mse(readout.value(),Matrix<D>::ones(1,batch));},"mse rejects a target of the wrong shape");
+    UnadaptedLayer<D> unsupported(2,2,batch);std::list<Layer<D>*> bad{&readout,&unsupported};
     Sequential<D> bad_model(bad);optimizer.zero_grad();bad_model.eval(x);
-    rejects([&]{bad_model.backward();},"network rejects unsupported layer");
+    rejects([&]{bad_model.backward(Matrix<D>(dprediction));},"network rejects unsupported layer");
     for(const auto& p:refs)require(!p.has_grad(),"unsupported network leaves no partial gradients");
-    Sequential<D> prediction{&readout,&hidden};prediction.eval(x);
-    rejects([&]{prediction.backward();},"non-scalar network needs an explicit upstream gradient");
     LinearLayer<D> scalar(1,2,1);scalar.W()=Matrix<D>::ones(1,2);
     auto one_input=x.columns(0,1);Sequential<D> scalar_model{&scalar};scalar_model.eval(one_input);
-    close(host(scalar_model.backward()),Matrix<float>::ones(2,1),"scalar seed is independent of loss layer type",0);
+    close(host(scalar_model.backward(Matrix<D>::ones(1,1))),Matrix<float>::ones(2,1),"unit upstream through a linear map gives W^T",0);
     model.eval(x);hidden.fail=true;
     rejects([&]{model.eval(x);},"Sequential propagates failed eval");
-    rejects([&]{model.backward();},"failed eval invalidates Sequential context");
+    rejects([&]{model.backward(Matrix<D>(dprediction));},"failed eval invalidates Sequential context");
     rejects([&]{Sequential<D> empty{std::list<Layer<D>*>{}};},"Sequential rejects empty network");
     rejects([&]{Sequential<D> invalid{nullptr};},"Sequential rejects null layer");
     rejects([&]{Sequential<D> reused{&hidden,&hidden};},"Sequential rejects repeated layer instance");

@@ -5,6 +5,7 @@
 
 #include "../cpp/juzhen.hpp"
 #include "../ml/layer.hpp"
+#include "../ml/loss.hpp"
 
 #include <algorithm>
 #include <array>
@@ -248,15 +249,9 @@ int compute() {
         return 1;
     }
 
-    LossLayer<float> loss_cpu(batch, y_h);
-    net_cpu.push_front(&loss_cpu);
-    (void)backward_update(net_cpu, x_h);
-    net_cpu.pop_front();
-
-    LossLayer<MPSfloat> loss_mps(batch, y_m);
-    net_mps.push_front(&loss_mps);
-    (void)backward_update(net_mps, x_m);
-    net_mps.pop_front();
+    // One updating step on each backend, starting from the MSE gradient.
+    (void)l0_cpu.backward_update(x_h, l1_cpu.backward_update(l0_cpu.value(), mse(l1_cpu.value(), y_h).grad));
+    (void)l0_mps.backward_update(x_m, l1_mps.backward_update(l0_mps.value(), mse(l1_mps.value(), y_m).grad));
 
     compare_matrix(l0_cpu.W(), l0_mps.W().to_host(), "l0.W after step", max_abs, rel_l2);
     if (max_abs > 5e-3f || rel_l2 > 5e-3f) {

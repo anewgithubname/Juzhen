@@ -24,6 +24,7 @@
  */
 
 #include "../ml/layer.hpp"
+#include "../ml/loss.hpp"
 #include "../ml/optimizer.hpp"
 #include "../cpp/juzhen.hpp"
 
@@ -62,11 +63,9 @@ int compute() {
     // define layers
     Layer<FLOAT> L0(16, d, batchsize), L1(4, 16, batchsize);
     LinearLayer<FLOAT> L2(1, 4, batchsize);
-    // least sqaure loss
-    LossLayer<FLOAT> L3t(n, std::move(YTd));
 
-    // nns are linked lists containing layers
-    list<Layer<FLOAT>*> trainnn({ &L2, &L1, &L0 }), testnn({ &L3t, &L2, &L1, &L0});
+    // nns are linked lists containing layers, output layer first
+    list<Layer<FLOAT>*> trainnn({ &L2, &L1, &L0 });
     Sequential<FLOAT> network(trainnn);
     AdamWOptions options;
     options.weight_decay = 0; // Preserve the original Adam update.
@@ -88,15 +87,14 @@ int compute() {
         // Compute gradients, then update all parameters together.
         optimizer.zero_grad();
         const auto& prediction = network.eval(X_i);
-        LossLayer<FLOAT> L3(batchsize, std::move(Y_i));
-        network.backward(L3.backward(prediction, Matrix<FLOAT>::ones(1, 1)));
+        network.backward(mse(prediction, Y_i).grad);  // least squares loss
         optimizer.step();
 
         if (iter % 1000 == 0) {
 #if defined(CUDA) || defined(APPLE_SILICON)
-            cout << "iter: " << iter << ", testing loss: " << forward(testnn, XTd).to_host().elem(0, 0) << endl;
+            cout << "iter: " << iter << ", testing loss: " << mse(forward(trainnn, XTd), YTd).value.to_host().elem(0, 0) << endl;
 #else
-            cout << "iter: " << iter << ",testing loss: " << forward(testnn, XT).elem(0, 0) << endl;
+            cout << "iter: " << iter << ",testing loss: " << mse(forward(trainnn, XT), YT).value.elem(0, 0) << endl;
 #endif
         }
 

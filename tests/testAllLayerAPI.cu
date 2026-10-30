@@ -1,5 +1,6 @@
 // Independent scalar gradients and compatibility checks for the unified layer API.
 #include "../cpp/juzhen.hpp"
+#include "../ml/loss.hpp"
 #include "../ml/optimizer.hpp"
 #include "../ml/checkpoint.hpp"
 #include <algorithm>
@@ -148,17 +149,8 @@ static void logistic_checks() {
     auto target=Matrix<float>::zeros(classes,batch);
     // Soft labels test the full normalized-target CE contract as well as one-hot labels.
     target.elem(1,0)=1;target.elem(0,1)=.25f;target.elem(3,1)=.75f;target.elem(2,2)=1;
-    Matrix<D> input(x),labels(target);LogisticLayer<D> loss(batch,labels);loss.eval(input);
-    require(loss.supports_backward()&&loss.parameters().empty(),"CE has no trainable parameters");
-    // Preserve old checkpoint fields even though the loss owns no trainable
-    // parameters; old saves contained the inherited dummy tensors/Adam states.
-    require(loss.checkpoint_parameters().size()==2&&loss.checkpoint_optimizers().size()==2,"CE retains legacy checkpoint schema");
-    std::vector<Matrix<float>> legacy_tensors,legacy_m,legacy_v;
-    std::vector<int> legacy_iterations;
-    for(auto p:loss.checkpoint_parameters())legacy_tensors.push_back(host(*p.second));
-    for(auto p:loss.checkpoint_optimizers()) {
-        legacy_m.push_back(host(p.second->m));legacy_v.push_back(host(p.second->v));legacy_iterations.push_back(p.second->iteration);
-    }
+    Matrix<D> input(x),labels(target);
+    auto [loss,gradient]=softmax_cross_entropy(input,labels);
     double reference=0;Matrix<float> dx("CE reference",classes,batch);
     for(int j=0;j<batch;++j) {
         double mx=-1e30;for(int i=0;i<classes;++i) mx=std::max(mx,double(x.elem(i,j)));
@@ -168,18 +160,9 @@ static void logistic_checks() {
             dx.elem(i,j)=float((std::exp(double(x.elem(i,j))-mx)/denom-target.elem(i,j))/batch);
         }
     }
-    require(std::abs(host(loss.value()).elem(0,0)-reference)<5e-5,"stable CE scalar reference");
-    close(host(loss.backward(input,Matrix<D>::ones(1,1)*-.375f)),dx*-.375f,"CE upstream scales gradient");
-    close(host(loss.backward(input,Matrix<D>::zeros(1,1))),Matrix<float>::zeros(classes,batch),"CE zero upstream",0);
-    rejects([&]{loss.backward(input,Matrix<D>::ones(1,2));},"CE scalar upstream");
-    rejects([&]{loss.backward(Matrix<D>::zeros(classes+1,batch),Matrix<D>::ones(1,1));},"CE input shape");
-    AdamW<D> empty_optimizer(loss.parameters());require(empty_optimizer.step()==0,"CE optimizer has nothing to update");
-    size_t index=0;for(auto p:loss.checkpoint_parameters())close(host(*p.second),legacy_tensors[index++],"CE preserves legacy checkpoint tensor",0);
-    index=0;for(auto p:loss.checkpoint_optimizers()) {
-        close(host(p.second->m),legacy_m[index],"CE preserves legacy first moment",0);
-        close(host(p.second->v),legacy_v[index],"CE preserves legacy second moment",0);
-        require(p.second->iteration==legacy_iterations[index++],"CE preserves legacy Adam iteration");
-    }
+    require(std::abs(host(loss).elem(0,0)-reference)<5e-5,"stable CE scalar reference");
+    close(host(gradient),dx,"stable CE gradient");
+    rejects([&]{softmax_cross_entropy(Matrix<D>::zeros(classes+1,batch),labels);},"CE input shape");
 }
 
 struct Shape {int n,ci,h,w,co,kh,kw,pad,stride;bool relu;};
@@ -455,16 +438,11 @@ static void evaluation_metric_checks() {
     auto labels=Matrix<float>::zeros(2,3),scores=Matrix<float>::zeros(2,3);
     labels.elem(0,0)=1;labels.elem(1,1)=1;labels.elem(1,2)=1;
     scores.elem(0,0)=2;scores.elem(1,1)=3;scores.elem(0,2)=1;
-    Matrix<D> input(scores),target(labels);ZeroOneLayer<D> metric(3,target);LinearLayer<D> identity(2,2,3);
+    Matrix<D> input(scores),target(labels);LinearLayer<D> identity(2,2,3);
     auto weights=Matrix<float>::zeros(2,2);weights.elem(0,0)=1;weights.elem(1,1)=1;
     identity.W()=Matrix<D>(weights);identity.b()=Matrix<D>::zeros(2,1);
-    AdamW<D> optimizer(identity.parameters());Sequential<D> model{&metric,&identity};
-    require(!metric.supports_backward()&&metric.parameters().empty(),"ZeroOne evaluation-only registration");
-    require(std::abs(host(model.eval(input)).elem(0,0)-1.f/3)<1e-6,"ZeroOne Sequential evaluation");
-    rejects([&]{metric.backward(input,Matrix<D>::ones(1,1));},"ZeroOne direct backward");
-    rejects([&]{model.parameters();},"ZeroOne cannot register a trainable network");
-    rejects([&]{model.backward();},"ZeroOne Sequential backward");
-    for(auto& p:optimizer.parameters())require(!p.has_grad(),"ZeroOne rejected before partial gradients");
+    Sequential<D> model{&identity};
+    require(std::abs(host(error_rate(model.eval(input),target)).elem(0,0)-1.f/3)<1e-6,"error rate of a network output");
 }
 
 static void classifier_check() {
@@ -475,12 +453,19 @@ static void classifier_check() {
     auto rw=Matrix<float>::zeros(2,32);
     for(int i=0;i<16;++i) {rw.elem(0,16+i)=.01f;rw.elem(1,i)=.01f;}
     readout.W()=Matrix<D>(rw);readout.b()=Matrix<D>::ones(2,1)*.1f;
-    Matrix<D> input(x),target(labels);LogisticLayer<D> loss(batch,target);Sequential<D> model{&loss,&readout,conv.get()};
+    Matrix<D> input(x),target(labels);Sequential<D> model{&readout,conv.get()};
     AdamWOptions options;options.lr=.02f;options.weight_decay=.01f;AdamW<D> optimizer(model.parameters(),options);
     require(optimizer.parameters().size()==4,"CNN classifier registers all parameter groups");
-    const float initial=host(model.eval(input)).elem(0,0);
-    for(int i=0;i<35;++i) {optimizer.zero_grad();model.eval(input);model.backward();optimizer.clip_grad_norm(1);require(optimizer.step()==4,"CNN classifier optimizer");}
-    const float final=host(model.eval(input)).elem(0,0);require(std::isfinite(final)&&final<initial*.25f,"CNN classification learns");
+    auto loss=[&]{return host(softmax_cross_entropy(model.eval(input),target).value).elem(0,0);};
+    const float initial=loss();
+    for(int i=0;i<35;++i) {
+        optimizer.zero_grad();
+        auto dlogits=softmax_cross_entropy(model.eval(input),target).grad;
+        model.backward(std::move(dlogits));
+        optimizer.clip_grad_norm(1);
+        require(optimizer.step()==4,"CNN classifier optimizer");
+    }
+    const float final=loss();require(std::isfinite(final)&&final<initial*.25f,"CNN classification learns");
     std::cout<<"PASS CNN classification loss "<<initial<<" -> "<<final<<'\n';
 }
 
@@ -495,13 +480,15 @@ static void restart(const std::string& phase,const std::filesystem::path& output
     shape.ci=2;shape.co=1;shape.relu=false;auto trans=convolution(shape,true);
     Layer<D> tanh_layer(5,16,2);ReluLayer<D> relu_layer(3,5,2);LayerNormLayer<D> norm(3,2);
     auto labels=Matrix<float>::zeros(3,2);labels.elem(0,0)=1;labels.elem(2,1)=1;Matrix<D> target(labels);
-    LogisticLayer<D> loss(2,target);std::list<Layer<D>*> net{&loss,&norm,&relu_layer,&tanh_layer,trans.get(),conv.get()};
+    std::list<Layer<D>*> net{&norm,&relu_layer,&tanh_layer,trans.get(),conv.get()};
     Sequential<D> model(net);AdamWOptions options;options.lr=.003f;options.weight_decay=.03f;
     AdamW<D> optimizer(model.parameters(),options);require(optimizer.parameters().size()==10,"all-layer checkpoint parameter count");
     TrainingProgress progress;std::string error;
     if(phase=="resume")require(load_checkpoint(net,(output/"split.ckpt").string(),progress,&error),error);
     for(;progress.step<6;++progress.step) {
-        Matrix<D> input(values(16,2,float(progress.step)*.3f,.8f));optimizer.zero_grad();model.eval(input);model.backward();optimizer.step();
+        Matrix<D> input(values(16,2,float(progress.step)*.3f,.8f));optimizer.zero_grad();
+        auto dlogits=softmax_cross_entropy(model.eval(input),target).grad;
+        model.backward(std::move(dlogits));optimizer.step();
         if(phase=="prepare"&&progress.step==2) {auto saved=progress;saved.step=3;require(save_checkpoint(net,(output/"split.ckpt").string(),saved,&error),error);}
     }
     const auto final=output/(phase=="prepare"?"continuous.ckpt":"resumed.ckpt");

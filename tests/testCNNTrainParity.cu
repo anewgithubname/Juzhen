@@ -10,6 +10,7 @@
  */
 
 #include "../ml/layer.hpp"
+#include "../ml/loss.hpp"
 #include "../ml/dataloader.hpp"
 #include <cmath>
 #include <cstdlib>
@@ -41,6 +42,21 @@ static constexpr int N_ITERS = 100;
 
 static const std::string REF_FILE =
     std::string(PROJECT_DIR) + "/tests/cnn_train_ref.txt";
+
+// One training step on the per-layer updating path: compute the softmax CE
+// gradient of the network output, then let every layer, from the output back
+// to the input, update its own Adam state. Returns the batch loss.
+template<class D>
+float train_step(const std::list<Layer<D>*>& net, const Matrix<D>& X, const Matrix<D>& Y) {
+    auto [loss, grad] = softmax_cross_entropy(forward(net, X), Y);
+    for (auto i = net.begin(); i != net.end(); ++i) {
+        auto next = std::next(i);
+        const auto& input = next == net.end() ? X : (*next)->value();
+        grad = (*i)->backward_update(input, std::move(grad));
+    }
+    if constexpr (std::is_same_v<D, float>) return loss.elem(0, 0);
+    else return loss.to_host().elem(0, 0);
+}
 
 // Pre-load N_ITERS batches from MNIST into CPU float matrices.
 static void load_batches(std::vector<Matrix<float>>& Xs,
@@ -83,15 +99,7 @@ int compute() {
         auto Xg = Matrix<CUDAfloat>(Xs[iter]);
         auto Yg = Matrix<CUDAfloat>(Ys[iter]);
 
-        forward(net, Xg);
-        LogisticLayer<CUDAfloat> loss(BS, std::move(Yg));
-        loss.eval(L2.value());
-        gpu_losses.push_back(loss.value().to_host().elem(0, 0));
-
-        std::list<Layer<CUDAfloat>*> train;
-        train.push_back(&loss); train.push_back(&L2); train.push_back(&L1);
-        train.push_back(&c3);   train.push_back(&c2); train.push_back(&c1);
-        backward_update(train, Xg);
+        gpu_losses.push_back(train_step(net, Xg, Yg));
     }
 
     // Try to load CPU reference
@@ -165,15 +173,7 @@ int compute() {
         auto Xg = Matrix<ROCMfloat>(Xs[iter]);
         auto Yg = Matrix<ROCMfloat>(Ys[iter]);
 
-        forward(net, Xg);
-        LogisticLayer<ROCMfloat> loss(BS, std::move(Yg));
-        loss.eval(L2.value());
-        gpu_losses.push_back(loss.value().to_host().elem(0, 0));
-
-        std::list<Layer<ROCMfloat>*> train;
-        train.push_back(&loss); train.push_back(&L2); train.push_back(&L1);
-        train.push_back(&c3);   train.push_back(&c2); train.push_back(&c1);
-        backward_update(train, Xg);
+        gpu_losses.push_back(train_step(net, Xg, Yg));
     }
 
     std::ifstream ref(REF_FILE);
@@ -246,15 +246,7 @@ int compute() {
         auto Xg = Matrix<MPSfloat>(Xs[iter]);
         auto Yg = Matrix<MPSfloat>(Ys[iter]);
 
-        forward(net, Xg);
-        LogisticLayer<MPSfloat> loss(BS, std::move(Yg));
-        loss.eval(L2.value());
-        gpu_losses.push_back(loss.value().to_host().elem(0, 0));
-
-        std::list<Layer<MPSfloat>*> train;
-        train.push_back(&loss); train.push_back(&L2); train.push_back(&L1);
-        train.push_back(&c3);   train.push_back(&c2); train.push_back(&c1);
-        backward_update(train, Xg);
+        gpu_losses.push_back(train_step(net, Xg, Yg));
     }
 
     std::ifstream ref(REF_FILE);
@@ -337,16 +329,8 @@ int compute() {
         const Matrix<float>& Xh = Xs[iter];
         const Matrix<float>& Yh = Ys[iter];
 
-        forward(net, Xh);
-        LogisticLayer<float> loss(BS, Yh);
-        loss.eval(L2.value());
-        const float lv = loss.value().elem(0, 0);
+        const float lv = train_step(net, Xh, Yh);
         out << lv << "\n";
-
-        std::list<Layer<float>*> train;
-        train.push_back(&loss); train.push_back(&L2); train.push_back(&L1);
-        train.push_back(&c3);   train.push_back(&c2); train.push_back(&c1);
-        backward_update(train, Xh);
 
         std::cout << std::setw(5) << iter
                   << std::fixed << std::setprecision(6)

@@ -1,5 +1,6 @@
-/** Sequential network with native LossLayer and a separate Adam optimizer. */
+/** Sequential network with an MSE loss function and a separate Adam optimizer. */
 #include "../ml/layer.hpp"
+#include "../ml/loss.hpp"
 #include "../ml/optimizer.hpp"
 #include <cmath>
 #include <iostream>
@@ -29,16 +30,15 @@ int compute(){try{
     AdamWOptions options;
     options.lr=.03f;
     options.weight_decay=0; // Adam without weight decay.
-    LossLayer<Backend> loss(32,y);
-    Sequential<Backend> network{&loss,&linear};
+    Sequential<Backend> network{&linear};
     AdamW<Backend> optimizer(network.parameters(),options);
     float first=0,last=0;
     for(int step=0;step<300;++step){
         optimizer.zero_grad();
-        network.eval(x);
-        last=scalar(loss.value());
+        auto [loss,dprediction]=mse(network.eval(x),y);
+        last=scalar(loss);
         if(step==0)first=last;
-        network.backward();
+        network.backward(std::move(dprediction));
         optimizer.step();
     }
     std::cout<<"MSE "<<first<<" -> "<<last<<std::endl;

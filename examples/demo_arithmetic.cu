@@ -17,7 +17,7 @@
  * This is the standard trick that makes addition learnable for such models.
  *
  * Training: teacher-forced next-char prediction over the whole string (reusing
- *           the framework's TransformerLayer + LogisticLayer), warmup + cosine
+ *           the framework's TransformerLayer + softmax_cross_entropy), warmup + cosine
  *           LR schedule, keeping the checkpoint with the best validation
  *           exact-match. The trained model is saved under res/ and reloaded on
  *           later runs (delete the file or set ARITH_RETRAIN=1 to retrain).
@@ -48,6 +48,7 @@
  */
 
 #include "../ml/layer.hpp"
+#include "../ml/loss.hpp"
 #include "../ml/optimizer.hpp"
 #include "../cpp/juzhen.hpp"
 
@@ -548,15 +549,16 @@ int compute() {
         }
         dev_batch.upload();
         const Matrix<FLOAT>& X = dev_batch.X;
-        LogisticLayer<FLOAT> loss(N, Matrix<FLOAT>(dev_batch.Y));  // D2D copy
+        const Matrix<FLOAT>& Y = dev_batch.Y;
 #else
         fill_batch(offs, X_h, Y_h);
         auto X = Matrix<FLOAT>(X_h);
-        LogisticLayer<FLOAT> loss(N, Matrix<FLOAT>(Y_h));
+        auto Y = Matrix<FLOAT>(Y_h);
 #endif
         optimizer.zero_grad();
         const auto& logits = trainnn.eval(X);
-        trainnn.backward(loss.backward(logits, Matrix<FLOAT>::ones(1, 1)));
+        auto [loss, dlogits] = softmax_cross_entropy(logits, Y);
+        trainnn.backward(std::move(dlogits));
         optimizer.step();
 
         if (step % log_every == 0 || step == steps - 1) {
@@ -565,8 +567,7 @@ int compute() {
             // unpredictable (with uniform-value operands it is exactly
             // (#operand digit positions * ln 10)/seq_len; length-uniform
             // operands have less entropy, so the floor sits a bit lower).
-            loss.eval(proj.value());
-            const float nll = item(as_host(loss.value()));
+            const float nll = item(as_host(loss));
             auto [tr_dig, tr_em] = eval_solve(train_eval, nullptr);
             auto [va_dig, va_em] = eval_solve(val_eval, nullptr);
             // >= : on ties (e.g. repeated 100% on the small val slice) keep the
