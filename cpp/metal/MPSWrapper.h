@@ -4,10 +4,14 @@
 #include <cstddef>
 
 void mpsInit();
+// Name of the system default Metal device; usable before mpsInit().
+const char* mpsDeviceName();
 void mpsDestroy();
 
 float* mpsMalloc(size_t size);
 void mpsFree(float* ptr);
+// GPU virtual address of the buffer behind a pointer from mpsMalloc (0 if unknown).
+unsigned long long mpsGpuAddress(const float* ptr);
 
 void mpsGemm(const float* A, const float* B, float* C, int rowA, int colA, int rowB, int colB, bool transposeA, bool transposeB);
 // C = b*B + a*A(optionally transposed); B and C share a layout. In-place: B == C.
@@ -35,12 +39,12 @@ void mpsSoftmaxCol(const float* src, float* dst, int rows, int cols, bool transp
 void mpsCausalMask(float* S, int n, bool transpose, float maskVal);
 
 // ── batched multi-head attention ────────────────────────────────────────────
-// C_i = alpha * op(A_i) * op(B_i) for i in [0, batch): each operand is a
-// contiguous batch of row-major matrices (A_i is rowA x colA at
+// C_i = alpha * op(A_i) * op(B_i) + beta * C_i for i in [0, batch): each
+// operand is a contiguous batch of row-major matrices (A_i is rowA x colA at
 // A + i*rowA*colA, etc.).
 void mpsGemmBatched(const float* A, const float* B, float* C, int batch,
                     int rowA, int colA, int rowB, int colB,
-                    bool transposeA, bool transposeB, float alpha);
+                    bool transposeA, bool transposeB, float alpha, float beta = 0.0f);
 // Repack a (d_k x batch*seq) row-major projection into batch*heads contiguous
 // (seq x d_h) row-major matrices (one per head/sequence block), and back.
 void mpsAttnPack(const float* src, float* dst, int d_h, int heads, int seq, int batch);
@@ -60,10 +64,29 @@ void mpsLayerNormForward(const float* x, const float* gamma, const float* beta,
 // LayerNorm input gradient from dy, gamma and the cached xhat / inv_std.
 void mpsLayerNormBackward(const float* dy, const float* gamma, const float* xhat,
                           const float* invStd, float* dx, int dim, int N);
+// LayerNorm tangent: dy = gamma * inv_std * (dx - mean(dx) - xhat * mean(xhat * dx)).
+void mpsLayerNormJvp(const float* dx, const float* gamma, const float* xhat,
+                     const float* invStd, float* dy, int dim, int N);
+// gradient *= (activation > 0), elementwise over `total` elements.
+void mpsReluBackwardInplace(const float* activation, float* gradient, int total);
+// Maximum of each logical column of a (rows x cols) matrix (`transpose` is
+// its physical-layout flag); dst is a plain (1 x cols) row.
+void mpsColumnMax(const float* src, float* dst, int rows, int cols, bool transpose);
+// dst = min(max(src, lo), hi) elementwise; in place: src == dst.
+void mpsClamp(const float* src, float* dst, int N, float lo, float hi);
+// dst = src > threshold ? 1 : 0 elementwise; in place: src == dst.
+void mpsStep(const float* src, float* dst, int N, float threshold);
 // y[i, c] += b[i] over a (rows x N) matrix (total = rows * N elements).
 void mpsAddBias(float* y, const float* b, int N, int total);
-void mpsRand(float* A, int N); // fill A with random numbers in [0, 1)
-void mpsRandn(float* A, int N); // fill A with random numbers
+// rand and randn draw from one MTGP32 uniform generator (randn via
+// Box-Muller); mpsSetSeed restarts it, waiting for pending work first.
+void mpsSetSeed(int seed);
+void mpsRand(float* A, int N); // fill A with uniform numbers in [0, 1)
+void mpsRandn(float* A, int N); // fill A with standard normal numbers
+// dst (nr x nc, row-major) = src[rows[r], cols[c]] over src's logical
+// (srcRows x srcCols) shape; srcTranspose is its physical-layout flag.
+void mpsGather(const float* src, float* dst, const unsigned* rows, int nr,
+               const unsigned* cols, int nc, int srcRows, int srcCols, bool srcTranspose);
 void mpsFill(float* A, int N, float val); // fill A with zeros
 void mpsCopyMatrixBlock(const float* src, float* dst,
 						int srcRows, int srcCols, bool srcTranspose,
@@ -92,6 +115,12 @@ void mpsPackFeatureMap2D(const float* featureMap, float* packed,
 
 void mpsConv2dOutputAddBias(const float* y2d, const float* bias, float* output,
 							int N, int Cout, int Hout, int Wout);
+
+// One fused AdamW step: w, g, m, v are logical (rows x cols) matrices whose
+// transposed flags are wt, gt, mt, vt.
+void mpsAdamW(float* w, const float* g, float* m, float* v, int rows, int cols,
+              bool wt, bool gt, bool mt, bool vt, float lr, float beta1, float beta2,
+              float eps, float bc1, float bc2, float decay);
 
 void mpsSynchronize();
 

@@ -57,6 +57,8 @@ int main()
     DisplayCPU();
 #if defined(CUDA) || defined(ROCM_HIP)
     DisplayGPU();
+#elif defined(APPLE_SILICON)
+    std::cout << "GPU: " << mpsDeviceName() << " (Metal)" << std::endl;
 #endif
     PrintSeparationLine();
 

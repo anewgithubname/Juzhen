@@ -1,5 +1,8 @@
-// Independent indexing and cuRAND references for CUDA matrix contracts.
+// Device matrix contracts: slice assignment against an independent indexing
+// oracle on CUDA and Metal; reseeding against independent cuRAND references on
+// CUDA, and reseed/repeat behaviour on Metal (MTGP32 has no host reference).
 #include "../cpp/juzhen.hpp"
+#include <cmath>
 #include <cstdlib>
 #include <iostream>
 #include <limits>
@@ -7,14 +10,22 @@
 #include <string>
 #include <vector>
 
-#ifndef CUDA
+#if !defined(CUDA) && !defined(APPLE_SILICON)
 int compute() {
-    LOG_INFO("CUDA matrix contract tests require CUDA; skipping");
+    LOG_INFO("device matrix contract tests require CUDA or Metal; skipping");
     return 77;
 }
 #else
 namespace {
+#ifdef CUDA
 using Device = Matrix<CUDAfloat>;
+constexpr const char* backend = "CUDA";
+void device_sync() { CudaErrorCheck(cudaDeviceSynchronize()); }
+#else
+using Device = Matrix<MPSfloat>;
+constexpr const char* backend = "Metal";
+void device_sync() { mpsSynchronize(); }
+#endif
 
 void require(bool condition, const std::string& message) {
     if (!condition) throw std::runtime_error(message);
@@ -107,7 +118,7 @@ void rejects_without_writing(Device& destination, const Grid& before,
     try { operation(); }
     catch (const std::logic_error&) { rejected = true; }
     require(rejected, message + " must reject");
-    CudaErrorCheck(cudaDeviceSynchronize());
+    device_sync();
     exact(destination, before, message + " destination preserved");
 }
 
@@ -169,7 +180,7 @@ void invalid_and_empty_cases(bool transpose) {
         auto full_height_empty = upload(Grid(4, 0), source_transpose);
         destination.rows(4, 4, full_width_empty);
         destination.columns(6, 6, full_height_empty);
-        CudaErrorCheck(cudaDeviceSynchronize());
+        device_sync();
         exact(destination, before, "valid empty ranges are no-ops");
         rejects_without_writing(destination, before, [&] {
             destination.slice(4, 4, 2, 5, empty_both);
@@ -239,8 +250,28 @@ void slice_checks() {
     // another grid-stride iteration while reading a transposed source.
     static_assert(size_t(1025) * 1027 > size_t(4096) * 256);
     assignment_case(false, true, Assignment::Slice, 1030, 1034, 2, 1027, 3, 1030);
-    std::cout << "[PASS] CUDA slice assignment contracts\n";
+    std::cout << "[PASS] " << backend << " slice assignment contracts\n";
 }
+
+Device draw(bool normal, size_t rows, size_t columns) {
+    return normal ? Device::randn(rows, columns) : Device::rand(rows, columns);
+}
+
+void consume_both_distributions() {
+    auto uniform = Device::rand(3, 5);
+    auto normal = Device::randn(2, 8);
+    device_sync();
+}
+
+Grid host_grid(const Device& m) {
+    const auto host = m.to_host();
+    Grid result(m.num_row(), m.num_col());
+    for (size_t r = 0; r < result.rows; ++r)
+        for (size_t c = 0; c < result.columns; ++c) result.at(r, c) = host.elem(r, c);
+    return result;
+}
+
+#ifdef CUDA
 
 void curand_ok(curandStatus_t result, const char* operation) {
     require(result == CURAND_STATUS_SUCCESS,
@@ -283,16 +314,6 @@ Grid native_reference(int seed, bool normal, size_t rows, size_t columns) {
     return result;
 }
 
-Device draw(bool normal, size_t rows, size_t columns) {
-    return normal ? Device::randn(rows, columns) : Device::rand(rows, columns);
-}
-
-void consume_both_distributions() {
-    auto uniform = Device::rand(3, 5);
-    auto normal = Device::randn(2, 8);
-    CudaErrorCheck(cudaDeviceSynchronize());
-}
-
 void seed_case(int seed, bool normal, size_t rows, size_t columns) {
     const auto expected = native_reference(seed, normal, rows, columns);
     const std::string tag = "seed=" + std::to_string(seed) + (normal ? " normal " : " uniform ") +
@@ -327,6 +348,45 @@ void seed_checks() {
         }
     std::cout << "[PASS] CUDA reseeding agrees with independent cuRAND references\n";
 }
+#else
+// The first draw after a fresh sampler is the reference: reseeding must
+// reproduce it whatever was drawn or seeded before, for both distributions.
+void seed_case(int seed, bool normal, size_t rows, size_t columns) {
+    const std::string tag = "seed=" + std::to_string(seed) + (normal ? " normal " : " uniform ") +
+                            std::to_string(rows) + "x" + std::to_string(columns);
+    Grid expected(0, 0);
+    {
+        GPUSampler sampler(seed);
+        expected = host_grid(draw(normal, rows, columns));
+        for (float v : expected.values)
+            require(std::isfinite(v) && (normal || (v >= 0.f && v < 1.f)), tag + " value range");
+        consume_both_distributions();
+        sampler.setseed(seed);
+        exact(draw(normal, rows, columns), expected, tag + " reseed matches fresh constructor");
+        consume_both_distributions();
+        sampler.setseed(seed);
+        exact(draw(normal, rows, columns), expected, tag + " repeated reseed repeats");
+    }
+    {
+        GPUSampler sampler(seed + 101);
+        const auto other = host_grid(draw(normal, rows, columns));
+        require(rows * columns < 4 || other.values != expected.values, tag + " seeds differ");
+        consume_both_distributions();
+        sampler.setseed(seed);
+        exact(draw(normal, rows, columns), expected, tag + " independent of initial seed");
+    }
+}
+
+void seed_checks() {
+    for (int seed : {0, 7, 733})
+        for (bool normal : {false, true}) {
+            seed_case(seed, normal, 2, 8);
+            seed_case(seed, normal, 3, 5);
+            seed_case(seed, normal, 1, 1);
+        }
+    std::cout << "[PASS] Metal reseeding restarts both distributions\n";
+}
+#endif
 } // namespace
 
 int compute() {
@@ -337,7 +397,7 @@ int compute() {
                 "JUZHEN_CUDA_CONTRACT_CASE must be all, seed, or slice");
         if (selected == "all" || selected == "seed") seed_checks();
         if (selected == "all" || selected == "slice") slice_checks();
-        CudaErrorCheck(cudaDeviceSynchronize());
+        device_sync();
         return 0;
     } catch (const std::exception& error) {
         std::cerr << "[FAIL] " << error.what() << '\n';

@@ -12,6 +12,8 @@ using namespace Juzhen;
 using Backend=CUDAfloat;
 #elif defined(ROCM_HIP)
 using Backend=ROCMfloat;
+#elif defined(APPLE_SILICON)
+using Backend=MPSfloat;
 #else
 using Backend=float;
 #endif
@@ -159,11 +161,13 @@ int compute() {
     std::cout<<"checkpoint backend=ROCm (AMD GPU)\n";
 #elif defined(CUDA)
     std::cout<<"checkpoint backend=CUDA\n";
+#elif defined(APPLE_SILICON)
+    std::cout<<"checkpoint backend=Metal\n";
 #else
     std::cout<<"checkpoint backend=CPU\n";
 #endif
     global_rand_gen.seed(99);
-#if defined(CUDA)
+#if defined(CUDA) || defined(APPLE_SILICON)
     GPUSampler sampler(99);
 #endif
     if(const char* phase=std::getenv("JUZHEN_CHECKPOINT_PHASE"))

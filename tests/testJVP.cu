@@ -1,6 +1,6 @@
 /**
  * @file testJVP.cu
- * @brief Forward-mode (JVP) correctness on the CPU, CUDA and ROCm backends.
+ * @brief Forward-mode (JVP) correctness on the CPU, CUDA, ROCm and Metal backends.
  *
  * Two independent checks per network:
  *   (a) adjoint consistency against the existing backprop:
@@ -10,7 +10,7 @@
  *   (b) central finite differences along u (looser: fp32 + ReLU kinks).
  *
  * The templated networks (MLP: tanh -> relu -> linear, and the transformer)
- * run on CPU and additionally on the selected CUDA/ROCm backend; convolution
+ * run on CPU and additionally on the selected CUDA/ROCm/Metal backend; convolution
  * networks use the build's native backend. CPU/GPU parity uses identical
  * parameters, inputs and tangents for MLP and Transformer networks, including
  * causal/bidirectional attention and sequence lengths 1, 5 and 257.
@@ -23,13 +23,6 @@
 
 using namespace Juzhen;
 using namespace std;
-
-#if defined(APPLE_SILICON)
-int compute() {
-    cout << "testJVP covers the CPU, CUDA and ROCm backends only; skipping." << endl;
-    return 77; // ctest SKIP_RETURN_CODE
-}
-#else
 
 namespace {
 
@@ -127,6 +120,8 @@ int run_transformer(const string& tag) {
 using ConvD = CUDAfloat;
 #elif defined(ROCM_HIP)
 using ConvD = ROCMfloat;
+#elif defined(APPLE_SILICON)
+using ConvD = MPSfloat;
 #else
 using ConvD = float;
 #endif
@@ -159,11 +154,13 @@ int run_conv(const string& tag) {
 }
 #endif // conv available
 
-#if defined(CUDA) || defined(ROCM_HIP)
+#if defined(CUDA) || defined(ROCM_HIP) || defined(APPLE_SILICON)
 #ifdef CUDA
 using GpuD = CUDAfloat;
-#else
+#elif defined(ROCM_HIP)
 using GpuD = ROCMfloat;
+#else
+using GpuD = MPSfloat;
 #endif
 // Copy every trainable tensor of a CPU layer into its GPU twin.
 template <class LSrc, class LDst>
@@ -232,7 +229,7 @@ int run_parity() {
     }
     return rc;
 }
-#endif // CUDA or ROCm parity
+#endif // CUDA, ROCm or Metal parity
 
 // Invalid tangents must fail before a fused kernel can read out of bounds.
 // Also cover extra rows/columns, which may otherwise silently use wrong strides.
@@ -261,11 +258,12 @@ int check_layernorm_jvp_dimensions(const char* backend) {
     return 0;
 }
 
-#ifdef CUDA
-// Compare the CUDA fast path and transposed fallback with an independent
+#if defined(CUDA) || defined(APPLE_SILICON)
+// Compare the device fast path and transposed fallback with an independent
 // double-precision directional derivative, including nonuniform gamma and
 // small variance. Exercise partial warps and dimensions above the block size.
-int check_cuda_layernorm_jvp() {
+template <class Dev>
+int check_device_layernorm_jvp(const char* backend) {
     double worst_relative = 0.0;
     for (int dim : {1, 6, 31, 32, 33, 128, 255, 256, 257, 513, 1024}) {
         constexpr int tokens = 3;
@@ -281,16 +279,16 @@ int check_cuda_layernorm_jvp() {
                     u.elem(r, c) = std::cos(0.13f * r - 0.29f * c);
                 }
             }
-            LayerNormLayer<CUDAfloat> layer(dim, tokens);
-            layer.set_gamma(Matrix<CUDAfloat>(gamma));
-            layer.set_beta(Matrix<CUDAfloat>(beta));
-            layer.forward(Matrix<CUDAfloat>(x));
-            const Matrix<CUDAfloat> cached_xhat(layer.cached_xhat), cached_inv(layer.cached_inv);
+            LayerNormLayer<Dev> layer(dim, tokens);
+            layer.set_gamma(Matrix<Dev>(gamma));
+            layer.set_beta(Matrix<Dev>(beta));
+            layer.forward(Matrix<Dev>(x));
+            const Matrix<Dev> cached_xhat(layer.cached_xhat), cached_inv(layer.cached_inv);
             for (bool transposed : {false, true}) {
                 Matrix<float> storage("ln_direction", tokens, dim);
                 for (int r = 0; r < dim; ++r) for (int c = 0; c < tokens; ++c)
                     storage.elem(c, r) = u.elem(r, c);
-                auto direction = transposed ? Matrix<CUDAfloat>(storage).T() : Matrix<CUDAfloat>(u);
+                auto direction = transposed ? Matrix<Dev>(storage).T() : Matrix<Dev>(u);
                 auto actual = layer.jvp(direction).to_host();
                 auto negative = layer.jvp(-0.5f * direction).to_host();
                 double error2 = 0, reference2 = 0, max_error = 0;
@@ -338,7 +336,7 @@ int check_cuda_layernorm_jvp() {
             }
         }
     }
-    cout << "CUDA LayerNorm JVP dimensions/layouts/variance/cache passed; max relative error = "
+    cout << backend << " LayerNorm JVP dimensions/layouts/variance/cache passed; max relative error = "
          << worst_relative << endl;
     return 0;
 }
@@ -348,8 +346,8 @@ int check_cuda_layernorm_jvp() {
 
 int compute() {
     global_rand_gen.seed(123);
-#ifdef CUDA
-    GPUSampler sampler(123); // initializes the cuRAND generator behind Matrix<CUDAfloat>::randn
+#if defined(CUDA) || defined(APPLE_SILICON)
+    GPUSampler sampler(123); // seeds the device generator behind Matrix<GpuD>::randn
 #endif
     int rc = 0;
 
@@ -358,7 +356,7 @@ int compute() {
     rc |= check_layernorm_jvp_dimensions<float>("cpu");
     rc |= run_mlp<float>("cpu");
     rc |= run_transformer<float>("cpu");
-#if defined(JVP_HAVE_CONV) && !defined(CUDA) && !defined(ROCM_HIP)
+#if defined(JVP_HAVE_CONV) && !defined(CUDA) && !defined(ROCM_HIP) && !defined(APPLE_SILICON)
     rc |= run_conv("cpu");
 #endif
 
@@ -370,7 +368,7 @@ int compute() {
     rc |= run_conv("cuda");
 #endif
     rc |= run_parity();
-    rc |= check_cuda_layernorm_jvp();
+    rc |= check_device_layernorm_jvp<CUDAfloat>("CUDA");
 #endif
 
 #ifdef ROCM_HIP
@@ -381,8 +379,15 @@ int compute() {
     rc |= run_parity();
 #endif
 
+#ifdef APPLE_SILICON
+    rc |= check_layernorm_jvp_dimensions<MPSfloat>("metal");
+    rc |= run_mlp<MPSfloat>("metal");
+    rc |= run_transformer<MPSfloat>("metal");
+    rc |= run_conv("metal");
+    rc |= run_parity();
+    rc |= check_device_layernorm_jvp<MPSfloat>("Metal");
+#endif
+
     if (rc == 0) cout << "All JVP tests passed." << endl;
     return rc;
 }
-
-#endif

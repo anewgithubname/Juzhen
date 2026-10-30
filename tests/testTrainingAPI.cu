@@ -285,8 +285,8 @@ template<class D> void clipping_checks(){
     double expected=0;for(size_t j=0;j<7;++j)for(size_t i=0;i<3;++i)expected=std::hypot(expected,double(g.elem(i,j)));
     double norm=transpose_opt.clip_grad_norm(.5);require(std::abs(norm-expected)<1e-6,"transposed gradient norm");
     close(host(p.grad()),g*float(.5/(expected+1e-6)),"transposed gradient scale",2e-6f);
-#ifdef CUDA
-    if constexpr(std::is_same_v<D,CUDAfloat>){
+#if defined(CUDA) || defined(APPLE_SILICON)
+    if constexpr(!std::is_same_v<D,float>){
         // FP64 partials avoid squaring FP32 inputs into overflow/underflow.
         for(float magnitude:{1e20f,1e-30f}){
             Matrix<float> extreme("extreme",3,7);for(size_t j=0;j<7;++j)for(size_t i=0;i<3;++i)extreme.elem(i,j)=magnitude;
@@ -365,6 +365,19 @@ template<class D> void normalization_checks() {
         CudaErrorCheck(cudaDeviceSynchronize());
     }
 #endif
+#ifdef APPLE_SILICON
+    if constexpr(std::is_same_v<D,MPSfloat>){
+        mpsReluBackwardInplace(nullptr,nullptr,0);
+        for(int count:{1,255,256,257,4097}){
+            Matrix<float> a("activation",count,1),up("upstream",count,1),expected("expected",count,1);
+            for(int i=0;i<count;++i){a.elem(i,0)=float(i%7-3);up.elem(i,0)=float(i%11-5)*.25f;}
+            if(count>7){a.elem(0,0)=-0.f;a.elem(1,0)=std::numeric_limits<float>::quiet_NaN();a.elem(2,0)=std::numeric_limits<float>::infinity();a.elem(3,0)=-std::numeric_limits<float>::infinity();up.elem(4,0)=std::numeric_limits<float>::infinity();up.elem(5,0)=std::numeric_limits<float>::quiet_NaN();a.elem(6,0)=-1.f;up.elem(6,0)=std::numeric_limits<float>::infinity();a.elem(7,0)=0.f;up.elem(7,0)=std::numeric_limits<float>::quiet_NaN();}
+            for(int i=0;i<count;++i)expected.elem(i,0)=(a.elem(i,0)>0.f?1.f:0.f)*up.elem(i,0);
+            Matrix<D> activation(a),gradient(up);mpsReluBackwardInplace((const float*)activation.data(),(float*)gradient.data(),count);auto actual=host(gradient),saved=host(activation);
+            for(int i=0;i<count;++i){float e=expected.elem(i,0),v=actual.elem(i,0);require(std::isnan(e)?std::isnan(v):e==v,"fused ReLU derivative");if(e==0)require(std::signbit(e)==std::signbit(v),"fused ReLU signed zero");require(std::isnan(a.elem(i,0))?std::isnan(saved.elem(i,0)):a.elem(i,0)==saved.elem(i,0),"fused ReLU preserves activation");}
+        }
+    }
+#endif
 }
 
 
@@ -388,8 +401,8 @@ int compute() {
         suite<CUDAfloat>("CUDA");
 #endif
 #ifdef APPLE_SILICON
-        optimizer_math_checks<MPSfloat>();
-        std::cout << "[PASS] Metal AdamW scalar references\n";
+        GPUSampler sampler(919);
+        suite<MPSfloat>("Metal");
 #endif
 #ifdef ROCM_HIP
         optimizer_math_checks<ROCMfloat>();

@@ -7,6 +7,8 @@
 using namespace Juzhen;
 #ifdef CUDA
 using Backend=CUDAfloat;
+#elif defined(APPLE_SILICON)
+using Backend=MPSfloat;
 #else
 using Backend=float;
 #endif
@@ -17,7 +19,7 @@ template<class D> float scalar(const Matrix<D>& x){
 }
 int compute(){try{
     global_rand_gen.seed(42);
-#ifdef CUDA
+#if defined(CUDA) || defined(APPLE_SILICON)
     GPUSampler sampler(42);
 #endif
     Matrix<float> hx("features",2,32),hy("target",1,32);

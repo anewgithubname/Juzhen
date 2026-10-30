@@ -21,14 +21,16 @@ using namespace Juzhen;
 using BackendT = CUDAfloat;
 #elif defined(ROCM_HIP)
 using BackendT = ROCMfloat;
+#elif defined(APPLE_SILICON)
+using BackendT = MPSfloat;
 #else
 int compute() {
-    std::cout << "testUNetLearning requires CUDA+cuDNN or ROCm. Skipping.\n";
+    std::cout << "testUNetLearning requires CUDA+cuDNN, ROCm or Metal. Skipping.\n";
     return 0;
 }
 #endif
 
-#if defined(CUDA) && defined(CUDNN_AVAILABLE) || defined(ROCM_HIP)
+#if defined(CUDA) && defined(CUDNN_AVAILABLE) || defined(ROCM_HIP) || defined(APPLE_SILICON)
 
 class TinyUNetLearner {
 public:
@@ -133,7 +135,7 @@ static Matrix<float> make_clean_batch(int batch_size) {
 }
 
 int compute() {
-#if defined(CUDA)
+#if defined(CUDA) || defined(APPLE_SILICON)
     GPUSampler sampler(11);
 #endif
     global_rand_gen.seed(11);

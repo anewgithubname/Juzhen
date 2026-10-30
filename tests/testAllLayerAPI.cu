@@ -11,11 +11,13 @@
 #include <stdexcept>
 
 using namespace Juzhen;
-#if defined(ROCM_HIP) || defined(APPLE_SILICON) || (defined(CUDA) && !defined(CUDNN_AVAILABLE))
+#if defined(ROCM_HIP) || (defined(CUDA) && !defined(CUDNN_AVAILABLE))
 int compute() { return 77; }
 #else
 #ifdef CUDA
 using D = CUDAfloat;
+#elif defined(APPLE_SILICON)
+using D = MPSfloat;
 #else
 using D = float;
 #endif
@@ -59,10 +61,8 @@ template<class T> static void empty_matrix_checks() {
     Matrix<T> empty(nullptr);require_empty_storage(empty,"explicit empty matrix");
     Matrix<T> historical_default;
     if constexpr(std::is_same_v<T,float>)require_empty_storage(historical_default,"unchanged host default matrix");
-#ifdef CUDA
-    if constexpr(std::is_same_v<T,CUDAfloat>)
-        require(historical_default.num_row()==2&&historical_default.num_col()==2&&historical_default.data()!=nullptr,"unchanged CUDA default matrix");
-#endif
+    if constexpr(!std::is_same_v<T,float>)
+        require(historical_default.num_row()==2&&historical_default.num_col()==2&&historical_default.data()!=nullptr,"unchanged device default matrix");
     const auto fixture=values(3,2,.4f);Matrix<T> source(fixture);
     empty=source;close(host(empty),fixture,"empty matrix copy assignment",0);
     empty=Matrix<T>::ones(2,3);close(host(empty),Matrix<float>::ones(2,3),"empty matrix reused with new shape",0);
@@ -200,8 +200,8 @@ static void convolution_checks(const Shape& s,bool trans) {
     rejects([&]{a->eval(Matrix<D>::ones(x.num_row()+1,x.num_col()));},"convolution forward input shape");
     rejects([&]{a->eval(Matrix<D>::ones(x.num_row(),x.num_col()+1));},"convolution forward batch shape");
     for(auto& p:refs)require(!p.has_grad(),"convolution shape errors do not create gradients");
-#ifdef CUDA
-    // cuDNN consumes contiguous NCHW memory; a logically shape-compatible
+#if defined(CUDA) || defined(APPLE_SILICON)
+    // GPU kernels consume contiguous NCHW memory; a logically shape-compatible
     // lazy transpose must be rejected before interpreting that memory.
     const auto before_w=host(a->W()),before_b=host(a->b()),before_m=host(a->adamWstate().m),before_v=host(a->adamWstate().v);
     const int before_iteration=a->adamWstate().iteration;
@@ -252,9 +252,13 @@ static void normalization_checks() {
         require(curandSetPseudoRandomGeneratorSeed(GPUSampler::gen,773)==CURAND_STATUS_SUCCESS,"reset CUDA RNG seed");
         require(curandSetGeneratorOffset(GPUSampler::gen,0)==CURAND_STATUS_SUCCESS,"reset CUDA RNG offset");
     };
+#elif defined(APPLE_SILICON)
+    auto reset_rng=[] { mpsSetSeed(773); };
+#endif
+#if defined(CUDA) || defined(APPLE_SILICON)
     reset_rng();auto expected_random=host(Matrix<D>::randn(16,16));reset_rng();
     LayerNormLayer<D> no_random(features,batch);
-    close(host(Matrix<D>::randn(16,16)),expected_random,"normalization construction does not consume CUDA RNG",0);
+    close(host(Matrix<D>::randn(16,16)),expected_random,"normalization construction does not consume device RNG",0);
 #endif
     auto x=values(features,batch,.3f,.8f),gamma=values(features,1,.7f,.4f),beta=values(features,1,.2f),
          dy=values(features,batch,1.1f);
@@ -450,7 +454,7 @@ static void restart(const std::string& phase,const std::filesystem::path& output
 }
 int compute() {
     try {
-#ifdef CUDA
+#if defined(CUDA) || defined(APPLE_SILICON)
         GPUSampler sampler(42);
 #endif
         if(const char* phase=std::getenv("CONV_TEST_PHASE")) {
@@ -459,8 +463,8 @@ int compute() {
             restart(phase,output);return 0;
         }
         empty_matrix_checks<float>();
-#ifdef CUDA
-        empty_matrix_checks<CUDAfloat>();
+#if defined(CUDA) || defined(APPLE_SILICON)
+        empty_matrix_checks<D>();
 #endif
         dense_checks(false);dense_checks(true);logistic_checks();normalization_checks();evaluation_metric_checks();
         for(const Shape& s:std::vector<Shape>{{2,2,5,7,3,3,2,1,1,false},{2,2,5,6,3,2,3,0,2,true}})

@@ -40,6 +40,16 @@ template<class D> Matrix<D> column_max(const Matrix<D>& input) {
             result[0] = maximum;
         }, input, 0, 1);
 }
+#ifdef APPLE_SILICON
+// One fused kernel instead of the generic reduction's host round trip.
+inline Matrix<MPSfloat> column_max(const Matrix<MPSfloat>& input) {
+    Matrix<MPSfloat> result("column_max", 1, input.num_col());
+    mpsColumnMax(reinterpret_cast<const float*>(input.data()),
+                 const_cast<float*>(reinterpret_cast<const float*>(result.data())),
+                 (int)input.num_row(), (int)input.num_col(), input.get_transpose());
+    return result;
+}
+#endif
 } // namespace loss_detail
 
 // Mean squared error, averaged over the batch (columns):

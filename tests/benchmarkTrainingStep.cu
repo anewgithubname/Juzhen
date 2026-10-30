@@ -47,6 +47,11 @@ template<class F> static double one_step_ms(F&& f) {
     hip_check(hipEventSynchronize(b)); float ms = 0;
     hip_check(hipEventElapsedTime(&ms, a, b));
     hip_check(hipEventDestroy(a)); hip_check(hipEventDestroy(b)); return ms;
+#elif defined(APPLE_SILICON)
+    // Metal work is queued asynchronously; time completed work, as CUDA does.
+    mpsSynchronize(); auto a=std::chrono::steady_clock::now(); f(); mpsSynchronize();
+    auto b=std::chrono::steady_clock::now();
+    return std::chrono::duration<double,std::milli>(b-a).count();
 #else
     auto a=std::chrono::steady_clock::now(); f(); auto b=std::chrono::steady_clock::now();
     return std::chrono::duration<double,std::milli>(b-a).count();

@@ -1,10 +1,10 @@
 /**
  * @file testTransformerParity.cu
- * @brief CPU–CUDA parity test for TransformerLayer.
+ * @brief CPU–GPU parity test for TransformerLayer (CUDA or Metal).
  *
- * Builds two TransformerLayers (one CPU, one CUDA) with identical weights,
+ * Builds two TransformerLayers (one CPU, one GPU) with identical weights,
  * runs eval() and backward() on the same inputs, and compares results.
- * Only compiled when CUDA is available; otherwise a trivial pass.
+ * Only compiled when CUDA or Metal is available; otherwise a trivial pass.
  */
 
 #include "../cpp/juzhen.hpp"
@@ -16,7 +16,12 @@
 
 using namespace Juzhen;
 
-#if defined(CUDA)
+#if defined(CUDA) || defined(APPLE_SILICON)
+#ifdef CUDA
+using GpuT = CUDAfloat;
+#else
+using GpuT = MPSfloat;
+#endif
 
 static void compare_matrix(const Matrix<float>& got,
                            const Matrix<float>& ref,
@@ -37,20 +42,20 @@ static void compare_matrix(const Matrix<float>& got,
 
 // Copy weights from CPU layer to GPU layer.
 static void sync_weights(const TransformerLayer<float>& cpu,
-                         TransformerLayer<CUDAfloat>& gpu) {
-    gpu.set_Wq(Matrix<CUDAfloat>(cpu.get_Wq()));
-    gpu.set_Wk(Matrix<CUDAfloat>(cpu.get_Wk()));
-    gpu.set_Wv(Matrix<CUDAfloat>(cpu.get_Wv()));
-    gpu.set_Wo(Matrix<CUDAfloat>(cpu.get_Wo()));
-    gpu.set_bo(Matrix<CUDAfloat>(cpu.get_bo()));
-    gpu.set_W1(Matrix<CUDAfloat>(cpu.get_W1()));
-    gpu.set_b1(Matrix<CUDAfloat>(cpu.get_b1()));
-    gpu.set_W2(Matrix<CUDAfloat>(cpu.get_W2()));
-    gpu.set_b2(Matrix<CUDAfloat>(cpu.get_b2()));
-    gpu.set_ln1_gamma(Matrix<CUDAfloat>(cpu.get_ln1_gamma()));
-    gpu.set_ln1_beta(Matrix<CUDAfloat>(cpu.get_ln1_beta()));
-    gpu.set_ln2_gamma(Matrix<CUDAfloat>(cpu.get_ln2_gamma()));
-    gpu.set_ln2_beta(Matrix<CUDAfloat>(cpu.get_ln2_beta()));
+                         TransformerLayer<GpuT>& gpu) {
+    gpu.set_Wq(Matrix<GpuT>(cpu.get_Wq()));
+    gpu.set_Wk(Matrix<GpuT>(cpu.get_Wk()));
+    gpu.set_Wv(Matrix<GpuT>(cpu.get_Wv()));
+    gpu.set_Wo(Matrix<GpuT>(cpu.get_Wo()));
+    gpu.set_bo(Matrix<GpuT>(cpu.get_bo()));
+    gpu.set_W1(Matrix<GpuT>(cpu.get_W1()));
+    gpu.set_b1(Matrix<GpuT>(cpu.get_b1()));
+    gpu.set_W2(Matrix<GpuT>(cpu.get_W2()));
+    gpu.set_b2(Matrix<GpuT>(cpu.get_b2()));
+    gpu.set_ln1_gamma(Matrix<GpuT>(cpu.get_ln1_gamma()));
+    gpu.set_ln1_beta(Matrix<GpuT>(cpu.get_ln1_beta()));
+    gpu.set_ln2_gamma(Matrix<GpuT>(cpu.get_ln2_gamma()));
+    gpu.set_ln2_beta(Matrix<GpuT>(cpu.get_ln2_beta()));
 }
 
 int compute() {
@@ -61,7 +66,7 @@ int compute() {
     const int N = seq * batch;
 
     TransformerLayer<float>      cpu_tf(d_model, d_k, d_ff, seq, batch, num_heads);
-    TransformerLayer<CUDAfloat>  gpu_tf(d_model, d_k, d_ff, seq, batch, num_heads);
+    TransformerLayer<GpuT>  gpu_tf(d_model, d_k, d_ff, seq, batch, num_heads);
     sync_weights(cpu_tf, gpu_tf);
 
     auto x_h = Matrix<float>::randn(d_model, N) * 0.5f;
@@ -69,7 +74,7 @@ int compute() {
 
     // Freeze to avoid weight updates changing state between forward/backward.
     std::list<Layer<float>*>       cpu_layers = {&cpu_tf};
-    std::list<Layer<CUDAfloat>*>   gpu_layers = {&gpu_tf};
+    std::list<Layer<GpuT>*>   gpu_layers = {&gpu_tf};
     freeze(cpu_layers);
     freeze(gpu_layers);
 
@@ -78,7 +83,7 @@ int compute() {
 
     // ── Forward parity ──────────────────────────────────────────────────
     cpu_tf.eval(x_h);
-    gpu_tf.eval(Matrix<CUDAfloat>(x_h));
+    gpu_tf.eval(Matrix<GpuT>(x_h));
 
     auto cpu_out = cpu_tf.value();
     auto gpu_out = gpu_tf.value().to_host();
@@ -93,11 +98,11 @@ int compute() {
 
     // ── Backward parity ─────────────────────────────────────────────────
     cpu_tf.eval(x_h);
-    gpu_tf.eval(Matrix<CUDAfloat>(x_h));
+    gpu_tf.eval(Matrix<GpuT>(x_h));
 
     auto cpu_dx = cpu_tf.backward(x_h, Matrix<float>(g_h));
-    auto gpu_dx = gpu_tf.backward(Matrix<CUDAfloat>(x_h),
-                                  Matrix<CUDAfloat>(g_h)).to_host();
+    auto gpu_dx = gpu_tf.backward(Matrix<GpuT>(x_h),
+                                  Matrix<GpuT>(g_h)).to_host();
 
     compare_matrix(gpu_dx, cpu_dx, "backward parity (dx)", max_abs, rel_l2);
     if (max_abs > 1e-3f || rel_l2 > 1e-3f) {
@@ -113,10 +118,10 @@ int compute() {
     return ret;
 }
 
-#else // Not CUDA
+#else // Not CUDA or Metal
 
 int compute() {
-    std::cout << "[SKIP] TransformerParity: CUDA not available\n";
+    std::cout << "[SKIP] TransformerParity: no GPU backend\n";
     return 0;
 }
 

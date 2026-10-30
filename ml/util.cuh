@@ -63,7 +63,13 @@ float comp_med(const Matrix<T> &a) {
     STATIC_TOC;
     return sqrt(.5*vec[n / 2]);
 #else
-    float *s = (float *)comp_dist(a, a).data();
+    // Sort a host copy that outlives this statement; for device backends
+    // to_host() also waits for the distance computation to finish.
+    Matrix<float> d = [&]() {
+        if constexpr (std::is_same_v<T, float>) return comp_dist(a, a);
+        else return comp_dist(a, a).to_host();
+    }();
+    float *s = (float *)d.data();
     std::sort(s, s + n);
     STATIC_TOC;
     return sqrt(.5*s[n / 2]);
@@ -171,15 +177,17 @@ Matrix<T> predict_one_hot(const Matrix<T>& input){
 }
 
 #if defined(APPLE_SILICON)
+// Same result as the generic version (every entry within 1e-5 of its column
+// maximum is marked), computed with device kernels instead of host
+// round trips through reduce() and elemwise().
 template <>
 Matrix<MPSfloat> predict_one_hot(const Matrix<MPSfloat>& input){
-    // use topk to find the maximum of input for each column
-    auto maximum = topk(input, 1, 0);
-    auto zero_one = Matrix<float>::zeros(input.num_row(), input.num_col());
-    for(int i = 0; i < input.num_col(); i++){
-        zero_one.elem((int) maximum.elem(0, i), i) = 1.0;
-    }
-    return Matrix<MPSfloat>(zero_one);
+    Matrix<MPSfloat> colmax("colmax", 1, input.num_col());
+    mpsColumnMax((const float*)input.data(), (float*)colmax.data(),
+                 (int)input.num_row(), (int)input.num_col(), input.get_transpose());
+    auto sub = input - Matrix<MPSfloat>::ones(input.num_row(), 1) * colmax;
+    mpsStep((const float*)sub.data(), (float*)sub.data(), (int)(sub.num_row() * sub.num_col()), -1e-5f);
+    return sub;
 }
 #endif
 

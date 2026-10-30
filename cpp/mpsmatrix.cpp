@@ -1,3 +1,5 @@
+#include <cmath>
+#include <limits>
 #include <string>
 #include "operators.hpp"
 #include "mpsmatrix.hpp"
@@ -42,6 +44,14 @@ Matrix<MPSfloat>::Matrix(const char* name, size_t numrow, size_t numcol, int tra
 
 }
 
+// Device-to-device copy of a whole buffer, encoded in the command stream like
+// CUDA's cudaMemcpyDeviceToDevice: no host wait. Readers on the host
+// synchronize first (to_host(), operator<<), and later GPU work is ordered.
+static void copy_storage(const MPSfloat* src, MPSfloat* dst, size_t count) {
+    mpsCopyMatrixBlock((const float*) src, (float*) dst, 1, (int) count, false, 0, 0,
+                       1, (int) count, 1, (int) count, false, 0, 0);
+}
+
 Matrix<MPSfloat>::Matrix(const Matrix<MPSfloat>& M) {
     LOG_DEBUG("mps copy constructor called");
     this->name = "copy of" + M.name;
@@ -53,9 +63,7 @@ Matrix<MPSfloat>::Matrix(const Matrix<MPSfloat>& M) {
             Memory<MPSfloat>::free(p);
         });
 
-    mpsSynchronize();
-    memcpy(elements.get(), M.elements.get(), numcol * numrow * sizeof(float));
-
+    copy_storage(M.elements.get(), elements.get(), numcol * numrow);
 }
 
 Matrix<MPSfloat>::Matrix(Matrix<MPSfloat>&& M) noexcept {
@@ -79,10 +87,8 @@ Matrix<MPSfloat>& Matrix<MPSfloat>::operator=(const Matrix<MPSfloat>& M) {
         Memory<MPSfloat>::allocate(  numcol * numrow), [](MPSfloat* p) {
             Memory<MPSfloat>::free(p);
         });
-    
-    mpsSynchronize();
-    memcpy(elements.get(), M.elements.get(), numcol * numrow * sizeof(float));
 
+    copy_storage(M.elements.get(), elements.get(), numcol * numrow);
     return *this;
 }
 
@@ -185,19 +191,15 @@ void Matrix<MPSfloat>::eleminv(double l)
     mpsElemInv((float*) elements.get(), (float*) elements.get(), numrow * numcol, l);
 }
 
-Matrix<MPSfloat> Matrix<MPSfloat>::rows(size_t start, size_t end) const
+// Accumulates in double over the shared buffer, so one sync replaces a
+// device reduction plus a readback.
+float Matrix<MPSfloat>::norm() const
 {
-    if (start > end || end > num_row()) {
-        throw std::out_of_range("rows: index out of range");
-    }
-    Matrix<MPSfloat> out("rows", end - start, num_col(), 0);
-    mpsCopyMatrixBlock((const float*)elements.get(), (float*)out.elements.get(),
-                       (int)num_row(), (int)num_col(), (bool)get_transpose(),
-                       (int)start, 0,
-                       (int)(end - start), (int)num_col(),
-                       (int)out.num_row(), (int)out.num_col(), (bool)out.get_transpose(),
-                       0, 0);
-    return out;
+    mpsSynchronize();
+    const float* values = (const float*)elements.get();
+    double total = 0;
+    for (size_t i = 0; i < numrow * numcol; ++i) total += double(values[i]) * values[i];
+    return (float)std::sqrt(total);
 }
 
 const Matrix<MPSfloat> Matrix<MPSfloat>::T() const
@@ -260,9 +262,10 @@ Matrix<MPSfloat> Matrix<MPSfloat>::rand(size_t m, size_t n)
 }
 Matrix<MPSfloat> Matrix<MPSfloat>::randn(size_t m, size_t n)
 {
-    // MPS normal RNG can occasionally emit non-finite values under stress.
-    // Use CPU normal RNG and upload for stable behavior.
-    return Matrix<MPSfloat>(Matrix<float>::randn(m, n));
+    // Box-Muller over the device uniform stream; finite by construction.
+    Matrix<MPSfloat> M("randn", m, n);
+    mpsRandn((float*) M.elements.get(), m * n);
+    return M;
 }
 
 Matrix<MPSfloat> Matrix<MPSfloat>::zeros(size_t m, size_t n)
@@ -360,6 +363,33 @@ Matrix<MPSfloat> d_relu(const Matrix<MPSfloat>& M){
 Matrix<MPSfloat> d_relu(Matrix<MPSfloat>&& M){
     mpsdRelu((float*) M.elements.get(), (float*) M.elements.get(), M.numrow * M.numcol);
     return std::move(M);
+}
+
+Matrix<MPSfloat> clamp(const Matrix<MPSfloat>& M, float lo, float hi){
+    Matrix<MPSfloat> clampM("clampM", M.numrow, M.numcol, M.transpose);
+    mpsClamp((float*) M.elements.get(), (float*) clampM.elements.get(), M.numrow * M.numcol, lo, hi);
+    return clampM;
+}
+Matrix<MPSfloat> clamp(Matrix<MPSfloat>&& M, float lo, float hi){
+    mpsClamp((float*) M.elements.get(), (float*) M.elements.get(), M.numrow * M.numcol, lo, hi);
+    return std::move(M);
+}
+
+Matrix<MPSfloat>& fill(Matrix<MPSfloat>& M, double a) {
+    mpsFill((float*) M.elements.get(), M.numrow * M.numcol, (float) a);
+    return M;
+}
+
+void copy(Matrix<MPSfloat>& dest, const Matrix<MPSfloat>& src) {
+    const size_t count = src.numrow * src.numcol;
+    auto storage = std::shared_ptr<MPSfloat[]>(Memory<MPSfloat>::allocate(count),
+                                               [](MPSfloat* p) { Memory<MPSfloat>::free(p); });
+    // Copy the physical buffer; the layout flag carries over.
+    copy_storage(src.elements.get(), storage.get(), count);
+    dest.numrow = src.numrow;
+    dest.numcol = src.numcol;
+    dest.transpose = src.transpose;
+    dest.elements = std::move(storage);
 }
 
 Matrix<MPSfloat> hstack(std::vector<MatrixView<MPSfloat>> matrices) {
@@ -484,6 +514,8 @@ Matrix<float> topk(const Matrix<MPSfloat>& M, int k, int dim){
 
 Matrix<MPSfloat> Matrix<MPSfloat>::slice(size_t rstart, size_t rend,
                                          size_t cstart, size_t cend) const {
+    if (rstart > rend || cstart > cend || rend > num_row() || cend > num_col())
+        throw std::out_of_range("MPS slice indices out of range");
     Matrix<MPSfloat> out("submatrix", rend - rstart, cend - cstart);
     mpsCopyMatrixBlock((const float*)elements.get(), (float*)out.elements.get(),
                        (int)num_row(), (int)num_col(), (bool)get_transpose(),
@@ -496,12 +528,57 @@ Matrix<MPSfloat> Matrix<MPSfloat>::slice(size_t rstart, size_t rend,
 
 void Matrix<MPSfloat>::slice(size_t rstart, size_t rend, size_t cstart,
                              size_t cend, const Matrix<MPSfloat>& M) {
+    if (rstart > rend || cstart > cend || rend > num_row() || cend > num_col())
+        throw std::out_of_range("MPS slice assignment indices out of range");
+    const size_t rows = rend - rstart, cols = cend - cstart;
+    if (M.num_row() != rows || M.num_col() != cols)
+        throw std::invalid_argument("MPS slice assignment dimensions do not match target range");
+    if (!rows || !cols) return;
+    // T() shares storage; preserve the source before any overlapping write.
+    if (elements.get() == M.elements.get()) {
+        Matrix<MPSfloat> snapshot(nullptr);
+        copy(snapshot, M);  // device copy: no host synchronization
+        slice(rstart, rend, cstart, cend, snapshot);
+        return;
+    }
     mpsCopyMatrixBlock((const float*)M.elements.get(), (float*)elements.get(),
                        (int)M.num_row(), (int)M.num_col(), (bool)M.get_transpose(),
                        0, 0,
-                       (int)(rend - rstart), (int)(cend - cstart),
+                       (int)rows, (int)cols,
                        (int)num_row(), (int)num_col(), (bool)get_transpose(),
                        (int)rstart, (int)cstart);
+}
+
+Matrix<MPSfloat> Matrix<MPSfloat>::slice(const idxlist& rowidx, const idxlist& colidx) const {
+    for (size_t row : rowidx) if (row >= num_row()) throw std::out_of_range("MPS gather row index");
+    for (size_t col : colidx) if (col >= num_col()) throw std::out_of_range("MPS gather column index");
+    const size_t limit = std::numeric_limits<int>::max();
+    if (rowidx.size() > limit || colidx.size() > limit ||
+        (colidx.size() && rowidx.size() > limit / colidx.size()))
+        throw std::length_error("MPS gather size overflows");
+    Matrix<MPSfloat> result("submatrix", rowidx.size(), colidx.size());
+    if (rowidx.empty() || colidx.empty()) return result;
+    const std::vector<unsigned> rows(rowidx.begin(), rowidx.end()), cols(colidx.begin(), colidx.end());
+    mpsGather((const float*)elements.get(), (float*)result.elements.get(),
+              rows.data(), (int)rows.size(), cols.data(), (int)cols.size(),
+              (int)num_row(), (int)num_col(), (bool)transpose);
+    return result;
+}
+
+template <>
+void write(FILE* fp, const Matrix<MPSfloat>& M) {
+    write(fp, M.to_host());
+}
+
+template <>
+void read(FILE* fp, Matrix<MPSfloat>& M) {
+    Matrix<float> tmp("tmp", M.num_row(), M.num_col());
+    read(fp, tmp);
+    if (ferror(fp) || feof(fp)) return;
+    // Upload into fresh device storage with the file's shape and layout flag.
+    Matrix<MPSfloat> restored(tmp);
+    restored.name = M.name;
+    M = std::move(restored);
 }
 
 std::ostream& operator <<(std::ostream& os, const Matrix<MPSfloat>& M) {

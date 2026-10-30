@@ -230,13 +230,17 @@ kernel void layernorm_forward_rm_kernel(
 {
     if (c >= N) return;
 
+    // Center relative to the first entry: a serial FP32 sum of values sharing
+    // a large offset loses the mean to rounding, which xhat amplifies by
+    // 1/sqrt(eps) when the variance is tiny. The shift itself is exact.
+    const float shift = x[c];
     float mu = 0.0f;
-    for (uint i = 0; i < dim; ++i) mu += x[i * N + c];
-    mu /= dim;
+    for (uint i = 0; i < dim; ++i) mu += x[i * N + c] - shift;
+    mu /= dim;  // mean of the shifted values
 
     float var = 0.0f;
     for (uint i = 0; i < dim; ++i) {
-        const float d = x[i * N + c] - mu;
+        const float d = (x[i * N + c] - shift) - mu;
         var += d * d;
     }
     var /= dim;
@@ -244,7 +248,7 @@ kernel void layernorm_forward_rm_kernel(
     const float inv = rsqrt(var + 1e-5f);
     inv_std[c] = inv;
     for (uint i = 0; i < dim; ++i) {
-        const float xh = (x[i * N + c] - mu) * inv;
+        const float xh = ((x[i * N + c] - shift) - mu) * inv;
         xhat[i * N + c] = xh;
         y[i * N + c] = gamma[i] * xh + beta[i];
     }
@@ -609,4 +613,281 @@ kernel void conv2d_output_add_bias_kernel(
 
     const int out_row = co * P + p;
     output[out_row * N + n] = v;
+}
+
+// ── indexed gather and random normals ──────────────────────────────────────
+// dst (nr x nc, row-major) = src[rows[r], cols[c]] over the source's logical
+// (srcRows x srcCols) shape; `srcTranspose` is its physical-layout flag.
+kernel void matrix_gather_kernel(
+    device const float* src  [[buffer(0)]],
+    device float*       dst  [[buffer(1)]],
+    device const uint*  rows [[buffer(2)]],
+    device const uint*  cols [[buffer(3)]],
+    constant uint& nr        [[buffer(4)]],
+    constant uint& nc        [[buffer(5)]],
+    constant uint& srcRows   [[buffer(6)]],
+    constant uint& srcCols   [[buffer(7)]],
+    constant bool& srcTranspose [[buffer(8)]],
+    uint gid [[thread_position_in_grid]])
+{
+    if (gid >= nr * nc) return;
+    const uint r = rows[gid / nc];
+    const uint c = cols[gid % nc];
+    dst[gid] = src[srcTranspose ? (c * srcRows + r) : (r * srcCols + c)];
+}
+
+// Box-Muller over pairs of uniforms in [0, 1): (u1, u2) -> two normals.
+// `uniform` holds count rounded up to even; in place (uniform == dst) is safe
+// since each thread reads its pair before writing it. 1 - u1 lies in (0, 1],
+// so the logarithm is always finite.
+kernel void box_muller_kernel(
+    device const float* uniform [[buffer(0)]],
+    device float*       dst     [[buffer(1)]],
+    constant uint&      count   [[buffer(2)]],
+    uint gid [[thread_position_in_grid]])
+{
+    const uint i = 2 * gid;
+    if (i >= count) return;
+    const float u1 = 1.0f - uniform[i];
+    const float u2 = uniform[i + 1];
+    const float radius = sqrt(-2.0f * log(u1));
+    const float angle = 6.283185307179586f * u2;
+    dst[i] = radius * cos(angle);
+    if (i + 1 < count) dst[i + 1] = radius * sin(angle);
+}
+
+// ── optimizer ───────────────────────────────────────────────────────────────
+struct AdamWParams {
+    float lr, beta1, beta2, eps, bc1, bc2, decay;
+};
+
+// One AdamW step over a whole parameter, mirroring the CUDA kernel. gid walks
+// the logical row-major order; `layout` bit k says whether operand k (w, g,
+// m, v) is stored transposed.
+kernel void adamw_kernel(
+    device float*       w      [[buffer(0)]],
+    device const float* g      [[buffer(1)]],
+    device float*       m      [[buffer(2)]],
+    device float*       v      [[buffer(3)]],
+    constant uint& rows        [[buffer(4)]],
+    constant uint& cols        [[buffer(5)]],
+    constant uint& layout      [[buffer(6)]],
+    constant AdamWParams& p    [[buffer(7)]],
+    uint gid [[thread_position_in_grid]])
+{
+    if (gid >= rows * cols) return;
+    // index of the same element in a transposed buffer
+    const uint ti = (gid % cols) * rows + gid / cols;
+    const uint wi = (layout & 1u) ? ti : gid;
+    const uint gi = (layout & 2u) ? ti : gid;
+    const uint mi = (layout & 4u) ? ti : gid;
+    const uint vi = (layout & 8u) ? ti : gid;
+
+    const float grad = g[gi];
+    const float first = p.beta1 * m[mi] + (1 - p.beta1) * grad;
+    const float second = p.beta2 * v[vi] + (1 - p.beta2) * grad * grad;
+    m[mi] = first;
+    v[vi] = second;
+    w[wi] = w[wi] * (1 - p.lr * p.decay) - p.lr * (first * p.bc1) / (sqrt(second * p.bc2) + p.eps);
+}
+
+// ── fused kernels mirroring the CUDA fast paths ────────────────────────────
+// LayerNorm tangent for one column (gamma multiplies after the symmetric
+// standardization Jacobian):
+//   dy = gamma * inv * (dx - mean(dx) - xhat * mean(xhat * dx))
+kernel void layernorm_jvp_rm_kernel(
+    device const float* dx      [[buffer(0)]],
+    device const float* gamma   [[buffer(1)]],
+    device const float* xhat    [[buffer(2)]],
+    device const float* inv_std [[buffer(3)]],
+    device float* dy            [[buffer(4)]],
+    constant uint& dim          [[buffer(5)]],
+    constant uint& N            [[buffer(6)]],
+    uint c [[thread_position_in_grid]])
+{
+    if (c >= N) return;
+
+    float m1 = 0.0f, m2 = 0.0f;
+    for (uint i = 0; i < dim; ++i) {
+        const float d = dx[i * N + c];
+        m1 += d;
+        m2 += d * xhat[i * N + c];
+    }
+    m1 /= dim;
+    m2 /= dim;
+
+    const float inv = inv_std[c];
+    for (uint i = 0; i < dim; ++i)
+        dy[i * N + c] = gamma[i] * inv * (dx[i * N + c] - m1 - xhat[i * N + c] * m2);
+}
+
+// gradient *= (activation > 0), keeping d_relu's x > 0 convention. The
+// zeroed case is built from the bit pattern: Metal's fast math may drop the
+// sign of 0 * g and does not guarantee 0 * inf = NaN, both of which the
+// CUDA kernel's IEEE multiplication preserves.
+kernel void relu_backward_inplace_kernel(
+    device const float* activation [[buffer(0)]],
+    device float*       gradient   [[buffer(1)]],
+    uint id [[thread_position_in_grid]])
+{
+    if (activation[id] > 0.0f) return;
+    const uint bits = as_type<uint>(gradient[id]);
+    const bool nonfinite = (bits & 0x7f800000u) == 0x7f800000u;
+    gradient[id] = as_type<float>(nonfinite ? 0x7fc00000u : (bits & 0x80000000u));
+}
+
+// Maximum of each logical column of a (rows x cols) matrix, written as a
+// plain row-major (1 x cols) row. Same comparison as the generic reduction.
+kernel void column_max_kernel(
+    device const float* src [[buffer(0)]],
+    device float* dst [[buffer(1)]],
+    constant uint& rows [[buffer(2)]],
+    constant uint& cols [[buffer(3)]],
+    constant bool& transpose [[buffer(4)]],
+    uint j [[thread_position_in_grid]])
+{
+    if (j >= cols) return;
+    const uint base   = transpose ? j * rows : j;
+    const uint stride = transpose ? 1u : cols;
+    float m = -INFINITY;
+    for (uint i = 0; i < rows; ++i) {
+        const float v = src[base + i * stride];
+        m = m > v ? m : v;
+    }
+    dst[j] = m;
+}
+
+kernel void clamp_kernel(
+    device const float* src [[buffer(0)]],
+    device float*       dst [[buffer(1)]],
+    constant float&     lo  [[buffer(2)]],
+    constant float&     hi  [[buffer(3)]],
+    uint id [[thread_position_in_grid]])
+{
+    const float x = src[id];
+    dst[id] = x < lo ? lo : (x > hi ? hi : x);
+}
+
+// dst = src > threshold ? 1 : 0; in place: src == dst.
+kernel void step_kernel(
+    device const float* src       [[buffer(0)]],
+    device float*       dst       [[buffer(1)]],
+    constant float&     threshold [[buffer(2)]],
+    uint id [[thread_position_in_grid]])
+{
+    dst[id] = src[id] > threshold ? 1.0f : 0.0f;
+}
+
+// ── tiled LayerNorm (dim >= 32) ─────────────────────────────────────────────
+// Mirrors the CUDA warp kernels: a (32 x 8) threadgroup owns 32 adjacent
+// columns, so each row read is one coalesced 128-byte segment, and the 8 row
+// slices of a column reduce through threadgroup memory. The serial kernels
+// above stay in use for narrow columns, as on CUDA.
+constant uint LN_COLS = 32;
+constant uint LN_SLICES = 8;
+
+// Sum `value` over the LN_SLICES row slices of each column; every thread of
+// the column receives the total.
+static inline float ln_column_sum(float value, threadgroup float* scratch, uint2 tid) {
+    scratch[tid.y * LN_COLS + tid.x] = value;
+    threadgroup_barrier(mem_flags::mem_threadgroup);
+    float total = 0.0f;
+    for (uint s = 0; s < LN_SLICES; ++s) total += scratch[s * LN_COLS + tid.x];
+    threadgroup_barrier(mem_flags::mem_threadgroup);
+    return total;
+}
+
+kernel void layernorm_forward_tiled_kernel(
+    device const float* x     [[buffer(0)]],
+    device const float* gamma [[buffer(1)]],
+    device const float* beta  [[buffer(2)]],
+    device float* y           [[buffer(3)]],
+    device float* xhat        [[buffer(4)]],
+    device float* inv_std     [[buffer(5)]],
+    constant uint& dim        [[buffer(6)]],
+    constant uint& N          [[buffer(7)]],
+    uint2 tid [[thread_position_in_threadgroup]],
+    uint2 group [[threadgroup_position_in_grid]])
+{
+    threadgroup float scratch[LN_SLICES * LN_COLS];
+    const uint c = group.x * LN_COLS + tid.x;
+    const bool live = c < N;  // dead lanes still join the barriers
+
+    // Center relative to the first entry, as in the serial kernel.
+    const float shift = live ? x[c] : 0.0f;
+    float s = 0.0f;
+    if (live) for (uint i = tid.y; i < dim; i += LN_SLICES) s += x[i * N + c] - shift;
+    const float mu = ln_column_sum(s, scratch, tid) / dim;
+
+    float v = 0.0f;
+    if (live) for (uint i = tid.y; i < dim; i += LN_SLICES) {
+        const float d = (x[i * N + c] - shift) - mu;
+        v += d * d;
+    }
+    const float inv = rsqrt(ln_column_sum(v, scratch, tid) / dim + 1e-5f);
+    if (!live) return;
+    if (tid.y == 0) inv_std[c] = inv;
+    for (uint i = tid.y; i < dim; i += LN_SLICES) {
+        const float xh = ((x[i * N + c] - shift) - mu) * inv;
+        xhat[i * N + c] = xh;
+        y[i * N + c] = gamma[i] * xh + beta[i];
+    }
+}
+
+kernel void layernorm_backward_tiled_kernel(
+    device const float* dy      [[buffer(0)]],
+    device const float* gamma   [[buffer(1)]],
+    device const float* xhat    [[buffer(2)]],
+    device const float* inv_std [[buffer(3)]],
+    device float* dx            [[buffer(4)]],
+    constant uint& dim          [[buffer(5)]],
+    constant uint& N            [[buffer(6)]],
+    uint2 tid [[thread_position_in_threadgroup]],
+    uint2 group [[threadgroup_position_in_grid]])
+{
+    threadgroup float scratch[LN_SLICES * LN_COLS];
+    const uint c = group.x * LN_COLS + tid.x;
+    const bool live = c < N;
+
+    float s1 = 0.0f, s2 = 0.0f;
+    if (live) for (uint i = tid.y; i < dim; i += LN_SLICES) {
+        const float dxh = gamma[i] * dy[i * N + c];
+        s1 += dxh;
+        s2 += dxh * xhat[i * N + c];
+    }
+    const float m1 = ln_column_sum(s1, scratch, tid) / dim;
+    const float m2 = ln_column_sum(s2, scratch, tid) / dim;
+    if (!live) return;
+    const float inv = inv_std[c];
+    for (uint i = tid.y; i < dim; i += LN_SLICES)
+        dx[i * N + c] = inv * (gamma[i] * dy[i * N + c] - m1 - xhat[i * N + c] * m2);
+}
+
+kernel void layernorm_jvp_tiled_kernel(
+    device const float* dx      [[buffer(0)]],
+    device const float* gamma   [[buffer(1)]],
+    device const float* xhat    [[buffer(2)]],
+    device const float* inv_std [[buffer(3)]],
+    device float* dy            [[buffer(4)]],
+    constant uint& dim          [[buffer(5)]],
+    constant uint& N            [[buffer(6)]],
+    uint2 tid [[thread_position_in_threadgroup]],
+    uint2 group [[threadgroup_position_in_grid]])
+{
+    threadgroup float scratch[LN_SLICES * LN_COLS];
+    const uint c = group.x * LN_COLS + tid.x;
+    const bool live = c < N;
+
+    float s1 = 0.0f, s2 = 0.0f;
+    if (live) for (uint i = tid.y; i < dim; i += LN_SLICES) {
+        const float d = dx[i * N + c];
+        s1 += d;
+        s2 += d * xhat[i * N + c];
+    }
+    const float m1 = ln_column_sum(s1, scratch, tid) / dim;
+    const float m2 = ln_column_sum(s2, scratch, tid) / dim;
+    if (!live) return;
+    const float inv = inv_std[c];
+    for (uint i = tid.y; i < dim; i += LN_SLICES)
+        dy[i * N + c] = gamma[i] * inv * (dx[i * N + c] - m1 - xhat[i * N + c] * m2);
 }

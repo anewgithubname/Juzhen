@@ -4,7 +4,9 @@
 #include <algorithm>
 #include <cmath>
 #include <limits>
+#include <optional>
 #include <unordered_map>
+#include <unordered_set>
 
 namespace Juzhen {
 struct AdamWOptions {
@@ -43,6 +45,46 @@ static __global__ void explicit_adamw_kernel(
 #endif
 
 namespace optimizer_detail {
+#ifdef APPLE_SILICON
+// Gradients live in shared memory, so one synchronization and an FP64 sum on
+// the host replace CUDA's tiled device reduction. Returns nothing when two
+// registrations share gradient storage; the caller then keeps the sequential
+// per-parameter behavior, as CUDA does.
+inline std::optional<double> mps_clip_grad_norm(
+    const std::vector<ParameterRef<MPSfloat>>& parameters, double max_norm) {
+    std::vector<Matrix<MPSfloat>*> gradients;
+    std::unordered_set<const MPSfloat*> unique;
+    for (const auto& p : parameters) {
+        if (!p.enabled() || !p.has_grad())
+            continue;
+        auto& g = p.gradient->value;
+        if (!unique.insert(g.data()).second)
+            return std::nullopt;
+        gradients.push_back(&g);
+    }
+    if (gradients.empty())
+        return 0.;
+
+    mpsSynchronize();
+    double total = 0;
+    for (const auto* g : gradients) {
+        const auto* values = reinterpret_cast<const float*>(g->data());
+        for (size_t i = 0, n = g->num_row() * g->num_col(); i < n; ++i)
+            total += double(values[i]) * values[i];
+    }
+    const double norm = std::sqrt(total);
+    if (!std::isfinite(norm))
+        throw std::runtime_error("non-finite gradient norm");
+
+    // rescale only if the norm is over the limit
+    const double scale = std::min(1., max_norm / (norm + 1e-6));
+    if (scale < 1)
+        for (auto* g : gradients)
+            g->scale(float(scale));
+    return norm;
+}
+#endif
+
 // Portable device implementation: matrix operations respect each operand's
 // logical transpose layout and leave the accumulated gradient intact. The
 // caller validates all parameters first and advances the iteration afterwards.
@@ -182,6 +224,12 @@ public:
             return cuda_norm_->clip(parameters_, max_norm);
         }
 #endif
+#ifdef APPLE_SILICON
+        if constexpr (std::is_same_v<D, MPSfloat>) {
+            if (auto norm = optimizer_detail::mps_clip_grad_norm(parameters_, max_norm))
+                return *norm;
+        }
+#endif
 
         double norm = 0;
         for (const auto& p : parameters_)
@@ -223,6 +271,16 @@ public:
                     a.m.get_transpose(), a.v.get_transpose(),
                     a.alpha, a.beta1, a.beta2, a.eps, bc1, bc2, decay);
                 CudaErrorCheck(cudaGetLastError());
+            } else
+#endif
+#ifdef APPLE_SILICON
+            if constexpr (std::is_same_v<D, MPSfloat>) {
+                mpsAdamW((float*)p.value->data(), (const float*)p.grad().data(),
+                         (float*)a.m.data(), (float*)a.v.data(),
+                         (int)p.value->num_row(), (int)p.value->num_col(),
+                         p.value->get_transpose(), p.grad().get_transpose(),
+                         a.m.get_transpose(), a.v.get_transpose(),
+                         a.alpha, a.beta1, a.beta2, a.eps, bc1, bc2, decay);
             } else
 #endif
             if constexpr (std::is_same_v<D, float>) {

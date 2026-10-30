@@ -11,7 +11,7 @@ Requires a C++20-capable compiler. Supports NVIDIA CUDA 12.x (with cuDNN), Apple
 
 - CPU matrix operations with BLAS, plus CUDA, ROCm/HIP and Metal backends.
 - Neural-network layers including convolution, transposed convolution and pre-LayerNorm Transformers.
-- Forward-mode Jacobian-vector products (JVP) on CPU, CUDA and ROCm. The JVP correctness suite does not yet cover Metal.
+- Forward-mode Jacobian-vector products (JVP) on CPU, CUDA, ROCm and Metal.
 - AMD Transformer forward, backward and JVP paths with batched attention GEMM and fused HIP operations. See the [implementation and validation notes](docs/amd-transformer-optimization.md).
 - [Training checkpoints](docs/checkpoint-resume.md) restore model parameters, Adam state, training progress and the host RNG. CPU and AMD tests include restarting in a new process.
 - A [CPU linear assignment solver](docs/cpu-assignment.md) using the Hungarian shortest-augmenting-path algorithm, with rectangular and min/max matching support.
