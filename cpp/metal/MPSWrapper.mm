@@ -317,6 +317,14 @@ unsigned long long mpsGpuAddress(const float* ptr) {
     return it == bufferMap.end() ? 0 : it->second.gpuAddress;
 }
 
+float* mpsStagingAlloc(size_t size) {
+    return mpsMalloc(size);
+}
+
+void mpsStagingRelease(float* ptr) {
+    mpsFree(ptr);
+}
+
 void mpsFree(float* ptr) {
     auto it = bufferMap.find(ptr);
     if(it != bufferMap.end()) {

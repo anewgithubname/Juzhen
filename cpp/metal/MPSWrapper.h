@@ -12,6 +12,11 @@ float* mpsMalloc(size_t size);
 void mpsFree(float* ptr);
 // GPU virtual address of the buffer behind a pointer from mpsMalloc (0 if unknown).
 unsigned long long mpsGpuAddress(const float* ptr);
+// A fresh shared buffer for host-to-device uploads: the host fills it, a
+// device copy moves it into a pooled buffer, and mpsStagingRelease drops the
+// host reference (pending command buffers keep it alive until they finish).
+float* mpsStagingAlloc(size_t size);
+void mpsStagingRelease(float* ptr);
 
 void mpsGemm(const float* A, const float* B, float* C, int rowA, int colA, int rowB, int colB, bool transposeA, bool transposeB);
 // C = b*B + a*A(optionally transposed); B and C share a layout. In-place: B == C.

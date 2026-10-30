@@ -23,11 +23,17 @@ Matrix<MPSfloat>::Matrix(const Matrix<float>& M)
         Memory<MPSfloat>::free(p);
     });
 
-    mpsSynchronize(); // before the upload, make sure all the previous operations are done
+    // A pooled buffer may still be in use by queued GPU work, so the host
+    // must not write it directly. Transpose into a fresh staging buffer and
+    // copy on the device instead of waiting for the queue to drain.
     profiler.start();
+    const size_t count = numcol * numrow;
+    float* staging = mpsStagingAlloc((count ? count : 1) * sizeof(float));
     //change column major to row major
-    vDSP_mtrans((const float*)M.elements.get(), 1, (float*)elements.get(), 1,
-                numrow, numcol);
+    vDSP_mtrans((const float*)M.elements.get(), 1, staging, 1, numrow, numcol);
+    mpsCopyMatrixBlock(staging, (float*)elements.get(), 1, (int)count, false, 0, 0,
+                       1, (int)count, 1, (int)count, false, 0, 0);
+    mpsStagingRelease(staging);
     profiler.end();
 }
 
