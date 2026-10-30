@@ -47,8 +47,15 @@ template <class F> double measure_ms(F&& operation, int warmup, int iterations) 
     CudaErrorCheck(cudaEventDestroy(start)); CudaErrorCheck(cudaEventDestroy(stop));
     return static_cast<double>(elapsed) / iterations;
 #else
+#if defined(APPLE_SILICON)
+    // Metal work is queued asynchronously; time completed work, as CUDA does.
+    mpsSynchronize();
+#endif
     const auto start = std::chrono::steady_clock::now();
     for (int i = 0; i < iterations; ++i) operation();
+#if defined(APPLE_SILICON)
+    mpsSynchronize();
+#endif
     const auto stop = std::chrono::steady_clock::now();
     return std::chrono::duration<double, std::milli>(stop - start).count() / iterations;
 #endif
