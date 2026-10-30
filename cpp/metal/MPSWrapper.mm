@@ -38,6 +38,9 @@ static id<MTLComputePipelineState> softmaxBackwardRowsBatchedPipelineState = nil
 static id<MTLComputePipelineState> layernormForwardPipelineState = nil;
 static id<MTLComputePipelineState> layernormBackwardPipelineState = nil;
 static id<MTLComputePipelineState> addBiasPipelineState = nil;
+static id<MTLComputePipelineState> gatherPipelineState = nil;
+static id<MTLComputePipelineState> boxMullerPipelineState = nil;
+static id<MTLComputePipelineState> adamwPipelineState = nil;
 
 // MPS kernel objects are expensive to create and fully reusable across
 // encodes, so cache them by shape. Training loops repeat a handful of shapes,
@@ -46,10 +49,11 @@ static std::map<std::tuple<bool, bool, int, int, int>, MPSMatrixMultiplication*>
 static std::map<std::tuple<bool, bool, int, int, int, float>, MPSMatrixMultiplication*> gemmBatchedKernelCache;
 static std::map<std::tuple<bool, int, int>, MPSMatrixVectorMultiplication*> gemvKernelCache;
 
-MPSMatrixRandomMTGP32* randomKernel = nil;
-MPSMatrixRandomDistributionDescriptor* randDesc = nil;
-MPSMatrixRandomMTGP32* randomUniformKernel = nil;
-MPSMatrixRandomDistributionDescriptor* randUniformDesc = nil;
+// One uniform generator feeds both rand and randn (via Box-Muller), so a
+// reseed restarts both streams, as with the single cuRAND generator.
+static MPSMatrixRandomMTGP32* randomUniformKernel = nil;
+static MPSMatrixRandomDistributionDescriptor* randUniformDesc = nil;
+static const NSUInteger kDefaultSeed = 3334;
 
 static std::map<float*, id<MTLBuffer>> bufferMap;
 
@@ -117,21 +121,9 @@ void mpsInit() {
 
     commandQueue = [device newCommandQueue];
 
-    // Random number distribution descriptor (Normal distribution)
-    randDesc =
-        [MPSMatrixRandomDistributionDescriptor normalDistributionDescriptorWithMean:0.0f standardDeviation:1.0f];
     randUniformDesc =
-        [MPSMatrixRandomDistributionDescriptor uniformDistributionDescriptorWithMinimum:0.0f maximum:1.0f];
-
-    randomKernel = [[MPSMatrixRandomMTGP32 alloc] initWithDevice:device
-                                                    destinationDataType:MPSDataTypeFloat32
-                                                    seed:3334
-                                                    distributionDescriptor:randDesc];
-
-    randomUniformKernel = [[MPSMatrixRandomMTGP32 alloc] initWithDevice:device
-                                                    destinationDataType:MPSDataTypeFloat32
-                                                    seed:3334
-                                                    distributionDescriptor:randUniformDesc];
+        [[MPSMatrixRandomDistributionDescriptor uniformDistributionDescriptorWithMinimum:0.0f maximum:1.0f] retain];
+    mpsSetSeed((int)kDefaultSeed);
 
     NSError* error = nil;
 
@@ -171,6 +163,9 @@ void mpsInit() {
     id<MTLFunction> layernormForwardKernel = [defaultLibrary newFunctionWithName:@"layernorm_forward_rm_kernel"];
     id<MTLFunction> layernormBackwardKernel = [defaultLibrary newFunctionWithName:@"layernorm_backward_rm_kernel"];
     id<MTLFunction> addBiasKernel = [defaultLibrary newFunctionWithName:@"add_bias_rm_kernel"];
+    id<MTLFunction> gatherKernel = [defaultLibrary newFunctionWithName:@"matrix_gather_kernel"];
+    id<MTLFunction> boxMullerKernel = [defaultLibrary newFunctionWithName:@"box_muller_kernel"];
+    id<MTLFunction> adamwKernel = [defaultLibrary newFunctionWithName:@"adamw_kernel"];
 
     // Create compute pipeline state
     zeroPipelineState = [device newComputePipelineStateWithFunction:zeroKernel error:&error];
@@ -201,7 +196,20 @@ void mpsInit() {
     layernormForwardPipelineState = [device newComputePipelineStateWithFunction:layernormForwardKernel error:&error];
     layernormBackwardPipelineState = [device newComputePipelineStateWithFunction:layernormBackwardKernel error:&error];
     addBiasPipelineState = [device newComputePipelineStateWithFunction:addBiasKernel error:&error];
+    gatherPipelineState = [device newComputePipelineStateWithFunction:gatherKernel error:&error];
+    boxMullerPipelineState = [device newComputePipelineStateWithFunction:boxMullerKernel error:&error];
+    adamwPipelineState = [device newComputePipelineStateWithFunction:adamwKernel error:&error];
 
+}
+
+void mpsSetSeed(int seed) {
+    // Pending work may still use the old generator's state buffers.
+    mpsSynchronize();
+    [randomUniformKernel release];
+    randomUniformKernel = [[MPSMatrixRandomMTGP32 alloc] initWithDevice:device
+                                                    destinationDataType:MPSDataTypeFloat32
+                                                    seed:(NSUInteger)(unsigned)seed
+                                                    distributionDescriptor:randUniformDesc];
 }
 
 void mpsDestroy() {
@@ -215,8 +223,8 @@ void mpsDestroy() {
     gemvKernelCache.clear();
     [randUniformDesc release];
     [randomUniformKernel release];
-    [randDesc release];
-    [randomKernel release];
+    randUniformDesc = nil;
+    randomUniformKernel = nil;
     [zeroPipelineState release];
     [ax_bPipelineState release];
     [matrixaddPipelineState release];
@@ -245,6 +253,9 @@ void mpsDestroy() {
     [layernormForwardPipelineState release];
     [layernormBackwardPipelineState release];
     [addBiasPipelineState release];
+    [gatherPipelineState release];
+    [boxMullerPipelineState release];
+    [adamwPipelineState release];
     [commandQueue release];
     [device release];
     device = nil;
@@ -262,7 +273,6 @@ float* mpsMalloc(size_t size) {
 void mpsFree(float* ptr) {
     auto it = bufferMap.find(ptr);
     if(it != bufferMap.end()) {
-        std::cout << "Freeing buffer " << ptr << std::endl;
         [it->second release];
         bufferMap.erase(it);
     }
@@ -306,6 +316,7 @@ void mpsGemm(const float* A, const float* B, float* C, int rowA, int colA, int r
 }
 
 void mpsAdd(const float* A, const float* B, float* C, int rowA, int colA, bool transpose, float a, float b){
+    if (rowA <= 0 || colA <= 0) return;
     id<MTLBuffer> bufferA = bufferMap[(float *) A];
     id<MTLBuffer> bufferB = bufferMap[(float *) B];
     id<MTLBuffer> bufferC = bufferMap[C];
@@ -337,6 +348,7 @@ void mpsCopyMatrixBlock(const float* src, float* dst,
                         int copyRows, int copyCols,
                         int dstRows, int dstCols, bool dstTranspose,
                         int dstRowOffset, int dstColOffset) {
+    if (copyRows <= 0 || copyCols <= 0) return;
     id<MTLBuffer> srcBuffer = bufferMap[(float*)src];
     id<MTLBuffer> dstBuffer = bufferMap[dst];
 
@@ -364,6 +376,7 @@ void mpsCopyMatrixBlock(const float* src, float* dst,
 }
 
 void mpsProduct(const float* A, const float* B, float* C, int rowA, int colA, bool transpose){
+    if (rowA <= 0 || colA <= 0) return;
     id<MTLBuffer> bufferA = bufferMap[(float *) A];
     id<MTLBuffer> bufferB = bufferMap[(float *) B];
     id<MTLBuffer> bufferC = bufferMap[C];
@@ -387,6 +400,7 @@ void mpsProduct(const float* A, const float* B, float* C, int rowA, int colA, bo
 }
 
 void mpsAx_b(const float* x, float a, float b, float* y, int N) {
+    if (N <= 0) return;
     id<MTLBuffer> bufferX = bufferMap[(float *) x];
     id<MTLBuffer> bufferY = bufferMap[y];
 
@@ -410,45 +424,79 @@ void mpsAx_b(const float* x, float a, float b, float* y, int N) {
     opEncoded();
 }
 
-void mpsRandn(float *A, int N){
-    // Get GPU buffer associated with A
-    id<MTLBuffer> bufferA = bufferMap[A];
-
+// Fill `buffer` with `count` uniforms in [0, 1) from the shared generator.
+static void encodeUniform(id<MTLBuffer> buffer, NSUInteger count) {
     id<MTLCommandBuffer> cb = currentMPSCommandBuffer();
-
-    // Matrix descriptor to wrap buffer A
-    MPSMatrixDescriptor* matrixDesc = [MPSMatrixDescriptor matrixDescriptorWithRows:N columns:1
+    MPSMatrixDescriptor* matrixDesc = [MPSMatrixDescriptor matrixDescriptorWithRows:count columns:1
                                                                            rowBytes:sizeof(float)
                                                                            dataType:MPSDataTypeFloat32];
-    auto matA = [[MPSMatrix alloc] initWithBuffer:bufferA descriptor:matrixDesc];
-
-    // Encode random number generation into command buffer
-    [randomKernel encodeToCommandBuffer:cb destinationMatrix:matA];
+    auto mat = [[MPSMatrix alloc] initWithBuffer:buffer descriptor:matrixDesc];
+    [randomUniformKernel encodeToCommandBuffer:cb destinationMatrix:mat];
     opEncoded();
-    // Cleanup
-    [matA release];
+    [mat release];
+}
+
+void mpsRandn(float *A, int N){
+    if (N <= 0) return;
+    id<MTLBuffer> bufferA = bufferMap[A];
+    // Box-Muller consumes uniforms in pairs; an odd request draws one extra
+    // into a scratch buffer (retained by the command buffer until it runs).
+    id<MTLBuffer> uniform = bufferA;
+    if (N % 2) uniform = [device newBufferWithLength:(N + 1) * sizeof(float)
+                                             options:MTLResourceStorageModePrivate];
+    encodeUniform(uniform, N + N % 2);
+
+    id<MTLComputeCommandEncoder> encoder = currentComputeEncoder();
+    [encoder setComputePipelineState:boxMullerPipelineState];
+    [encoder setBuffer:uniform offset:0 atIndex:0];
+    [encoder setBuffer:bufferA offset:0 atIndex:1];
+    [encoder setBytes:&N length:sizeof(int) atIndex:2];
+    const NSUInteger pairs = (N + 1) / 2;
+    NSUInteger tgs = boxMullerPipelineState.maxTotalThreadsPerThreadgroup;
+    if (tgs > pairs) tgs = pairs;
+    [encoder dispatchThreads:MTLSizeMake(pairs, 1, 1) threadsPerThreadgroup:MTLSizeMake(tgs, 1, 1)];
+    opEncoded();
+    if (uniform != bufferA) [uniform release];
 }
 
 void mpsRand(float *A, int N){
-    // Get GPU buffer associated with A
-    id<MTLBuffer> bufferA = bufferMap[A];
+    if (N <= 0) return;
+    encodeUniform(bufferMap[A], N);
+}
 
-    id<MTLCommandBuffer> cb = currentMPSCommandBuffer();
+void mpsGather(const float* src, float* dst, const unsigned* rows, int nr,
+               const unsigned* cols, int nc, int srcRows, int srcCols, bool srcTranspose) {
+    if (nr <= 0 || nc <= 0) return;
+    // Index lists are copied into scratch buffers that the command buffer
+    // retains until the gather has run.
+    id<MTLBuffer> rowBuffer = [device newBufferWithBytes:rows length:nr * sizeof(unsigned)
+                                                 options:MTLResourceStorageModeShared];
+    id<MTLBuffer> colBuffer = [device newBufferWithBytes:cols length:nc * sizeof(unsigned)
+                                                 options:MTLResourceStorageModeShared];
 
-    // Matrix descriptor to wrap buffer A
-    MPSMatrixDescriptor* matrixDesc = [MPSMatrixDescriptor matrixDescriptorWithRows:N columns:1
-                                                                           rowBytes:sizeof(float)
-                                                                           dataType:MPSDataTypeFloat32];
-    auto matA = [[MPSMatrix alloc] initWithBuffer:bufferA descriptor:matrixDesc];
+    id<MTLComputeCommandEncoder> encoder = currentComputeEncoder();
+    [encoder setComputePipelineState:gatherPipelineState];
+    [encoder setBuffer:bufferMap[(float*)src] offset:0 atIndex:0];
+    [encoder setBuffer:bufferMap[dst] offset:0 atIndex:1];
+    [encoder setBuffer:rowBuffer offset:0 atIndex:2];
+    [encoder setBuffer:colBuffer offset:0 atIndex:3];
+    [encoder setBytes:&nr length:sizeof(int) atIndex:4];
+    [encoder setBytes:&nc length:sizeof(int) atIndex:5];
+    [encoder setBytes:&srcRows length:sizeof(int) atIndex:6];
+    [encoder setBytes:&srcCols length:sizeof(int) atIndex:7];
+    [encoder setBytes:&srcTranspose length:sizeof(bool) atIndex:8];
 
-    // Encode random number generation into command buffer
-    [randomUniformKernel encodeToCommandBuffer:cb destinationMatrix:matA];
+    const NSUInteger total = (NSUInteger)nr * nc;
+    NSUInteger tgs = gatherPipelineState.maxTotalThreadsPerThreadgroup;
+    if (tgs > total) tgs = total;
+    [encoder dispatchThreads:MTLSizeMake(total, 1, 1) threadsPerThreadgroup:MTLSizeMake(tgs, 1, 1)];
     opEncoded();
-    // Cleanup
-    [matA release];
+    [rowBuffer release];
+    [colBuffer release];
 }
 
 void mpsFill(float* A, int N, float val) {
+    if (N <= 0) return;
     id<MTLBuffer> buffer = bufferMap[A];
 
     id<MTLComputeCommandEncoder> encoder = currentComputeEncoder();
@@ -471,6 +519,7 @@ void mpsFill(float* A, int N, float val) {
 
 // Shared encode path for elementwise src -> dst kernels (in-place: src == dst).
 static void encodeElemwise(id<MTLComputePipelineState> pso, const float* src, float* dst, int N) {
+    if (N <= 0) return;
     id<MTLBuffer> srcBuffer = bufferMap[(float *) src];
     id<MTLBuffer> dstBuffer = bufferMap[dst];
 
@@ -952,6 +1001,7 @@ void mpsTopk(const float* A, float* B, float *C, int rowA, int colA, int k){
 }
 
 void mpsElemInv(const float* src, float* dst, int N, float l){
+    if (N <= 0) return;
     id<MTLBuffer> srcBuffer = bufferMap[(float *) src];
     id<MTLBuffer> dstBuffer = bufferMap[dst];
 
@@ -971,6 +1021,31 @@ void mpsElemInv(const float* src, float* dst, int N, float l){
 
     [encoder dispatchThreads:gridSize threadsPerThreadgroup:threadsPerGroup];
 
+    opEncoded();
+}
+
+void mpsAdamW(float* w, const float* g, float* m, float* v, int rows, int cols,
+              bool wt, bool gt, bool mt, bool vt, float lr, float beta1, float beta2,
+              float eps, float bc1, float bc2, float decay) {
+    const NSUInteger total = (NSUInteger)rows * cols;
+    if (total == 0) return;
+    const struct { float lr, beta1, beta2, eps, bc1, bc2, decay; } params =
+        {lr, beta1, beta2, eps, bc1, bc2, decay};
+    const unsigned layout = (wt ? 1u : 0u) | (gt ? 2u : 0u) | (mt ? 4u : 0u) | (vt ? 8u : 0u);
+
+    id<MTLComputeCommandEncoder> encoder = currentComputeEncoder();
+    [encoder setComputePipelineState:adamwPipelineState];
+    [encoder setBuffer:bufferMap[w] offset:0 atIndex:0];
+    [encoder setBuffer:bufferMap[(float*)g] offset:0 atIndex:1];
+    [encoder setBuffer:bufferMap[m] offset:0 atIndex:2];
+    [encoder setBuffer:bufferMap[v] offset:0 atIndex:3];
+    [encoder setBytes:&rows length:sizeof(int) atIndex:4];
+    [encoder setBytes:&cols length:sizeof(int) atIndex:5];
+    [encoder setBytes:&layout length:sizeof(unsigned) atIndex:6];
+    [encoder setBytes:&params length:sizeof(params) atIndex:7];
+    NSUInteger tgs = adamwPipelineState.maxTotalThreadsPerThreadgroup;
+    if (tgs > total) tgs = total;
+    [encoder dispatchThreads:MTLSizeMake(total, 1, 1) threadsPerThreadgroup:MTLSizeMake(tgs, 1, 1)];
     opEncoded();
 }
 

@@ -29,6 +29,8 @@
 
 template<>
 inline MPSfloat* Memory<MPSfloat>::_alloc(size_t size) {
+    // Metal cannot create empty buffers; allocate one element, as CUDA does.
+    if (size == 0) size = 1;
     return (MPSfloat *)mpsMalloc(size * sizeof(MPSfloat));
 }
 
@@ -88,6 +90,10 @@ public:
     inline MPSfloat& elem(size_t i, size_t j) {
         return transpose ? elements[j * numcol + i] : elements[i * numcol + j];
     }
+    // Host access to shared storage; call mpsSynchronize() first if GPU work
+    // writing this matrix may still be pending.
+    inline MPSfloat operator()(size_t i, size_t j) const { return elem(i, j); }
+    inline MPSfloat& operator()(size_t i, size_t j) { return elem(i, j); }
     
     Matrix<float> to_host() const;
     void zeros();
@@ -107,7 +113,7 @@ public:
     Matrix<MPSfloat> scale(float s1) const { return add(0, s1); }
     void eleminv(double l);
     Matrix<MPSfloat> eleminv(double l) const;
-    Matrix<MPSfloat> rows(size_t start, size_t end) const;
+    float norm() const;
     // 2D submatrix (GPU block copy, stays in the command stream). Read form
     // returns the block; write form copies M into the
     // [rstart,rend) x [cstart,cend) region.
@@ -115,6 +121,22 @@ public:
                            size_t cend) const;
     void slice(size_t rstart, size_t rend, size_t cstart, size_t cend,
                const Matrix<MPSfloat>& M);
+    // Indexed gather: result(i, j) = (*this)(rowidx[i], colidx[j]).
+    Matrix<MPSfloat> slice(const idxlist& rowidx, const idxlist& colidx) const;
+    Matrix<MPSfloat> rows(size_t start, size_t end) const {
+        return slice(start, end, 0, num_col());
+    }
+    void rows(size_t start, size_t end, const Matrix<MPSfloat>& M) {
+        slice(start, end, 0, num_col(), M);
+    }
+    Matrix<MPSfloat> rows(idxlist rlist) const { return slice(rlist, seq(num_col())); }
+    Matrix<MPSfloat> columns(size_t start, size_t end) const {
+        return slice(0, num_row(), start, end);
+    }
+    void columns(size_t start, size_t end, const Matrix<MPSfloat>& M) {
+        slice(0, num_row(), start, end, M);
+    }
+    Matrix<MPSfloat> columns(idxlist clist) const { return slice(seq(num_row()), clist); }
     const Matrix<MPSfloat> T() const;
 
     friend Matrix<MPSfloat> hadmd(const Matrix<MPSfloat>& M1,
@@ -160,9 +182,27 @@ Matrix<MPSfloat> relu(Matrix<MPSfloat>&& M);
 Matrix<MPSfloat> d_relu(const Matrix<MPSfloat>& M);
 Matrix<MPSfloat> d_relu(Matrix<MPSfloat>&& M);
 
+Matrix<MPSfloat>& fill(Matrix<MPSfloat>& M, double a);
+// dest takes src's shape and layout in fresh storage.
+void copy(Matrix<MPSfloat>& dest, const Matrix<MPSfloat>& src);
+
 Matrix<MPSfloat> hstack(std::vector<MatrixView<MPSfloat>> matrices);
 
 Matrix<MPSfloat> vstack(std::vector<MatrixView<MPSfloat>> matrices);
+
+// Seeds the device generator behind rand() and randn(), like the CUDA
+// GPUSampler. setseed restarts both streams from the beginning.
+struct GPUSampler {
+    explicit GPUSampler(int seed) { setseed(seed); }
+    void setseed(int seed) { mpsSetSeed(seed); }
+};
+
+// Matrix files hold host (column-major) storage, so a checkpoint written on
+// one backend loads on any other.
+template <>
+void write(FILE* fp, const Matrix<MPSfloat>& M);
+template <>
+void read(FILE* fp, Matrix<MPSfloat>& M);
 
 // ── host-fallback generic ops ───────────────────────────────────────────────
 // reduce/elemwise take an arbitrary C++ lambda, which cannot be JIT-compiled

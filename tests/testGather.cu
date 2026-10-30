@@ -22,14 +22,15 @@ template<class T> bool suite(){
     idxlist large_r(1100),large_c(1100);for(size_t i=0;i<1100;++i){large_r[i]=i%5;large_c[i]=(i*3)%7;}
     ok=ok&&check(m,h,large_r,large_c);
     auto copy=m.slice(r,c);copy.zeros();ok=ok&&host(m).elem(4,6)==406;
-#ifdef CUDA
-    if constexpr(std::is_same_v<T,CUDAfloat>){
+    // Device backends validate every index before launching the gather.
+    if constexpr(!std::is_same_v<T,float>){
         for(auto bad:idxlist{5,std::numeric_limits<size_t>::max()}){bool caught=false;try{m.slice(idxlist{bad},idxlist{0});}catch(const std::out_of_range&){caught=true;}ok=ok&&caught;}
         bool caught=false;try{m.slice(idxlist{0},idxlist{7});}catch(const std::out_of_range&){caught=true;}ok=ok&&caught;
         caught=false;try{m.slice(idxlist{},idxlist{7});}catch(const std::out_of_range&){caught=true;}ok=ok&&caught;
+#ifdef CUDA
         ok=ok&&cudaGetLastError()==cudaSuccess;
-    }
 #endif
+    }
     return ok;
 }
 int compute(){
@@ -43,6 +44,9 @@ int compute(){
         std::cout<<"bounds rejected="<<caught<<'\n';return caught?0:1;
     }
     ok=suite<CUDAfloat>()&&ok;
+#endif
+#ifdef APPLE_SILICON
+    ok=suite<MPSfloat>()&&ok;
 #endif
     std::cout<<(ok?"PASS":"FAIL")<<" indexed gather\n";return ok?0:1;
 }

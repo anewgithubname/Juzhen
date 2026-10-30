@@ -198,159 +198,165 @@ int test_vstack_empty_throws()
 }
 
 // ---------------------------------------------------------------------------
-// CUDA tests
+// Device tests (CUDA and Metal)
 // ---------------------------------------------------------------------------
 
+#if defined(CUDA) || defined(APPLE_SILICON)
 #ifdef CUDA
+using GD = CUDAfloat;
+#else
+using GD = MPSfloat;
+#endif
+using DM = Matrix<GD>;
 
-int test_cuda_hstack_basic()
+int test_gpu_hstack_basic()
 {
     M Ah = {"A", {{1, 2}, {3, 4}}};
     M Bh = {"B", {{4, 5}, {6, 7}}};
-    CM A(Ah), B(Bh);
+    DM A(Ah), B(Bh);
 
-    auto C = hstack(std::vector<MatrixView<CUDAfloat>>{A, B});
+    auto C = hstack(std::vector<MatrixView<GD>>{A, B});
     M expected = {"E", {{1, 2, 4, 5}, {3, 4, 6, 7}}};
 
     if (C.num_row() != 2 || C.num_col() != 4) {
-        LOG_ERROR("CUDA hstack basic: wrong shape ({} x {})", C.num_row(), C.num_col());
+        LOG_ERROR("GPU hstack basic: wrong shape ({} x {})", C.num_row(), C.num_col());
         return 1;
     }
     if ((C.to_host() - expected).norm() > 1e-5f) {
-        LOG_ERROR("CUDA hstack basic: value mismatch");
+        LOG_ERROR("GPU hstack basic: value mismatch");
         return 1;
     }
-    LOG_INFO("CUDA hstack basic passed");
+    LOG_INFO("GPU hstack basic passed");
     return 0;
 }
 
-int test_cuda_vstack_basic()
+int test_gpu_vstack_basic()
 {
     M Ah = {"A", {{1, 2}, {3, 4}}};
     M Bh = {"B", {{4, 5}, {6, 7}}};
-    CM A(Ah), B(Bh);
+    DM A(Ah), B(Bh);
 
-    auto C = vstack(std::vector<MatrixView<CUDAfloat>>{A, B});
+    auto C = vstack(std::vector<MatrixView<GD>>{A, B});
     M expected = {"E", {{1, 2}, {3, 4}, {4, 5}, {6, 7}}};
 
     if (C.num_row() != 4 || C.num_col() != 2) {
-        LOG_ERROR("CUDA vstack basic: wrong shape ({} x {})", C.num_row(), C.num_col());
+        LOG_ERROR("GPU vstack basic: wrong shape ({} x {})", C.num_row(), C.num_col());
         return 1;
     }
     if ((C.to_host() - expected).norm() > 1e-5f) {
-        LOG_ERROR("CUDA vstack basic: value mismatch");
+        LOG_ERROR("GPU vstack basic: value mismatch");
         return 1;
     }
-    LOG_INFO("CUDA vstack basic passed");
+    LOG_INFO("GPU vstack basic passed");
     return 0;
 }
 
-int test_cuda_vstack_transposed_regression()
+int test_gpu_vstack_transposed_regression()
 {
     // Regression: vstack used to return hstack().T() (lazy flag flip),
     // which cuDNN reads as wrong memory layout. The result must now be a
     // physically transposed, non-transposed-flagged matrix.
     M Ah = {"Ah", {{1, 2, 3}, {4, 5, 6}}};
     M Bh = {"Bh", {{7, 8, 9}, {10, 11, 12}}};
-    CM A(Ah), B(Bh);
+    DM A(Ah), B(Bh);
 
-    auto C = vstack(std::vector<MatrixView<CUDAfloat>>{A.T(), B.T()});
+    auto C = vstack(std::vector<MatrixView<GD>>{A.T(), B.T()});
     M Cref = vstack<float>(std::vector<MatrixView<float>>{Ah.T(), Bh.T()});
 
     if (C.get_transpose() != 0) {
-        LOG_ERROR("CUDA vstack regression: output still has transpose flag set");
+        LOG_ERROR("GPU vstack regression: output still has transpose flag set");
         return 1;
     }
     if ((C.to_host() - Cref).norm() > 1e-5f) {
-        LOG_ERROR("CUDA vstack regression: value mismatch vs CPU reference");
+        LOG_ERROR("GPU vstack regression: value mismatch vs CPU reference");
         return 1;
     }
-    LOG_INFO("CUDA vstack transposed regression passed");
+    LOG_INFO("GPU vstack transposed regression passed");
     return 0;
 }
 
-int test_cuda_hstack_transposed_input()
+int test_gpu_hstack_transposed_input()
 {
     M Ah = {"A", {{1, 2, 3}, {4, 5, 6}}};
-    CM A(Ah);
+    DM A(Ah);
     M expected = {"E", {{1, 4, 1, 4}, {2, 5, 2, 5}, {3, 6, 3, 6}}};
 
-    auto C = hstack(std::vector<MatrixView<CUDAfloat>>{A.T(), A.T()});
+    auto C = hstack(std::vector<MatrixView<GD>>{A.T(), A.T()});
     if (C.num_row() != 3 || C.num_col() != 4) {
-        LOG_ERROR("CUDA hstack transposed input: wrong shape ({} x {})", C.num_row(), C.num_col());
+        LOG_ERROR("GPU hstack transposed input: wrong shape ({} x {})", C.num_row(), C.num_col());
         return 1;
     }
     if ((C.to_host() - expected).norm() > 1e-5f) {
-        LOG_ERROR("CUDA hstack transposed input: value mismatch");
+        LOG_ERROR("GPU hstack transposed input: value mismatch");
         return 1;
     }
-    LOG_INFO("CUDA hstack transposed input passed");
+    LOG_INFO("GPU hstack transposed input passed");
     return 0;
 }
 
-int test_cuda_hstack_mismatched_rows_throws()
+int test_gpu_hstack_mismatched_rows_throws()
 {
     try {
-        CM A(M::ones(2, 2));
-        CM B(M::ones(3, 1));
-        auto C = hstack(std::vector<MatrixView<CUDAfloat>>{A, B});
+        DM A(M::ones(2, 2));
+        DM B(M::ones(3, 1));
+        auto C = hstack(std::vector<MatrixView<GD>>{A, B});
         (void)C;
-        LOG_ERROR("CUDA hstack mismatched rows did not throw");
+        LOG_ERROR("GPU hstack mismatched rows did not throw");
         return 1;
     } catch (const std::invalid_argument&) {}
-    LOG_INFO("CUDA hstack mismatched rows throws passed");
+    LOG_INFO("GPU hstack mismatched rows throws passed");
     return 0;
 }
 
-int test_cuda_hstack_empty_throws()
+int test_gpu_hstack_empty_throws()
 {
     try {
-        std::vector<MatrixView<CUDAfloat>> empty;
+        std::vector<MatrixView<GD>> empty;
         auto C = hstack(empty);
         (void)C;
-        LOG_ERROR("CUDA hstack empty input did not throw");
+        LOG_ERROR("GPU hstack empty input did not throw");
         return 1;
     } catch (const std::invalid_argument&) {}
-    LOG_INFO("CUDA hstack empty input throws passed");
+    LOG_INFO("GPU hstack empty input throws passed");
     return 0;
 }
 
 // CPU/CUDA parity: hstack and vstack must agree element-by-element
-int test_cpu_cuda_hstack_parity()
+int test_cpu_gpu_hstack_parity()
 {
     M Ah = M::randn(4, 3);
     M Bh = M::randn(4, 5);
-    CM A(Ah), B(Bh);
+    DM A(Ah), B(Bh);
 
     M cpu_result = hstack<float>({Ah, Bh});
-    auto gpu_result = hstack(std::vector<MatrixView<CUDAfloat>>{A, B});
+    auto gpu_result = hstack(std::vector<MatrixView<GD>>{A, B});
 
     if ((gpu_result.to_host() - cpu_result).norm() > 1e-4f) {
-        LOG_ERROR("CPU/CUDA hstack parity: mismatch");
+        LOG_ERROR("CPU/GPU hstack parity: mismatch");
         return 1;
     }
-    LOG_INFO("CPU/CUDA hstack parity passed");
+    LOG_INFO("CPU/GPU hstack parity passed");
     return 0;
 }
 
-int test_cpu_cuda_vstack_parity()
+int test_cpu_gpu_vstack_parity()
 {
     M Ah = M::randn(3, 4);
     M Bh = M::randn(5, 4);
-    CM A(Ah), B(Bh);
+    DM A(Ah), B(Bh);
 
     M cpu_result = vstack<float>({Ah, Bh});
-    auto gpu_result = vstack(std::vector<MatrixView<CUDAfloat>>{A, B});
+    auto gpu_result = vstack(std::vector<MatrixView<GD>>{A, B});
 
     if ((gpu_result.to_host() - cpu_result).norm() > 1e-4f) {
-        LOG_ERROR("CPU/CUDA vstack parity: mismatch");
+        LOG_ERROR("CPU/GPU vstack parity: mismatch");
         return 1;
     }
-    LOG_INFO("CPU/CUDA vstack parity passed");
+    LOG_INFO("CPU/GPU vstack parity passed");
     return 0;
 }
 
-#endif // CUDA
+#endif // CUDA || APPLE_SILICON
 
 // ---------------------------------------------------------------------------
 // Entry point
@@ -376,20 +382,20 @@ int compute()
     ret += test_hstack_empty_throws();
     ret += test_vstack_empty_throws();
 
-#ifdef CUDA
-    // CUDA functional tests
-    ret += test_cuda_hstack_basic();
-    ret += test_cuda_vstack_basic();
-    ret += test_cuda_vstack_transposed_regression();
-    ret += test_cuda_hstack_transposed_input();
+#if defined(CUDA) || defined(APPLE_SILICON)
+    // Device functional tests
+    ret += test_gpu_hstack_basic();
+    ret += test_gpu_vstack_basic();
+    ret += test_gpu_vstack_transposed_regression();
+    ret += test_gpu_hstack_transposed_input();
 
-    // CUDA error-path tests
-    ret += test_cuda_hstack_mismatched_rows_throws();
-    ret += test_cuda_hstack_empty_throws();
+    // Device error-path tests
+    ret += test_gpu_hstack_mismatched_rows_throws();
+    ret += test_gpu_hstack_empty_throws();
 
     // Parity tests
-    ret += test_cpu_cuda_hstack_parity();
-    ret += test_cpu_cuda_vstack_parity();
+    ret += test_cpu_gpu_hstack_parity();
+    ret += test_cpu_gpu_vstack_parity();
 #endif
 
     if (ret == 0) {

@@ -285,8 +285,8 @@ template<class D> void clipping_checks(){
     double expected=0;for(size_t j=0;j<7;++j)for(size_t i=0;i<3;++i)expected=std::hypot(expected,double(g.elem(i,j)));
     double norm=transpose_opt.clip_grad_norm(.5);require(std::abs(norm-expected)<1e-6,"transposed gradient norm");
     close(host(p.grad()),g*float(.5/(expected+1e-6)),"transposed gradient scale",2e-6f);
-#ifdef CUDA
-    if constexpr(std::is_same_v<D,CUDAfloat>){
+#if defined(CUDA) || defined(APPLE_SILICON)
+    if constexpr(!std::is_same_v<D,float>){
         // FP64 partials avoid squaring FP32 inputs into overflow/underflow.
         for(float magnitude:{1e20f,1e-30f}){
             Matrix<float> extreme("extreme",3,7);for(size_t j=0;j<7;++j)for(size_t i=0;i<3;++i)extreme.elem(i,j)=magnitude;
@@ -388,8 +388,8 @@ int compute() {
         suite<CUDAfloat>("CUDA");
 #endif
 #ifdef APPLE_SILICON
-        optimizer_math_checks<MPSfloat>();
-        std::cout << "[PASS] Metal AdamW scalar references\n";
+        GPUSampler sampler(919);
+        suite<MPSfloat>("Metal");
 #endif
 #ifdef ROCM_HIP
         optimizer_math_checks<ROCMfloat>();

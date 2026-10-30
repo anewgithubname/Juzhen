@@ -230,13 +230,17 @@ kernel void layernorm_forward_rm_kernel(
 {
     if (c >= N) return;
 
+    // Center relative to the first entry: a serial FP32 sum of values sharing
+    // a large offset loses the mean to rounding, which xhat amplifies by
+    // 1/sqrt(eps) when the variance is tiny. The shift itself is exact.
+    const float shift = x[c];
     float mu = 0.0f;
-    for (uint i = 0; i < dim; ++i) mu += x[i * N + c];
-    mu /= dim;
+    for (uint i = 0; i < dim; ++i) mu += x[i * N + c] - shift;
+    mu /= dim;  // mean of the shifted values
 
     float var = 0.0f;
     for (uint i = 0; i < dim; ++i) {
-        const float d = x[i * N + c] - mu;
+        const float d = (x[i * N + c] - shift) - mu;
         var += d * d;
     }
     var /= dim;
@@ -244,7 +248,7 @@ kernel void layernorm_forward_rm_kernel(
     const float inv = rsqrt(var + 1e-5f);
     inv_std[c] = inv;
     for (uint i = 0; i < dim; ++i) {
-        const float xh = (x[i * N + c] - mu) * inv;
+        const float xh = ((x[i * N + c] - shift) - mu) * inv;
         xhat[i * N + c] = xh;
         y[i * N + c] = gamma[i] * xh + beta[i];
     }
@@ -609,4 +613,80 @@ kernel void conv2d_output_add_bias_kernel(
 
     const int out_row = co * P + p;
     output[out_row * N + n] = v;
+}
+
+// ── indexed gather and random normals ──────────────────────────────────────
+// dst (nr x nc, row-major) = src[rows[r], cols[c]] over the source's logical
+// (srcRows x srcCols) shape; `srcTranspose` is its physical-layout flag.
+kernel void matrix_gather_kernel(
+    device const float* src  [[buffer(0)]],
+    device float*       dst  [[buffer(1)]],
+    device const uint*  rows [[buffer(2)]],
+    device const uint*  cols [[buffer(3)]],
+    constant uint& nr        [[buffer(4)]],
+    constant uint& nc        [[buffer(5)]],
+    constant uint& srcRows   [[buffer(6)]],
+    constant uint& srcCols   [[buffer(7)]],
+    constant bool& srcTranspose [[buffer(8)]],
+    uint gid [[thread_position_in_grid]])
+{
+    if (gid >= nr * nc) return;
+    const uint r = rows[gid / nc];
+    const uint c = cols[gid % nc];
+    dst[gid] = src[srcTranspose ? (c * srcRows + r) : (r * srcCols + c)];
+}
+
+// Box-Muller over pairs of uniforms in [0, 1): (u1, u2) -> two normals.
+// `uniform` holds count rounded up to even; in place (uniform == dst) is safe
+// since each thread reads its pair before writing it. 1 - u1 lies in (0, 1],
+// so the logarithm is always finite.
+kernel void box_muller_kernel(
+    device const float* uniform [[buffer(0)]],
+    device float*       dst     [[buffer(1)]],
+    constant uint&      count   [[buffer(2)]],
+    uint gid [[thread_position_in_grid]])
+{
+    const uint i = 2 * gid;
+    if (i >= count) return;
+    const float u1 = 1.0f - uniform[i];
+    const float u2 = uniform[i + 1];
+    const float radius = sqrt(-2.0f * log(u1));
+    const float angle = 6.283185307179586f * u2;
+    dst[i] = radius * cos(angle);
+    if (i + 1 < count) dst[i + 1] = radius * sin(angle);
+}
+
+// ── optimizer ───────────────────────────────────────────────────────────────
+struct AdamWParams {
+    float lr, beta1, beta2, eps, bc1, bc2, decay;
+};
+
+// One AdamW step over a whole parameter, mirroring the CUDA kernel. gid walks
+// the logical row-major order; `layout` bit k says whether operand k (w, g,
+// m, v) is stored transposed.
+kernel void adamw_kernel(
+    device float*       w      [[buffer(0)]],
+    device const float* g      [[buffer(1)]],
+    device float*       m      [[buffer(2)]],
+    device float*       v      [[buffer(3)]],
+    constant uint& rows        [[buffer(4)]],
+    constant uint& cols        [[buffer(5)]],
+    constant uint& layout      [[buffer(6)]],
+    constant AdamWParams& p    [[buffer(7)]],
+    uint gid [[thread_position_in_grid]])
+{
+    if (gid >= rows * cols) return;
+    // index of the same element in a transposed buffer
+    const uint ti = (gid % cols) * rows + gid / cols;
+    const uint wi = (layout & 1u) ? ti : gid;
+    const uint gi = (layout & 2u) ? ti : gid;
+    const uint mi = (layout & 4u) ? ti : gid;
+    const uint vi = (layout & 8u) ? ti : gid;
+
+    const float grad = g[gi];
+    const float first = p.beta1 * m[mi] + (1 - p.beta1) * grad;
+    const float second = p.beta2 * v[vi] + (1 - p.beta2) * grad * grad;
+    m[mi] = first;
+    v[vi] = second;
+    w[wi] = w[wi] * (1 - p.lr * p.decay) - p.lr * (first * p.bc1) / (sqrt(second * p.bc2) + p.eps);
 }

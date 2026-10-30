@@ -62,8 +62,15 @@ void mpsLayerNormBackward(const float* dy, const float* gamma, const float* xhat
                           const float* invStd, float* dx, int dim, int N);
 // y[i, c] += b[i] over a (rows x N) matrix (total = rows * N elements).
 void mpsAddBias(float* y, const float* b, int N, int total);
-void mpsRand(float* A, int N); // fill A with random numbers in [0, 1)
-void mpsRandn(float* A, int N); // fill A with random numbers
+// rand and randn draw from one MTGP32 uniform generator (randn via
+// Box-Muller); mpsSetSeed restarts it, waiting for pending work first.
+void mpsSetSeed(int seed);
+void mpsRand(float* A, int N); // fill A with uniform numbers in [0, 1)
+void mpsRandn(float* A, int N); // fill A with standard normal numbers
+// dst (nr x nc, row-major) = src[rows[r], cols[c]] over src's logical
+// (srcRows x srcCols) shape; srcTranspose is its physical-layout flag.
+void mpsGather(const float* src, float* dst, const unsigned* rows, int nr,
+               const unsigned* cols, int nc, int srcRows, int srcCols, bool srcTranspose);
 void mpsFill(float* A, int N, float val); // fill A with zeros
 void mpsCopyMatrixBlock(const float* src, float* dst,
 						int srcRows, int srcCols, bool srcTranspose,
@@ -92,6 +99,12 @@ void mpsPackFeatureMap2D(const float* featureMap, float* packed,
 
 void mpsConv2dOutputAddBias(const float* y2d, const float* bias, float* output,
 							int N, int Cout, int Hout, int Wout);
+
+// One fused AdamW step: w, g, m, v are logical (rows x cols) matrices whose
+// transposed flags are wt, gt, mt, vt.
+void mpsAdamW(float* w, const float* g, float* m, float* v, int rows, int cols,
+              bool wt, bool gt, bool mt, bool vt, float lr, float beta1, float beta2,
+              float eps, float bc1, float bc2, float decay);
 
 void mpsSynchronize();
 
