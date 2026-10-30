@@ -4,6 +4,8 @@
 #include <cstddef>
 
 void mpsInit();
+// Name of the system default Metal device; usable before mpsInit().
+const char* mpsDeviceName();
 void mpsDestroy();
 
 float* mpsMalloc(size_t size);
@@ -70,6 +72,8 @@ void mpsReluBackwardInplace(const float* activation, float* gradient, int total)
 void mpsColumnMax(const float* src, float* dst, int rows, int cols, bool transpose);
 // dst = min(max(src, lo), hi) elementwise; in place: src == dst.
 void mpsClamp(const float* src, float* dst, int N, float lo, float hi);
+// dst = src > threshold ? 1 : 0 elementwise; in place: src == dst.
+void mpsStep(const float* src, float* dst, int N, float threshold);
 // y[i, c] += b[i] over a (rows x N) matrix (total = rows * N elements).
 void mpsAddBias(float* y, const float* b, int N, int total);
 // rand and randn draw from one MTGP32 uniform generator (randn via

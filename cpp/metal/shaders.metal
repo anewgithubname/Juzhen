@@ -767,3 +767,13 @@ kernel void clamp_kernel(
     const float x = src[id];
     dst[id] = x < lo ? lo : (x > hi ? hi : x);
 }
+
+// dst = src > threshold ? 1 : 0; in place: src == dst.
+kernel void step_kernel(
+    device const float* src       [[buffer(0)]],
+    device float*       dst       [[buffer(1)]],
+    constant float&     threshold [[buffer(2)]],
+    uint id [[thread_position_in_grid]])
+{
+    dst[id] = src[id] > threshold ? 1.0f : 0.0f;
+}

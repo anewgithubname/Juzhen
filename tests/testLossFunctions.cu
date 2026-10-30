@@ -2,6 +2,7 @@
 #include "../ml/layer.hpp"
 #include "../ml/loss.hpp"
 #include "../ml/optimizer.hpp"
+#include <algorithm>
 #include <functional>
 #include <iostream>
 #include <limits>
@@ -212,8 +213,9 @@ template<class D> void training_checks() {
 }
 
 // Column maxima and clamping run as device kernels on Metal; check both
-// layouts and NaN propagation against the host reference.
-template<class D> void column_max_and_clamp_checks() {
+// layouts and NaN propagation against the host reference. comp_med must read
+// finished device results.
+template<class D> void utility_checks() {
     Matrix<float> h("h", 4, 3);
     for (size_t j = 0; j < 3; ++j)
         for (size_t i = 0; i < 4; ++i) h.elem(i, j) = std::sin(1.3f * float(i) + 0.7f * float(j)) * 4.f;
@@ -239,10 +241,34 @@ template<class D> void column_max_and_clamp_checks() {
     Matrix<float> nan("nan", 1, 1);
     nan.elem(0, 0) = std::numeric_limits<float>::quiet_NaN();
     require(std::isnan(host(clamp(Matrix<D>(nan), -1.f, 1.f)).elem(0, 0)), "clamp keeps NaN");
+
+    Matrix<float> points("points", 9, 2);
+    for (size_t i = 0; i < 9; ++i) { points.elem(i, 0) = float(i * i % 7); points.elem(i, 1) = 0.5f * float(i); }
+    std::vector<float> distances;
+    for (size_t i = 0; i < 9; ++i)
+        for (size_t j = 0; j < 9; ++j) {
+            const float dx = points.elem(i, 0) - points.elem(j, 0), dy = points.elem(i, 1) - points.elem(j, 1);
+            distances.push_back(dx * dx + dy * dy);
+        }
+    std::sort(distances.begin(), distances.end());
+    const float expected = std::sqrt(.5f * distances[distances.size() / 2]);
+    require(std::abs(comp_med(Matrix<D>(points)) - expected) < 1e-4f * (1 + expected), "comp_med median distance");
+
+    // Ties mark every maximal entry, on every backend, for both layouts.
+    Matrix<float> scores("scores", 3, 4);
+    for (size_t j = 0; j < 4; ++j)
+        for (size_t i = 0; i < 3; ++i) scores.elem(i, j) = float((i * 5 + j * 3) % 4);
+    scores.elem(0, 2) = scores.elem(2, 2) = 7.f;
+    const auto expected_one_hot = predict_one_hot(scores);
+    Matrix<float> scores_storage("scores storage", 4, 3);
+    for (size_t j = 0; j < 4; ++j)
+        for (size_t i = 0; i < 3; ++i) scores_storage.elem(j, i) = scores.elem(i, j);
+    close(host(predict_one_hot(Matrix<D>(scores))), expected_one_hot, "predict_one_hot", 0);
+    close(host(predict_one_hot(Matrix<D>(scores_storage).T())), expected_one_hot, "transposed predict_one_hot", 0);
 }
 
 template<class D> void checks(const char* backend) {
-    column_max_and_clamp_checks<D>();
+    utility_checks<D>();
     mse_checks<D>();
     softmax_ce_checks<D>();
     masked_ce_checks<D>();

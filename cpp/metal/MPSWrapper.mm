@@ -5,6 +5,7 @@
 #include "MPSWrapper.h"
 #include <iostream>
 #include <map>
+#include <string>
 #include <tuple>
 #include <vector>
 
@@ -45,6 +46,7 @@ static id<MTLComputePipelineState> layernormJvpPipelineState = nil;
 static id<MTLComputePipelineState> reluBackwardPipelineState = nil;
 static id<MTLComputePipelineState> columnMaxPipelineState = nil;
 static id<MTLComputePipelineState> clampPipelineState = nil;
+static id<MTLComputePipelineState> stepPipelineState = nil;
 
 // MPS kernel objects are expensive to create and fully reusable across
 // encodes, so cache them by shape. Training loops repeat a handful of shapes,
@@ -174,6 +176,7 @@ void mpsInit() {
     id<MTLFunction> reluBackwardKernel = [defaultLibrary newFunctionWithName:@"relu_backward_inplace_kernel"];
     id<MTLFunction> columnMaxKernel = [defaultLibrary newFunctionWithName:@"column_max_kernel"];
     id<MTLFunction> clampKernel = [defaultLibrary newFunctionWithName:@"clamp_kernel"];
+    id<MTLFunction> stepKernel = [defaultLibrary newFunctionWithName:@"step_kernel"];
 
     // Create compute pipeline state
     zeroPipelineState = [device newComputePipelineStateWithFunction:zeroKernel error:&error];
@@ -211,7 +214,16 @@ void mpsInit() {
     reluBackwardPipelineState = [device newComputePipelineStateWithFunction:reluBackwardKernel error:&error];
     columnMaxPipelineState = [device newComputePipelineStateWithFunction:columnMaxKernel error:&error];
     clampPipelineState = [device newComputePipelineStateWithFunction:clampKernel error:&error];
+    stepPipelineState = [device newComputePipelineStateWithFunction:stepKernel error:&error];
 
+}
+
+const char* mpsDeviceName() {
+    static std::string name;
+    id<MTLDevice> d = device != nil ? device : MTLCreateSystemDefaultDevice();
+    name = d != nil ? [[d name] UTF8String] : "N/A";
+    if (device == nil && d != nil) [d release];
+    return name.c_str();
 }
 
 void mpsSetSeed(int seed) {
@@ -272,6 +284,7 @@ void mpsDestroy() {
     [reluBackwardPipelineState release];
     [columnMaxPipelineState release];
     [clampPipelineState release];
+    [stepPipelineState release];
     [commandQueue release];
     [device release];
     device = nil;
@@ -988,6 +1001,22 @@ void mpsClamp(const float* src, float* dst, int N, float lo, float hi) {
     [encoder setBytes:&hi length:sizeof(float) atIndex:3];
 
     NSUInteger tgs = clampPipelineState.maxTotalThreadsPerThreadgroup;
+    if (tgs > (NSUInteger)N) tgs = N;
+    [encoder dispatchThreads:MTLSizeMake(N, 1, 1) threadsPerThreadgroup:MTLSizeMake(tgs, 1, 1)];
+
+    opEncoded();
+}
+
+void mpsStep(const float* src, float* dst, int N, float threshold) {
+    if (N <= 0) return;
+    id<MTLComputeCommandEncoder> encoder = currentComputeEncoder();
+
+    [encoder setComputePipelineState:stepPipelineState];
+    [encoder setBuffer:bufferMap[(float*)src] offset:0 atIndex:0];
+    [encoder setBuffer:bufferMap[dst] offset:0 atIndex:1];
+    [encoder setBytes:&threshold length:sizeof(float) atIndex:2];
+
+    NSUInteger tgs = stepPipelineState.maxTotalThreadsPerThreadgroup;
     if (tgs > (NSUInteger)N) tgs = N;
     [encoder dispatchThreads:MTLSizeMake(N, 1, 1) threadsPerThreadgroup:MTLSizeMake(tgs, 1, 1)];
 

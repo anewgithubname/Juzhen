@@ -2778,6 +2778,14 @@ template<class D> Matrix<D> backward(const std::list<Layer<D>*>& net, const Matr
 			auto mu  = sum(xs, 0) * invdim;                      // (1,N) shifted column means
 			auto xc  = xs - ones_d1 * mu;                        // (dim,N) centered
 			auto var = sum(hadmd(xc, xc), 0) * invdim;           // (1,N)
+#ifdef APPLE_SILICON
+			// Device ops instead of elemwise()'s host round trip on Metal.
+			if constexpr (std::is_same_v<D, MPSfloat>) {
+				auto inv = sqrt(std::move(var) + 1e-5f);
+				inv.eleminv(1.0);
+				cached_inv = std::move(inv);
+			} else
+#endif
 			cached_inv = elemwise(
 				[] __GPU_CPU__(float v) { return 1.0f / sqrtf(v + 1e-5f); }, std::move(var));
 			cached_xhat = hadmd(xc, ones_d1 * cached_inv);       // (dim,N) standardized
