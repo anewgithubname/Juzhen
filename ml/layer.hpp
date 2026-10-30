@@ -983,257 +983,24 @@ template<class D> Matrix<D> backward(const std::list<Layer<D>*>& net, const Matr
 		int batchN;
 		bool use_relu = true;
 
-		static inline size_t idx_chw(int c, int h, int w, int H, int W) {
-			return (size_t)c * (size_t)H * (size_t)W + (size_t)h * (size_t)W + (size_t)w;
-		}
-
-		static inline size_t idx_w_conv(int co, int ci, int kh, int kw, int Cin, int kH, int kW) {
-			return ((size_t)co * (size_t)Cin * (size_t)kH * (size_t)kW)
-				 + ((size_t)ci * (size_t)kH * (size_t)kW)
-				 + ((size_t)kh * (size_t)kW)
-				 + (size_t)kw;
-		}
-
-		Matrix<D> make_im2col(const Matrix<D>& input) const {
-			const int K = C_in * kH * kW;
-			const int P = H_out * W_out;
-			Matrix<D> col("conv_im2col", K, P * batchN);
-			col.zeros();
-
-			for (int n = 0; n < batchN; ++n) {
-				for (int oh = 0; oh < H_out; ++oh) {
-					for (int ow = 0; ow < W_out; ++ow) {
-						const int patch_col = n * P + oh * W_out + ow;
-						for (int ci = 0; ci < C_in; ++ci) {
-							for (int kh_i = 0; kh_i < kH; ++kh_i) {
-								for (int kw_i = 0; kw_i < kW; ++kw_i) {
-									const int ih = oh * stride_h - pad_h + kh_i;
-									const int iw = ow * stride_w - pad_w + kw_i;
-									if (ih < 0 || ih >= H_in || iw < 0 || iw >= W_in) continue;
-									const int row = (ci * kH + kh_i) * kW + kw_i;
-									col.elem(row, patch_col) = input.elem(idx_chw(ci, ih, iw, H_in, W_in), n);
-								}
-							}
-						}
-					}
-				}
-			}
-
-			return col;
-		}
-
-		Matrix<D> flatten_weights_2d(const Matrix<D>& w) const {
-			const int K = C_in * kH * kW;
-			Matrix<D> w2d("conv_w2d", C_out, K);
-			for (int co = 0; co < C_out; ++co) {
-				for (int ci = 0; ci < C_in; ++ci) {
-					for (int kh_i = 0; kh_i < kH; ++kh_i) {
-						for (int kw_i = 0; kw_i < kW; ++kw_i) {
-							const int col = (ci * kH + kh_i) * kW + kw_i;
-							w2d.elem(co, col) = w.elem(idx_w_conv(co, ci, kh_i, kw_i, C_in, kH, kW), 0);
-						}
-					}
-				}
-			}
-			return w2d;
-		}
-
-		Matrix<D> flatten_upstream(const Matrix<D>& t) const {
-			const int P = H_out * W_out;
-			Matrix<D> t2d("conv_t2d", C_out, P * batchN);
-			for (int n = 0; n < batchN; ++n) {
-				for (int co = 0; co < C_out; ++co) {
-					for (int oh = 0; oh < H_out; ++oh) {
-						for (int ow = 0; ow < W_out; ++ow) {
-							const int patch_col = n * P + oh * W_out + ow;
-							t2d.elem(co, patch_col) = t.elem(idx_chw(co, oh, ow, H_out, W_out), n);
-						}
-					}
-				}
-			}
-			return t2d;
-		}
-
-		Matrix<D> unpack_output_add_bias(const Matrix<D>& y2d, bool with_bias = true) const {
-			const int P = H_out * W_out;
-			Matrix<D> out("conv_out", C_out * P, batchN);
-			for (int n = 0; n < batchN; ++n) {
-				for (int co = 0; co < C_out; ++co) {
-					const float b = with_bias ? this->bias.elem(co, 0) : 0.0f;
-					for (int oh = 0; oh < H_out; ++oh) {
-						for (int ow = 0; ow < W_out; ++ow) {
-							const int patch_col = n * P + oh * W_out + ow;
-							out.elem(idx_chw(co, oh, ow, H_out, W_out), n) = y2d.elem(co, patch_col) + b;
-						}
-					}
-				}
-			}
-			return out;
-		}
-
-		Matrix<D> col2im(const Matrix<D>& dx_col) const {
-			const int P = H_out * W_out;
-			Matrix<D> dx("conv_dx", C_in * H_in * W_in, batchN);
-			dx.zeros();
-
-			for (int n = 0; n < batchN; ++n) {
-				for (int oh = 0; oh < H_out; ++oh) {
-					for (int ow = 0; ow < W_out; ++ow) {
-						const int patch_col = n * P + oh * W_out + ow;
-						for (int ci = 0; ci < C_in; ++ci) {
-							for (int kh_i = 0; kh_i < kH; ++kh_i) {
-								for (int kw_i = 0; kw_i < kW; ++kw_i) {
-									const int ih = oh * stride_h - pad_h + kh_i;
-									const int iw = ow * stride_w - pad_w + kw_i;
-									if (ih < 0 || ih >= H_in || iw < 0 || iw >= W_in) continue;
-									const int row = (ci * kH + kh_i) * kW + kw_i;
-									dx.elem(idx_chw(ci, ih, iw, H_in, W_in), n) += dx_col.elem(row, patch_col);
-								}
-							}
-						}
-					}
-				}
-			}
-
-			return dx;
-		}
-
-		Matrix<D> pack_weight_grad(const Matrix<D>& dW2d) const {
-			Matrix<D> dW("conv_dW", C_out * C_in * kH * kW, 1);
-			for (int co = 0; co < C_out; ++co) {
-				for (int ci = 0; ci < C_in; ++ci) {
-					for (int kh_i = 0; kh_i < kH; ++kh_i) {
-						for (int kw_i = 0; kw_i < kW; ++kw_i) {
-							const int col = (ci * kH + kh_i) * kW + kw_i;
-							dW.elem(idx_w_conv(co, ci, kh_i, kw_i, C_in, kH, kW), 0) = dW2d.elem(co, col);
-						}
-					}
-				}
-			}
-			return dW;
-		}
-
 		static float* ptr(const Matrix<D>& m) {
 			return const_cast<float*>(reinterpret_cast<const float*>(m.data()));
 		}
 
-		Matrix<float> make_im2col(const Matrix<float>& input) const {
-			const int K = C_in * kH * kW;
-			const int P = H_out * W_out;
-			Matrix<float> col("conv_im2col", K, P * batchN);
-			col.zeros();
-
-			for (int n = 0; n < batchN; ++n) {
-				for (int oh = 0; oh < H_out; ++oh) {
-					for (int ow = 0; ow < W_out; ++ow) {
-						const int patch_col = n * P + oh * W_out + ow;
-						for (int ci = 0; ci < C_in; ++ci) {
-							for (int kh = 0; kh < kH; ++kh) {
-								for (int kw = 0; kw < kW; ++kw) {
-									const int ih = oh * stride_h - pad_h + kh;
-									const int iw = ow * stride_w - pad_w + kw;
-									const int row = (ci * kH + kh) * kW + kw;
-									if (ih >= 0 && ih < H_in && iw >= 0 && iw < W_in) {
-										col.elem(row, patch_col) = input.elem(idx_chw(ci, ih, iw, H_in, W_in), n);
-									}
-								}
-							}
-						}
-					}
-				}
-			}
-			return col;
+		// The (C_out*K x 1) weight vector is the row-major (C_out x K) filter
+		// matrix, so the GEMM operand is a zero-copy view of its storage (a
+		// vector has the same element order with or without a transpose flag).
+		Matrix<D> weights_2d() const {
+			const size_t K = size_t(C_in) * kH * kW;
+			if (this->weights.num_row() * this->weights.num_col() != size_t(C_out) * K)
+				throw std::invalid_argument("convolution weight size mismatch");
+			return Matrix<D>("conv_w2d", C_out, K, 0, this->weights.elements);
 		}
 
-		Matrix<float> flatten_weights_2d(const Matrix<float>& w) const {
-			const int K = C_in * kH * kW;
-			Matrix<float> w2d("conv_w2d", C_out, K);
-			for (int co = 0; co < C_out; ++co) {
-				for (int ci = 0; ci < C_in; ++ci) {
-					for (int kh = 0; kh < kH; ++kh) {
-						for (int kw = 0; kw < kW; ++kw) {
-							const int row = co;
-							const int col = (ci * kH + kh) * kW + kw;
-							w2d.elem(row, col) = w.elem(idx_w_conv(co, ci, kh, kw, C_in, kH, kW), 0);
-						}
-					}
-				}
-			}
-			return w2d;
-		}
-
-		Matrix<float> unflatten_output(const Matrix<float>& y2d, const Matrix<float>& b) const {
-			const int P = H_out * W_out;
-			Matrix<float> out("conv_out_host", C_out * P, batchN);
-			for (int n = 0; n < batchN; ++n) {
-				for (int co = 0; co < C_out; ++co) {
-					for (int oh = 0; oh < H_out; ++oh) {
-						for (int ow = 0; ow < W_out; ++ow) {
-							const int patch_col = n * P + oh * W_out + ow;
-							const size_t out_row = idx_chw(co, oh, ow, H_out, W_out);
-							out.elem(out_row, n) = y2d.elem(co, patch_col) + b.elem(co, 0);
-						}
-					}
-				}
-			}
-			return out;
-		}
-
-		Matrix<float> conv_input_grad_from_cols(const Matrix<float>& dx_col) const {
-			const int P = H_out * W_out;
-			Matrix<float> dx("conv_dx_host", C_in * H_in * W_in, batchN);
-			dx.zeros();
-
-			for (int n = 0; n < batchN; ++n) {
-				for (int oh = 0; oh < H_out; ++oh) {
-					for (int ow = 0; ow < W_out; ++ow) {
-						const int patch_col = n * P + oh * W_out + ow;
-						for (int ci = 0; ci < C_in; ++ci) {
-							for (int kh = 0; kh < kH; ++kh) {
-								for (int kw = 0; kw < kW; ++kw) {
-									const int ih = oh * stride_h - pad_h + kh;
-									const int iw = ow * stride_w - pad_w + kw;
-									if (ih < 0 || ih >= H_in || iw < 0 || iw >= W_in) continue;
-									const int row = (ci * kH + kh) * kW + kw;
-									dx.elem(idx_chw(ci, ih, iw, H_in, W_in), n) += dx_col.elem(row, patch_col);
-								}
-							}
-						}
-					}
-				}
-			}
-			return dx;
-		}
-
-		Matrix<float> flatten_upstream(const Matrix<float>& t) const {
-			const int P = H_out * W_out;
-			Matrix<float> t2d("conv_t2d", C_out, P * batchN);
-			for (int n = 0; n < batchN; ++n) {
-				for (int co = 0; co < C_out; ++co) {
-					for (int oh = 0; oh < H_out; ++oh) {
-						for (int ow = 0; ow < W_out; ++ow) {
-							const int patch_col = n * P + oh * W_out + ow;
-							t2d.elem(co, patch_col) = t.elem(idx_chw(co, oh, ow, H_out, W_out), n);
-						}
-					}
-				}
-			}
-			return t2d;
-		}
-
-		Matrix<float> pack_weight_grad(const Matrix<float>& dW2d) const {
-			Matrix<float> dW("conv_dW_host", C_out * C_in * kH * kW, 1);
-			for (int co = 0; co < C_out; ++co) {
-				for (int ci = 0; ci < C_in; ++ci) {
-					for (int kh = 0; kh < kH; ++kh) {
-						for (int kw = 0; kw < kW; ++kw) {
-							const int col = (ci * kH + kh) * kW + kw;
-							dW.elem(idx_w_conv(co, ci, kh, kw, C_in, kH, kW), 0) = dW2d.elem(co, col);
-						}
-					}
-				}
-			}
-			return dW;
+		// Inverse view for the (C_out x K) weight-gradient GEMM result, which
+		// dot() always returns untransposed.
+		Matrix<D> weight_grad_vector(const Matrix<D>& dW2d) const {
+			return Matrix<D>("conv_dW", dW2d.num_row() * dW2d.num_col(), 1, 0, dW2d.elements);
 		}
 
 		bool has_forward = false;
@@ -1280,8 +1047,6 @@ template<class D> Matrix<D> backward(const std::list<Layer<D>*>& net, const Matr
 		void eval(const Matrix<D>& input) override {
 			has_forward = false;
 			check_input(input);
-			auto wh = this->weights.to_host();
-			auto w2d_h = flatten_weights_2d(wh);
 
 			const int K = C_in * kH * kW;
 			const int P = H_out * W_out;
@@ -1289,7 +1054,7 @@ template<class D> Matrix<D> backward(const std::list<Layer<D>*>& net, const Matr
 			mpsIm2col(ptr(input), ptr(col), batchN, C_in, H_in, W_in,
 			          kH, kW, pad_h, pad_w, stride_h, stride_w, H_out, W_out);
 
-			Matrix<D> w2d(w2d_h);
+			const Matrix<D> w2d = weights_2d();
 			Matrix<D> y2d = w2d * col;
 			Matrix<D> out("conv_out", C_out * P, batchN);
 			mpsConv2dOutputAddBias(ptr(y2d), ptr(this->bias), ptr(out), batchN, C_out, H_out, W_out);
@@ -1307,8 +1072,6 @@ template<class D> Matrix<D> backward(const std::list<Layer<D>*>& net, const Matr
 			check_input(input);
 			check_input(tangent);
 			check_cached_activation();
-			auto wh = this->weights.to_host();
-			auto w2d_h = flatten_weights_2d(wh);
 
 			const int K = C_in * kH * kW;
 			const int P = H_out * W_out;
@@ -1316,7 +1079,7 @@ template<class D> Matrix<D> backward(const std::list<Layer<D>*>& net, const Matr
 			mpsIm2col(ptr(tangent), ptr(col), batchN, C_in, H_in, W_in,
 			          kH, kW, pad_h, pad_w, stride_h, stride_w, H_out, W_out);
 
-			Matrix<D> w2d(w2d_h);
+			const Matrix<D> w2d = weights_2d();
 			Matrix<D> y2d = w2d * col;
 			Matrix<D> out("conv_jvp", C_out * P, batchN);
 			Matrix<D> zero_bias = Matrix<D>::zeros(C_out, 1);
@@ -1347,8 +1110,6 @@ template<class D> Matrix<D> backward(const std::list<Layer<D>*>& net, const Matr
 				? hadmd(d_relu(Matrix<D>(this->val)), std::move(upstream_grad))
 				: std::move(upstream_grad);
 
-			auto wh = this->weights.to_host();
-			auto w2d_h = flatten_weights_2d(wh);
 
 			const int K = C_in * kH * kW;
 			const int P = H_out * W_out;
@@ -1360,7 +1121,7 @@ template<class D> Matrix<D> backward(const std::list<Layer<D>*>& net, const Matr
 			Matrix<D> t2d("conv_t2d", C_out, P * batchN);
 			mpsPackFeatureMap2D(ptr(t), ptr(t2d), batchN, C_out, P);
 
-			Matrix<D> w2d(w2d_h);
+			const Matrix<D> w2d = weights_2d();
 			Matrix<D> dW2d = t2d * col.T();
 			Matrix<D> dx_col = w2d.T() * t2d;
 			Matrix<D> dx("conv_dx", C_in * H_in * W_in, batchN);
@@ -1368,10 +1129,9 @@ template<class D> Matrix<D> backward(const std::list<Layer<D>*>& net, const Matr
 			          kH, kW, pad_h, pad_w, stride_h, stride_w, H_out, W_out);
 
 			Matrix<D> db = sum(t2d, 1);
-			auto dW2d_h = dW2d.to_host();
 
 			if (this->need_update) {
-				this->add_parameter_gradients(Matrix<D>(pack_weight_grad(dW2d_h)), std::move(db));
+				this->add_parameter_gradients(weight_grad_vector(dW2d), std::move(db));
 			}
 
 			return dx;
