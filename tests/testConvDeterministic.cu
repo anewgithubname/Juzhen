@@ -1,6 +1,7 @@
 // Independent scalar oracle, bitwise replay, and process-restart coverage.
 #include "../cpp/juzhen.hpp"
 #include "../ml/checkpoint.hpp"
+#include "../ml/optimizer.hpp"
 #include <chrono>
 #include <cstring>
 #include <fstream>
@@ -103,16 +104,17 @@ static void fixture(const Shape& s,bool trans) {
     Matrix<float> first_y,first_dx,first_jvp;
     for(int mode:{-1,0,1}) for(int repeat=0;repeat<(mode==1?10:1);++repeat) {
         auto a=layer(s,trans,mode);a->W()=Matrix<D>(w);a->b()=Matrix<D>(b);
+        AdamWOptions options;options.weight_decay=0;AdamW<D> optimizer(a->parameters(),options);
         Matrix<D> input(x);a->eval(input);auto y=host(a->value());
-        auto jvp=host(a->jvp(input,input));auto dx=host(a->backward_update(input,Matrix<D>(g)));
+        auto jvp=host(a->jvp(input,input));auto dx=host(a->backward(input,Matrix<D>(g)));
+        auto dw=host(optimizer.parameters()[0].grad()),db=host(optimizer.parameters()[1].grad());
+        optimizer.step();
         auto state=snapshot(*a);
         if(repeat==0) {
             std::string tag=std::string(trans?"transpose":"conv")+" mode="+std::to_string(mode);
             close(y,ref.y,tag+" y");close(dx,ref.dx,tag+" dx");
-            // First Adam moment exposes the raw parameter gradient without
-            // relying on Adam's approximately sign-only first weight update.
-            close(host(a->adamWstate().m)/(1-a->adamWstate().beta1),ref.dw,tag+" dw");
-            close(host(a->adambstate().m)/(1-a->adambstate().beta1),ref.db,tag+" db");
+            close(dw,ref.dw,tag+" dw");
+            close(db,ref.db,tag+" db");
             auto tangent=oracle(s,trans,x,w,Matrix<float>::zeros(s.co,1),g).y;
             // Oracle tangent must use the original forward activation mask.
             if(s.relu) {
@@ -146,9 +148,11 @@ static void restart(const std::string& phase,const std::filesystem::path& out) {
     s.ci=4;s.co=3;s.relu=false;auto b=layer(s,true,1);
     std::list<Layer<D>*> net={b.get(),a.get()};TrainingProgress p;std::string why;
     if(phase=="resume") require(load_checkpoint(net,(out/"split.ckpt").string(),p,&why),why);
+    AdamWOptions options;options.weight_decay=0;AdamW<D> optimizer(Juzhen::parameters(net),options);
     for(;p.step<8;++p.step) {
         Matrix<D> x(values(3*11*13,2,float(p.step))),g(values(3*11*13,2,float(p.step)+2));
-        a->eval(x);b->eval(a->value());auto dx=b->backward_update(a->value(),std::move(g));a->backward_update(x,std::move(dx));
+        optimizer.zero_grad();a->eval(x);b->eval(a->value());
+        Juzhen::backward(net,x,std::move(g));optimizer.step();
         if(phase=="prepare"&&p.step==2) {auto saved=p;saved.step=3;require(save_checkpoint(net,(out/"split.ckpt").string(),saved,&why),why);}
     }
     auto file=out/(phase=="prepare"?"continuous.ckpt":"resumed.ckpt");
@@ -168,11 +172,11 @@ static void bench() {
             auto a=layer(s,trans,mode);Matrix<D> x(values(s.ci*s.h*s.w,s.n,.2f));
             auto g=values(s.co*oh(s,trans)*ow(s,trans),s.n,.7f);
             std::list<Layer<D>*> net={a.get()};freeze(net);
-            for(int i=0;i<20;++i) {a->eval(x);a->backward_update(x,Matrix<D>(g));}device_sync();
+            for(int i=0;i<20;++i) {a->eval(x);a->backward(x,Matrix<D>(g));}device_sync();
             std::vector<double> samples;
             for(int round=0;round<5;++round) {
                 auto begin=std::chrono::steady_clock::now();
-                for(int i=0;i<40;++i) {a->eval(x);a->backward_update(x,Matrix<D>(g));}device_sync();
+                for(int i=0;i<40;++i) {a->eval(x);a->backward(x,Matrix<D>(g));}device_sync();
                 samples.push_back(std::chrono::duration<double,std::milli>(std::chrono::steady_clock::now()-begin).count()/40);
             }
             std::sort(samples.begin(),samples.end());

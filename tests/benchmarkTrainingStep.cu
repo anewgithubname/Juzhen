@@ -1,6 +1,7 @@
 /** End-to-end Transformer forward + backward + Adam update benchmark. */
 #include "../cpp/juzhen.hpp"
 #include "../ml/layer.hpp"
+#include "../ml/optimizer.hpp"
 #include <algorithm>
 #include <chrono>
 #include <cstdlib>
@@ -68,14 +69,18 @@ int compute() {
 #if defined(CUDA)
     GPUSampler sampler(42); size_t free_before=0,total=0; CudaErrorCheck(cudaMemGetInfo(&free_before,&total));
 #endif
-    TransformerLayer<Backend> layer(d,dk,ff,seq,batch,heads,true); layer.set_lr(1e-4f);
+    TransformerLayer<Backend> layer(d,dk,ff,seq,batch,heads,true);
+    AdamWOptions options; options.lr=1e-4f; options.weight_decay=0;
+    AdamW<Backend> optimizer(layer.parameters(),options);
     auto input=Matrix<Backend>::randn(d,seq*batch);
     auto upstream_seed=Matrix<Backend>::randn(d,seq*batch);
     auto step=[&] {
+        optimizer.zero_grad();
         layer.eval(input);
         auto upstream=Matrix<Backend>(upstream_seed);
-        auto dx=layer.backward_update(input,std::move(upstream));
+        auto dx=layer.backward(input,std::move(upstream));
         (void)dx;
+        optimizer.step();
     };
     for(int i=0;i<warmup;++i) step();
 #if defined(ROCM_HIP)

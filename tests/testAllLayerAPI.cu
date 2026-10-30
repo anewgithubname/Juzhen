@@ -71,30 +71,6 @@ template<class T> static void empty_matrix_checks() {
     moved_into=Matrix<T>(fixture*-.5f);close(host(moved_into),fixture*-.5f,"empty matrix reused after move assignment",0);
 }
 
-// With decay disabled, deferred Adam uses the layer's original Adam states.
-// Check more than the first update: an incorrect gradient's magnitude can be
-// hidden by Adam's approximately sign-only first update.
-static void legacy_equivalence(Layer<D>& legacy,Layer<D>& deferred,const Matrix<float>& xh,
-                               const Matrix<float>& gh,const std::string& tag) {
-    deferred.W()=Matrix<D>(legacy.W());deferred.b()=Matrix<D>(legacy.b());
-    auto refs=deferred.parameters();require(refs.size()==2,tag+" parameter registration");
-    AdamWOptions settings;settings.weight_decay=0;AdamW<D> optimizer(refs,settings);
-    for(int step=0;step<4;++step) {
-        Matrix<D> x(xh);auto gh_step=gh*(1.f+.1f*step);
-        legacy.eval(x);deferred.eval(x);optimizer.zero_grad();
-        const auto expected=host(legacy.backward_update(x,Matrix<D>(gh_step)));
-        const auto got=host(deferred.backward(x,Matrix<D>(gh_step)));
-        close(got,expected,tag+" legacy dx");require(optimizer.step()==2,tag+" two Adam updates");
-        close(host(deferred.W()),host(legacy.W()),tag+" legacy W",3e-6f);
-        close(host(deferred.b()),host(legacy.b()),tag+" legacy b",3e-6f);
-        for(auto pair:{std::pair{&deferred.adamWstate(),&legacy.adamWstate()},
-                       std::pair{&deferred.adambstate(),&legacy.adambstate()}}) {
-            require(pair.first->iteration==pair.second->iteration,tag+" legacy Adam iteration");
-            close(host(pair.first->m),host(pair.second->m),tag+" legacy first moment",3e-6f);
-            close(host(pair.first->v),host(pair.second->v),tag+" legacy second moment",3e-6f);
-        }
-    }
-}
 static void accumulation_and_freeze(Layer<D>& layer,const Matrix<float>& xh,const Matrix<float>& gh,
                                     const Matrix<float>& expected_dx,const std::string& tag) {
     auto refs=layer.parameters();AdamWOptions options;options.weight_decay=0;
@@ -138,9 +114,6 @@ static void dense_checks(bool relu_activation) {
     close(host(a->W()),w,"dense backward preserves W",0);close(host(a->b()),b,"dense backward preserves b",0);
     require(refs[0].state->iteration==1,"dense backward preserves Adam");
     accumulation_and_freeze(*a,x,g,dx,"dense");
-    std::unique_ptr<Layer<D>> old=relu_activation?std::unique_ptr<Layer<D>>(new ReluLayer<D>(no,ni,batch)):
-        std::make_unique<Layer<D>>(no,ni,batch);
-    old->W()=Matrix<D>(w);old->b()=Matrix<D>(b);legacy_equivalence(*old,*a,x,g,"dense");
     rejects([&]{a->backward(input,Matrix<D>::ones(no+1,batch));},"dense gradient shape");
 }
 static void logistic_checks() {
@@ -202,7 +175,7 @@ static ConvOracle scalar_conv(const Shape& s,bool trans,const Matrix<float>& x,c
     for(int i=0;i<nw;++i)r.dw.elem(i,0)=float(dw[i]);for(int i=0;i<s.co;++i)r.db.elem(i,0)=float(db[i]);return r;
 }
 static void convolution_checks(const Shape& s,bool trans) {
-    auto a=convolution(s,trans),old=convolution(s,trans);
+    auto a=convolution(s,trans);
     auto w=values(s.ci*s.co*s.kh*s.kw,1,.3f),b=values(s.co,1,.7f),x=values(s.ci*s.h*s.w,s.n,.2f),
          g=values(s.co*out_h(s,trans)*out_w(s,trans),s.n,1.4f);
     auto expected=scalar_conv(s,trans,x,w,b,g);a->W()=Matrix<D>(w);a->b()=Matrix<D>(b);
@@ -220,7 +193,6 @@ static void convolution_checks(const Shape& s,bool trans) {
     close(host(a->adambstate().m),old_bm,"convolution pure backward bias first moment",0);
     close(host(a->adambstate().v),old_bv,"convolution pure backward bias second moment",0);
     accumulation_and_freeze(*a,x,g,expected.dx,trans?"transpose":"convolution");
-    old->W()=Matrix<D>(w);old->b()=Matrix<D>(b);legacy_equivalence(*old,*a,x,g,trans?"transpose":"convolution");
     for(auto& p:refs)p.zero_grad();
     rejects([&]{a->backward(input,Matrix<D>::ones(g.num_row()+1,g.num_col()));},"convolution upstream shape");
     rejects([&]{a->backward(Matrix<D>::ones(x.num_row()+1,x.num_col()),Matrix<D>(g));},"convolution backward input shape");
@@ -240,7 +212,6 @@ static void convolution_checks(const Shape& s,bool trans) {
     a->eval(input);
     rejects([&]{a->jvp(input,transposed_input);},"GPU convolution transposed tangent");
     rejects([&]{a->backward(input,Matrix<D>(transposed_output));},"GPU convolution transposed upstream");
-    rejects([&]{a->backward_update(input,Matrix<D>(transposed_output));},"GPU convolution transposed updating upstream");
     a->W()=Matrix<D>::zeros(1,before_w.num_row()).T();
     rejects([&]{a->eval(input);},"GPU convolution transposed weights");a->W()=Matrix<D>(before_w);
     a->b()=Matrix<D>::zeros(1,before_b.num_row()).T();
@@ -342,23 +313,6 @@ static void normalization_checks() {
     close(host(standalone.gamma),host(network_layer.gamma),"standalone/Sequential normalization updated gamma",0);
     close(host(standalone.beta),host(network_layer.beta),"standalone/Sequential normalization updated beta",0);
 
-    LayerNormLayer<D> legacy(features,batch),deferred(features,batch);
-    for(auto* n:{&legacy,&deferred}) {n->gamma=Matrix<D>(gamma);n->beta=Matrix<D>(beta);}
-    AdamWOptions settings;settings.weight_decay=0;AdamW<D> separate(deferred.parameters(),settings);
-    for(int step=0;step<4;++step) {
-        legacy.eval(input);deferred.eval(input);separate.zero_grad();
-        const auto expected=host(legacy.backward_update(input,Matrix<D>(dy)));
-        close(host(deferred.backward(input,Matrix<D>(dy))),expected,"normalization legacy dx");
-        require(separate.step()==2,"normalization separate Adam step");
-        close(host(deferred.gamma),host(legacy.gamma),"normalization legacy gamma",3e-6f);
-        close(host(deferred.beta),host(legacy.beta),"normalization legacy beta",3e-6f);
-        for(auto pair:{std::pair{&deferred.adam_g,&legacy.adam_g},
-                       std::pair{&deferred.adam_b,&legacy.adam_b}}) {
-            require(pair.first->iteration==pair.second->iteration,"normalization legacy iteration");
-            close(host(pair.first->m),host(pair.second->m),"normalization legacy first moment",3e-6f);
-            close(host(pair.first->v),host(pair.second->v),"normalization legacy second moment",3e-6f);
-        }
-    }
     LayerNormLayer<D> frozen_direct(features,batch);frozen_direct.gamma=Matrix<D>(gamma);frozen_direct.beta=Matrix<D>(beta);
     auto frozen_refs=frozen_direct.parameters();std::list<Layer<D>*> frozen_net{&frozen_direct};
     const auto frozen_gm=host(frozen_direct.adam_g.m),frozen_gv=host(frozen_direct.adam_g.v),
@@ -366,15 +320,15 @@ static void normalization_checks() {
     for(int freeze_mode=0;freeze_mode<3;++freeze_mode) {
         frozen_direct.trainable=freeze_mode!=0;unfreeze(frozen_net);if(freeze_mode==1)freeze(frozen_net);
         frozen_direct.forward(input);
-        close(host(frozen_direct.backward_update(Matrix<D>(dy),freeze_mode!=2)),dx,"direct normalization frozen legacy dx",1e-4f);
+        close(host(frozen_direct.backward(Matrix<D>(dy),freeze_mode!=2)),dx,"direct normalization frozen dx",1e-4f);
         close(host(frozen_direct.gamma),gamma,"direct normalization frozen gamma",0);
         close(host(frozen_direct.beta),beta,"direct normalization frozen beta",0);
         close(host(frozen_direct.adam_g.m),frozen_gm,"direct normalization frozen gamma first moment",0);
         close(host(frozen_direct.adam_g.v),frozen_gv,"direct normalization frozen gamma second moment",0);
         close(host(frozen_direct.adam_b.m),frozen_bm,"direct normalization frozen beta first moment",0);
         close(host(frozen_direct.adam_b.v),frozen_bv,"direct normalization frozen beta second moment",0);
-        require(frozen_direct.adam_g.iteration==1&&frozen_direct.adam_b.iteration==1,"direct normalization frozen legacy iteration");
-        for(auto& p:frozen_refs)require(!p.has_grad(),"direct normalization frozen legacy has no gradients");
+        require(frozen_direct.adam_g.iteration==1&&frozen_direct.adam_b.iteration==1,"direct normalization frozen iteration");
+        for(auto& p:frozen_refs)require(!p.has_grad(),"direct normalization frozen has no gradients");
     }
     rejects([&]{layer.jvp(input,Matrix<D>::zeros(features+1,batch));},"normalization JVP shape");
     rejects([&]{layer.backward(input,Matrix<D>::zeros(features,batch+1));},"normalization backward shape");
@@ -390,7 +344,6 @@ static void normalization_checks() {
     rejects([&]{fresh.forward(Matrix<D>::zeros(features,batch+1));},"normalization invalid direct forward input");
     require(!fresh.has_forward,"normalization invalid direct forward discards old context");
     rejects([&]{fresh.backward(Matrix<D>(dy));},"normalization failed direct forward invalidates backward");
-    rejects([&]{fresh.backward_update(Matrix<D>(dy),true);},"normalization failed direct forward invalidates updating backward");
     rejects([&]{fresh.jvp(Matrix<D>(dy));},"normalization failed direct forward invalidates JVP");
 
     // Public normalization tensors must be validated before raw GPU kernels
@@ -412,7 +365,6 @@ static void normalization_checks() {
         }
         const std::string tag="normalization malformed tensor "+std::to_string(mutation);
         rejects([&]{malformed.backward(input,Matrix<D>(dy));},tag+" backward");
-        rejects([&]{malformed.backward_update(input,Matrix<D>(dy));},tag+" backward_update");
         rejects([&]{malformed.jvp(input,Matrix<D>(dy));},tag+" JVP");
         rejects([&]{malformed.eval(input);},tag+" eval");
         require(!malformed.has_forward,tag+" failed eval invalidates cache");
@@ -514,7 +466,7 @@ int compute() {
         for(const Shape& s:std::vector<Shape>{{2,2,5,7,3,3,2,1,1,false},{2,2,5,6,3,2,3,0,2,true}})
             for(bool trans:{false,true})convolution_checks(s,trans);
         classifier_check();
-        std::cout<<"PASS all-layer API: scalar/finite-difference gradients, accumulation, freeze, legacy Adam, normalization, CNN training\n";
+        std::cout<<"PASS all-layer API: scalar/finite-difference gradients, accumulation, freeze, normalization, CNN training\n";
         return 0;
     }catch(const std::exception& e){std::cerr<<"FAIL "<<e.what()<<'\n';return 1;}
 }

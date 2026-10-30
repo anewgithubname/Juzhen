@@ -61,7 +61,7 @@ static int check_input_gradient_fd(const std::string& name,
 
     layer.eval(Matrix<BackendT>(x_h));
     auto dx_h = as_host(
-        layer.backward_update(Matrix<BackendT>(x_h), Matrix<BackendT>(upstream_h)));
+        layer.backward(Matrix<BackendT>(x_h), Matrix<BackendT>(upstream_h)));
 
     Matrix<float> num("num_dx", x_h.num_row(), x_h.num_col());
     for (size_t c = 0; c < x_h.num_col(); ++c) {

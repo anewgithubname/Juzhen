@@ -1,5 +1,6 @@
-/** Regression: input gradients must use the weights of the forward pass. */
+/** Dense layers: input and parameter gradients, the optimizer update, and freezing. */
 #include "../ml/layer.hpp"
+#include "../ml/optimizer.hpp"
 #include <cmath>
 #include <iostream>
 #include <list>
@@ -45,27 +46,33 @@ static bool check(const std::string& name, int activation) {
     const auto expected_dx=w.T()*t, expected_dw=t*x.T(), expected_db=sum(t,1);
     Dense<D> layer(2,3,4);
     layer.W()=Matrix<D>(w); layer.b()=Matrix<D>(b);
-    layer.adamWstate().alpha=.08f; layer.adambstate().alpha=.08f;
+    AdamWOptions options; options.lr=.08f; options.weight_decay=0;
+    AdamW<D> optimizer(layer.parameters(),options);
+    const auto& refs=optimizer.parameters();
     Matrix<D> device_x(x);
     layer.eval(device_x);
-    auto dx=host(layer.backward_update(device_x,Matrix<D>(upstream)));
-    bool ok=close(dx,expected_dx,name+" training input gradient");
-    // Verify the update really happened, rather than masking the bug by freezing.
+    auto dx=host(layer.backward(device_x,Matrix<D>(upstream)));
+    bool ok=close(dx,expected_dx,name+" input gradient");
+    ok = close(host(refs[0].grad()),expected_dw,name+" weight gradient") && ok;
+    ok = close(host(refs[1].grad()),expected_db,name+" bias gradient") && ok;
+    ok = close(host(layer.W()),w,name+" backward leaves weights unchanged",0) && ok;
+    // The optimizer step must really move the weights.
+    ok = optimizer.step()==2 && layer.adamWstate().iteration==2 && ok;
     const auto changed=host(layer.W()); float movement=0;
     for(size_t c=0;c<w.num_col();++c) for(size_t r=0;r<w.num_row();++r)
         movement=std::max(movement,std::fabs(changed.elem(r,c)-w.elem(r,c)));
-    ok = movement>.05f && layer.adamWstate().iteration==2 && ok;
-    ok = close(host(layer.adamWstate().m)/(1-layer.adamWstate().beta1),expected_dw,name+" weight gradient") && ok;
-    ok = close(host(layer.adambstate().m)/(1-layer.adambstate().beta1),expected_db,name+" bias gradient") && ok;
+    ok = movement>.05f && ok;
 
-    // Frozen backward must preserve both parameter values and optimizer state.
+    // Frozen backward must collect nothing and leave parameters and optimizer state alone.
     layer.W()=Matrix<D>(w); layer.b()=Matrix<D>(b);
     std::list<Layer<D>*> net={&layer}; freeze(net);
+    optimizer.zero_grad();
     const auto before_m=host(layer.adamWstate().m),before_v=host(layer.adamWstate().v);
     const int before_iter=layer.adamWstate().iteration;
     layer.eval(device_x);
-    auto frozen_dx=host(layer.backward_update(device_x,Matrix<D>(upstream)));
+    auto frozen_dx=host(layer.backward(device_x,Matrix<D>(upstream)));
     ok = close(frozen_dx,expected_dx,name+" frozen input gradient") && ok;
+    ok = !refs[0].has_grad() && !refs[1].has_grad() && optimizer.step()==0 && ok;
     ok = close(host(layer.W()),w,name+" frozen weights",0) && ok;
     ok = close(host(layer.b()),b,name+" frozen bias",0) && ok;
     ok = close(host(layer.adamWstate().m),before_m,name+" frozen moment",0) && ok;

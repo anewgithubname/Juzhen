@@ -114,17 +114,7 @@ template<class D> void ordinary_loss_checks(bool use_sequential) {
     close(host(scaled_dx),dx*-.25f,"scaled upstream scales input gradient");
     for(size_t k=0;k<refs.size();++k)close(host(refs[k].grad()),first_gradients[k]*-.25f,"scaled upstream scales parameter gradient");
     optimizer.zero_grad();backward();
-    // Per-layer updating backward still agrees with separate Adam.
-    LinearLayer<D> old_hidden(2,2,batch),old_readout(2,2,batch);
-    old_hidden.W()=Matrix<D>(w1);old_hidden.b()=Matrix<D>(b1);
-    old_readout.W()=Matrix<D>(w2);old_readout.b()=Matrix<D>(b2);
-    std::list<Layer<D>*> old_net{&old_readout,&old_hidden};
-    auto old_dprediction=mse(Juzhen::forward(old_net,x),y).grad;
-    auto old_dx=old_hidden.backward_update(x,old_readout.backward_update(old_hidden.value(),std::move(old_dprediction)));
-    close(host(old_dx),dx,"updating network input gradient");
     require(optimizer.step()==4,"Adam updates only trainable layers");
-    const Matrix<D>* updated[]={&old_hidden.W(),&old_hidden.b(),&old_readout.W(),&old_readout.b()};
-    for(size_t k=0;k<refs.size();++k)close(host(*refs[k].value),host(*updated[k]),"ordinary loss legacy Adam parity",2e-6f);
     rejects([&]{mse(readout.value(),Matrix<D>::ones(1,batch));},"mse rejects a target of the wrong shape");
     UnadaptedLayer<D> unsupported(2,2,batch);std::list<Layer<D>*> bad{&readout,&unsupported};
     Sequential<D> bad_model(bad);optimizer.zero_grad();bad_model.eval(x);
@@ -141,17 +131,10 @@ template<class D> void ordinary_loss_checks(bool use_sequential) {
     rejects([&]{Sequential<D> reused{&hidden,&hidden};},"Sequential rejects repeated layer instance");
 }
 
-template<class D> void compatibility_and_errors() {
-    LinearLayer<D> legacy(3,2,4),explicit_layer(3,2,4);
-    explicit_layer.W()=Matrix<D>(legacy.W());explicit_layer.b()=Matrix<D>(legacy.b());
+template<class D> void freezing_and_errors() {
+    LinearLayer<D> explicit_layer(3,2,4);
     auto x=Matrix<D>::randn(2,4),up=Matrix<D>::randn(3,4);AdamWOptions settings;settings.weight_decay=0;
     AdamW<D> opt(explicit_layer.parameters(),settings);
-    for(int k=0;k<3;++k) {
-        legacy.eval(x);explicit_layer.eval(x);opt.zero_grad();
-        auto expected=legacy.backward_update(x,Matrix<D>(up));auto actual=explicit_layer.backward(x,Matrix<D>(up));
-        close(host(actual),host(expected),"legacy vs deferred input gradient");opt.step();
-        close(host(legacy.W()),host(explicit_layer.W()),"legacy vs deferred Adam",2e-6f);
-    }
     opt.zero_grad();std::list<Layer<D>*> net{&explicit_layer};freeze(net);
     auto before=host(explicit_layer.W());const int iteration=explicit_layer.adamWstate().iteration;
     explicit_layer.eval(x);explicit_layer.backward(x,Matrix<D>(up));require(opt.step()==0,"frozen parameters skipped");
@@ -390,7 +373,7 @@ template<class D> void suite(const char* backend) {
     require(empty.num_row()==0&&empty.num_col()==3,"empty tensor fill");
     ordinary_loss_checks<D>(false);
     ordinary_loss_checks<D>(true);
-    compatibility_and_errors<D>();
+    freezing_and_errors<D>();
     optimizer_math_checks<D>();
     clipping_checks<D>();
     normalization_checks<D>();

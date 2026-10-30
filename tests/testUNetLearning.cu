@@ -5,6 +5,7 @@
 
 #include "../cpp/juzhen.hpp"
 #include "../ml/layer.hpp"
+#include "../ml/optimizer.hpp"
 
 #include <algorithm>
 #include <chrono>
@@ -45,6 +46,14 @@ public:
     Matrix<BackendT> e2;
     Matrix<BackendT> c_cat;
 
+    AdamW<BackendT> optimizer;
+
+    static AdamWOptions plain_adam() {
+        AdamWOptions options;
+        options.weight_decay = 0;
+        return options;
+    }
+
     explicit TinyUNetLearner(int batch_size)
         : enc1(batch_size, 1, H, W, 8, 3, 3, 1, 1, true),
           enc2(batch_size, 8, H, W, 16, 3, 3, 1, 2, true),
@@ -53,18 +62,14 @@ public:
           head(batch_size, 8, H, W, 1, 3, 3, 1, 1, false),
           e1("e1", 8 * D, batch_size),
           e2("e2", 16 * (H / 2) * (W / 2), batch_size),
-          c_cat("cc", 16 * D, batch_size) {}
+          c_cat("cc", 16 * D, batch_size),
+          optimizer(Juzhen::parameters(layers()), plain_adam()) {}
 
     std::list<Layer<BackendT>*> layers() {
         return {&head, &dec1, &up1, &enc2, &enc1};
     }
 
-    void set_lr(float alpha) {
-        for (auto* layer : layers()) {
-            layer->adamWstate().alpha = alpha;
-            layer->adambstate().alpha = alpha;
-        }
-    }
+    void set_lr(float alpha) { optimizer.set_lr(alpha); }
 
     const Matrix<BackendT>& fwd(const Matrix<BackendT>& x) {
         enc1.eval(x);
@@ -78,16 +83,19 @@ public:
         return head.value();
     }
 
+    // backpropagate g through the skip connection, then take one Adam step
     void bwd(const Matrix<BackendT>& x, Matrix<BackendT>&& g) {
-        auto g2 = head.backward_update(dec1.value(), std::move(g));
-        auto g_cat = dec1.backward_update(c_cat, std::move(g2));
+        optimizer.zero_grad();
+        auto g2 = head.backward(dec1.value(), std::move(g));
+        auto g_cat = dec1.backward(c_cat, std::move(g2));
         const size_t up_sz = 8ULL * D;
         auto g_up = g_cat.rows(0, up_sz);
         auto g_skip = g_cat.rows(up_sz, g_cat.num_row());
-        auto g_e2 = up1.backward_update(e2, std::move(g_up));
-        auto g_e1 = enc2.backward_update(e1, std::move(g_e2));
+        auto g_e2 = up1.backward(e2, std::move(g_up));
+        auto g_e1 = enc2.backward(e1, std::move(g_e2));
         auto g_inp = g_e1 + g_skip;
-        enc1.backward_update(x, std::move(g_inp));
+        enc1.backward(x, std::move(g_inp));
+        optimizer.step();
     }
 };
 

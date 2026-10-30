@@ -5,6 +5,7 @@
 
 #include "../cpp/juzhen.hpp"
 #include "../ml/layer.hpp"
+#include "../ml/optimizer.hpp"
 
 #include <algorithm>
 #include <cmath>
@@ -136,6 +137,24 @@ static Matrix<float> make_time_row(int batch_size, int iter, int total_iters) {
     return t;
 }
 
+// Plain Adam step for the CPU reference layers, written out independently of
+// the library optimizer so the two implementations are compared.
+static void reference_adam_step(Matrix<float>& param, const Matrix<float>& grad, adam_state<float>& s) {
+    const double bc1 = 1.0 / (1.0 - std::pow(double(s.beta1), double(s.iteration)));
+    const double bc2 = 1.0 / (1.0 - std::pow(double(s.beta2), double(s.iteration)));
+    for (size_t c = 0; c < param.num_col(); ++c) {
+        for (size_t r = 0; r < param.num_row(); ++r) {
+            const float g = grad.elem(r, c);
+            const float m = s.beta1 * s.m.elem(r, c) + (1.0f - s.beta1) * g;
+            const float v = s.beta2 * s.v.elem(r, c) + (1.0f - s.beta2) * g * g;
+            s.m.elem(r, c) = m;
+            s.v.elem(r, c) = v;
+            param.elem(r, c) -= float(s.alpha * (m * bc1) / (std::sqrt(v * bc2) + s.eps));
+        }
+    }
+    ++s.iteration;
+}
+
 struct CpuConvLayer {
     int N, Cin, H, W, Cout, kH, kW, pad, stride, Hout, Wout;
     bool use_relu;
@@ -184,7 +203,7 @@ struct CpuConvLayer {
         return val;
     }
 
-    Matrix<float> backward_update(const Matrix<float>& x, Matrix<float>&& upstream) {
+    Matrix<float> backward_step(const Matrix<float>& x, Matrix<float>&& upstream) {
         Matrix<float> t(upstream);
         if (use_relu) {
             for (size_t c = 0; c < t.num_col(); ++c) {
@@ -224,8 +243,8 @@ struct CpuConvLayer {
             }
         }
 
-        Wm -= adam_update(std::move(dW), adamW);
-        bm -= adam_update(std::move(db), adamb);
+        reference_adam_step(Wm, dW, adamW);
+        reference_adam_step(bm, db, adamb);
         return dx;
     }
 };
@@ -294,7 +313,7 @@ struct CpuConvTransLayer {
         return val;
     }
 
-    Matrix<float> backward_update(const Matrix<float>& x, Matrix<float>&& upstream) {
+    Matrix<float> backward_step(const Matrix<float>& x, Matrix<float>&& upstream) {
         Matrix<float> t(upstream);
         if (use_relu) {
             for (size_t c = 0; c < t.num_col(); ++c) {
@@ -347,8 +366,8 @@ struct CpuConvTransLayer {
             }
         }
 
-        Wm -= adam_update(std::move(dW), adamW);
-        bm -= adam_update(std::move(db), adamb);
+        reference_adam_step(Wm, dW, adamW);
+        reference_adam_step(bm, db, adamb);
         return dx;
     }
 };
@@ -400,15 +419,15 @@ public:
     }
 
     void bwd(const Matrix<float>& x, Matrix<float>&& g) {
-        auto g2 = head.backward_update(dec1.val, std::move(g));
-        auto g_cat = dec1.backward_update(c_cat, std::move(g2));
+        auto g2 = head.backward_step(dec1.val, std::move(g));
+        auto g_cat = dec1.backward_step(c_cat, std::move(g2));
         const size_t up_sz = (size_t)C1 * (size_t)D;
         auto g_up = g_cat.rows(0, up_sz);
         auto g_skip = g_cat.rows(up_sz, g_cat.num_row());
-        auto g_e2 = up1.backward_update(e2, std::move(g_up));
-        auto g_e1 = enc2.backward_update(e1, std::move(g_e2));
+        auto g_e2 = up1.backward_step(e2, std::move(g_up));
+        auto g_e1 = enc2.backward_step(e1, std::move(g_e2));
         auto g_inp = g_e1 + g_skip;
-        enc1.backward_update(x, std::move(g_inp));
+        enc1.backward_step(x, std::move(g_inp));
     }
 };
 
@@ -431,6 +450,14 @@ public:
     Matrix<MPSfloat> e2;
     Matrix<MPSfloat> c_cat;
 
+    AdamW<MPSfloat> optimizer;
+
+    static AdamWOptions plain_adam() {
+        AdamWOptions options;
+        options.weight_decay = 0;
+        return options;
+    }
+
         explicit MpsTinyRectifiedUNet(int batch_size, int head_k = 3, int head_pad = 1)
         : enc1(batch_size, C0, H, W, C1, 3, 3, 1, 1, true),
           enc2(batch_size, C1, H, W, C2, 3, 3, 1, 2, true),
@@ -439,15 +466,14 @@ public:
                     head(batch_size, C1, H, W, 1, head_k, head_k, head_pad, 1, false),
           e1("e1", C1 * D, batch_size),
           e2("e2", C2 * (H / 2) * (W / 2), batch_size),
-          c_cat("cc", (C1 + C1) * D, batch_size) {}
+          c_cat("cc", (C1 + C1) * D, batch_size),
+          optimizer(Juzhen::parameters(layers()), plain_adam()) {}
 
-    void set_lr(float alpha) {
-        enc1.adamWstate().alpha = alpha; enc1.adambstate().alpha = alpha;
-        enc2.adamWstate().alpha = alpha; enc2.adambstate().alpha = alpha;
-        up1.adamWstate().alpha = alpha;  up1.adambstate().alpha = alpha;
-        dec1.adamWstate().alpha = alpha; dec1.adambstate().alpha = alpha;
-        head.adamWstate().alpha = alpha; head.adambstate().alpha = alpha;
+    std::list<Layer<MPSfloat>*> layers() {
+        return {&head, &dec1, &up1, &enc2, &enc1};
     }
+
+    void set_lr(float alpha) { optimizer.set_lr(alpha); }
 
     void copy_params_from(CpuTinyRectifiedUNet& src) {
         enc1.W() = Matrix<MPSfloat>(src.enc1.Wm); enc1.b() = Matrix<MPSfloat>(src.enc1.bm);
@@ -481,15 +507,17 @@ public:
     }
 
     void bwd(const Matrix<MPSfloat>& x, Matrix<MPSfloat>&& g) {
-        auto g2 = head.backward_update(dec1.value(), std::move(g));
-        auto g_cat = dec1.backward_update(c_cat, std::move(g2));
+        optimizer.zero_grad();
+        auto g2 = head.backward(dec1.value(), std::move(g));
+        auto g_cat = dec1.backward(c_cat, std::move(g2));
         const size_t up_sz = (size_t)C1 * (size_t)D;
         auto g_up = g_cat.rows(0, up_sz);
         auto g_skip = g_cat.rows(up_sz, g_cat.num_row());
-        auto g_e2 = up1.backward_update(e2, std::move(g_up));
-        auto g_e1 = enc2.backward_update(e1, std::move(g_e2));
+        auto g_e2 = up1.backward(e2, std::move(g_up));
+        auto g_e1 = enc2.backward(e1, std::move(g_e2));
         auto g_inp = g_e1 + g_skip;
-        enc1.backward_update(x, std::move(g_inp));
+        enc1.backward(x, std::move(g_inp));
+        optimizer.step();
     }
 };
 

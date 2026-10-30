@@ -91,20 +91,6 @@ constexpr int kThreadsPerBlock = 256;
 		y[idx] += b[idx % rows];
 	}
 
-
-__global__ void adam_update_kernel(float* g, float* m, float* v,
-                                   float alpha, float beta1, float beta2,
-                                   float eps, float bc1, float bc2, size_t n) {
-    size_t i = (size_t)blockIdx.x * blockDim.x + threadIdx.x;
-    if (i >= n) return;
-    const float gi = g[i];
-    const float mi = beta1 * m[i] + (1.0f - beta1) * gi;
-    const float vi = beta2 * v[i] + (1.0f - beta2) * gi * gi;
-    m[i] = mi;
-    v[i] = vi;
-    g[i] = alpha * (mi * bc1) / (sqrtf(vi * bc2) + eps);
-}
-
 // One block cooperates on a query row. Shared-memory reductions do not
 // assume a particular AMD wavefront size and support non-power-of-two seq.
 __global__ void SoftmaxRowsKernel(const float* x, float* y, int seq, bool causal) {
@@ -780,11 +766,6 @@ int RocmFill(float* dst_device, std::size_t count, float value) {
 		add_bias_kernel<<<blocks, threads>>>(y, b, rows, total);
 		return static_cast<int>(hipGetLastError());
 	}
-int Rocm_adam_update(float* g, float* m, float* v, float alpha, float beta1,
-                     float beta2, float eps, float bc1, float bc2, size_t n) {
-    adam_update_kernel<<<(n+255)/256,256>>>(g,m,v,alpha,beta1,beta2,eps,bc1,bc2,n);
-    return static_cast<int>(hipGetLastError());
-}
 
 #else
 
@@ -793,8 +774,6 @@ int Rocm_layernorm_forward(const float* x, const float* gamma, const float* beta
 int Rocm_layernorm_backward(const float* dy, const float* gamma, const float* xhat,
     const float* inv_std, float* dx, int dim, int N) { return -1; }
 int Rocm_add_bias(float* y, const float* b, int rows, size_t total) { return -1; }
-int Rocm_adam_update(float* g, float* m, float* v, float alpha, float beta1,
-    float beta2, float eps, float bc1, float bc2, size_t n) { return -1; }
 
 #endif
 

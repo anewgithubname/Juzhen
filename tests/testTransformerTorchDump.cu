@@ -24,6 +24,7 @@
 
 #include "../cpp/juzhen.hpp"
 #include "../ml/layer.hpp"
+#include "../ml/optimizer.hpp"
 
 #include <cstdio>
 #include <cstdlib>
@@ -84,7 +85,7 @@ int compute() {
     freeze(layers);   // keep weights fixed: dump must match what ran
     tf.eval(Matrix<BackendT>(x_h));
     auto out_h = as_host(tf.value());
-    auto dx_h  = as_host(tf.backward_update(Matrix<BackendT>(x_h), Matrix<BackendT>(g_h)));
+    auto dx_h  = as_host(tf.backward(Matrix<BackendT>(x_h), Matrix<BackendT>(g_h)));
     unfreeze(layers);
 
     const std::string path =
@@ -122,10 +123,15 @@ int compute() {
     fwrite("JZTRAIN1", 1, 8, fp);
     const int32_t steps = 3;
     fwrite(&steps, sizeof(steps), 1, fp);
-    tf.set_lr(1e-4f);
+    AdamWOptions options;
+    options.lr = 1e-4f;
+    options.weight_decay = 0;  // plain Adam, as the Python oracle expects
+    AdamW<BackendT> optimizer(tf.parameters(), options);
     for (int step = 0; step < steps; ++step) {
+        optimizer.zero_grad();
         tf.eval(Matrix<BackendT>(x_h));
-        tf.backward_update(Matrix<BackendT>(x_h), Matrix<BackendT>(g_h));
+        tf.backward(Matrix<BackendT>(x_h), Matrix<BackendT>(g_h));
+        optimizer.step();
         const auto params = tf.checkpoint_parameters();
         const auto opts = tf.checkpoint_optimizers();
         for (size_t i = 0; i < params.size(); ++i) {

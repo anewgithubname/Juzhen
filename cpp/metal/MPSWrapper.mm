@@ -38,7 +38,6 @@ static id<MTLComputePipelineState> softmaxBackwardRowsBatchedPipelineState = nil
 static id<MTLComputePipelineState> layernormForwardPipelineState = nil;
 static id<MTLComputePipelineState> layernormBackwardPipelineState = nil;
 static id<MTLComputePipelineState> addBiasPipelineState = nil;
-static id<MTLComputePipelineState> adamUpdatePipelineState = nil;
 
 // MPS kernel objects are expensive to create and fully reusable across
 // encodes, so cache them by shape. Training loops repeat a handful of shapes,
@@ -172,7 +171,6 @@ void mpsInit() {
     id<MTLFunction> layernormForwardKernel = [defaultLibrary newFunctionWithName:@"layernorm_forward_rm_kernel"];
     id<MTLFunction> layernormBackwardKernel = [defaultLibrary newFunctionWithName:@"layernorm_backward_rm_kernel"];
     id<MTLFunction> addBiasKernel = [defaultLibrary newFunctionWithName:@"add_bias_rm_kernel"];
-    id<MTLFunction> adamUpdateKernel = [defaultLibrary newFunctionWithName:@"adam_update_kernel"];
 
     // Create compute pipeline state
     zeroPipelineState = [device newComputePipelineStateWithFunction:zeroKernel error:&error];
@@ -203,7 +201,6 @@ void mpsInit() {
     layernormForwardPipelineState = [device newComputePipelineStateWithFunction:layernormForwardKernel error:&error];
     layernormBackwardPipelineState = [device newComputePipelineStateWithFunction:layernormBackwardKernel error:&error];
     addBiasPipelineState = [device newComputePipelineStateWithFunction:addBiasKernel error:&error];
-    adamUpdatePipelineState = [device newComputePipelineStateWithFunction:adamUpdateKernel error:&error];
 
 }
 
@@ -248,7 +245,6 @@ void mpsDestroy() {
     [layernormForwardPipelineState release];
     [layernormBackwardPipelineState release];
     [addBiasPipelineState release];
-    [adamUpdatePipelineState release];
     [commandQueue release];
     [device release];
     device = nil;
@@ -885,29 +881,6 @@ void mpsAddBias(float* y, const float* b, int N, int total) {
     MTLSize gridSize = MTLSizeMake(total, 1, 1);
     NSUInteger tgs = addBiasPipelineState.maxTotalThreadsPerThreadgroup;
     if (tgs > (NSUInteger)total) tgs = total;
-    [encoder dispatchThreads:gridSize threadsPerThreadgroup:MTLSizeMake(tgs, 1, 1)];
-
-    opEncoded();
-}
-
-void mpsAdamUpdate(float* g, float* m, float* v, float alpha, float beta1,
-                   float beta2, float eps, float bc1, float bc2, int n) {
-    id<MTLComputeCommandEncoder> encoder = currentComputeEncoder();
-
-    [encoder setComputePipelineState:adamUpdatePipelineState];
-    [encoder setBuffer:bufferMap[g] offset:0 atIndex:0];
-    [encoder setBuffer:bufferMap[m] offset:0 atIndex:1];
-    [encoder setBuffer:bufferMap[v] offset:0 atIndex:2];
-    [encoder setBytes:&alpha length:sizeof(float) atIndex:3];
-    [encoder setBytes:&beta1 length:sizeof(float) atIndex:4];
-    [encoder setBytes:&beta2 length:sizeof(float) atIndex:5];
-    [encoder setBytes:&eps length:sizeof(float) atIndex:6];
-    [encoder setBytes:&bc1 length:sizeof(float) atIndex:7];
-    [encoder setBytes:&bc2 length:sizeof(float) atIndex:8];
-
-    MTLSize gridSize = MTLSizeMake(n, 1, 1);
-    NSUInteger tgs = adamUpdatePipelineState.maxTotalThreadsPerThreadgroup;
-    if (tgs > (NSUInteger)n) tgs = n;
     [encoder dispatchThreads:gridSize threadsPerThreadgroup:MTLSizeMake(tgs, 1, 1)];
 
     opEncoded();

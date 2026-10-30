@@ -1,5 +1,6 @@
 #include "../cpp/juzhen.hpp"
 #include "../ml/checkpoint.hpp"
+#include "../ml/optimizer.hpp"
 #include <cmath>
 #include <iostream>
 #include <list>
@@ -16,10 +17,19 @@ using Backend=float;
 #endif
 template<class D> Matrix<float> h(const Matrix<D>& m) { if constexpr(std::is_same_v<D,float>) return m; else return m.to_host(); }
 
+// One plain Adam step (the layers' default learning rate, no weight decay)
+// on the network list, driven by the given upstream gradient.
+static void adam_step(const std::list<Layer<Backend>*>& net,const Matrix<Backend>& x,Matrix<Backend>&& upstream) {
+    AdamWOptions options; options.weight_decay=0;
+    AdamW<Backend> optimizer(Juzhen::parameters(net),options);
+    optimizer.zero_grad();
+    Juzhen::backward(net,x,std::move(upstream));
+    optimizer.step();
+}
 static void train_step(LinearLayer<Backend>& a,LinearLayer<Backend>& b) {
     auto xh=Matrix<float>::randn(5,4), gh=Matrix<float>::randn(3,4);
     Matrix<Backend> x(xh); a.eval(x); b.eval(a.value());
-    auto da=b.backward_update(a.value(),Matrix<Backend>(gh)); a.backward_update(x,std::move(da));
+    adam_step({&b,&a},x,Matrix<Backend>(gh));
 }
 static float error(const Matrix<Backend>& a,const Matrix<Backend>& b) {
     auto x=h(a),y=h(b); float e=0;
@@ -33,7 +43,7 @@ static float error(const Matrix<Backend>& a,const Matrix<Backend>& b) {
 }
 static void transformer_step(TransformerLayer<Backend>& layer) {
     auto xh=Matrix<float>::randn(8,8),gh=Matrix<float>::randn(8,8);
-    Matrix<Backend> x(xh); layer.eval(x); layer.backward_update(x,Matrix<Backend>(gh));
+    Matrix<Backend> x(xh); layer.eval(x); adam_step({&layer},x,Matrix<Backend>(gh));
 }
 static float layer_error(Layer<Backend>& a,Layer<Backend>& b) {
     float e=0; auto ap=a.checkpoint_parameters(),bp=b.checkpoint_parameters();

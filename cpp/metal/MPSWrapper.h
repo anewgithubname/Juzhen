@@ -62,9 +62,6 @@ void mpsLayerNormBackward(const float* dy, const float* gamma, const float* xhat
                           const float* invStd, float* dx, int dim, int N);
 // y[i, c] += b[i] over a (rows x N) matrix (total = rows * N elements).
 void mpsAddBias(float* y, const float* b, int N, int total);
-// Fused Adam step: updates m, v in place; g is rewritten with the update.
-void mpsAdamUpdate(float* g, float* m, float* v, float alpha, float beta1,
-                   float beta2, float eps, float bc1, float bc2, int n);
 void mpsRand(float* A, int N); // fill A with random numbers in [0, 1)
 void mpsRandn(float* A, int N); // fill A with random numbers
 void mpsFill(float* A, int N, float val); // fill A with zeros
