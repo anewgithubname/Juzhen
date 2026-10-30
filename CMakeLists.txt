@@ -342,7 +342,6 @@ GENERATE_PROJ(testCpuLinalg tests/testCpuLinalg.cu)
 GENERATE_PROJ(testJVP tests/testJVP.cu)
 GENERATE_PROJ(testAssignment tests/testAssignment.cu)
 GENERATE_PROJ(benchmarkAssignment tests/benchmarkAssignment.cu)
-# GENERATE_PROJ(wintest examples/demo_gui.cu)
 
 enable_testing()
 add_test(NAME assignment_correctness COMMAND testAssignment)
