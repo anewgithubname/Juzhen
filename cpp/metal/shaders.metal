@@ -690,3 +690,80 @@ kernel void adamw_kernel(
     v[vi] = second;
     w[wi] = w[wi] * (1 - p.lr * p.decay) - p.lr * (first * p.bc1) / (sqrt(second * p.bc2) + p.eps);
 }
+
+// ── fused kernels mirroring the CUDA fast paths ────────────────────────────
+// LayerNorm tangent for one column (gamma multiplies after the symmetric
+// standardization Jacobian):
+//   dy = gamma * inv * (dx - mean(dx) - xhat * mean(xhat * dx))
+kernel void layernorm_jvp_rm_kernel(
+    device const float* dx      [[buffer(0)]],
+    device const float* gamma   [[buffer(1)]],
+    device const float* xhat    [[buffer(2)]],
+    device const float* inv_std [[buffer(3)]],
+    device float* dy            [[buffer(4)]],
+    constant uint& dim          [[buffer(5)]],
+    constant uint& N            [[buffer(6)]],
+    uint c [[thread_position_in_grid]])
+{
+    if (c >= N) return;
+
+    float m1 = 0.0f, m2 = 0.0f;
+    for (uint i = 0; i < dim; ++i) {
+        const float d = dx[i * N + c];
+        m1 += d;
+        m2 += d * xhat[i * N + c];
+    }
+    m1 /= dim;
+    m2 /= dim;
+
+    const float inv = inv_std[c];
+    for (uint i = 0; i < dim; ++i)
+        dy[i * N + c] = gamma[i] * inv * (dx[i * N + c] - m1 - xhat[i * N + c] * m2);
+}
+
+// gradient *= (activation > 0), keeping d_relu's x > 0 convention. The
+// zeroed case is built from the bit pattern: Metal's fast math may drop the
+// sign of 0 * g and does not guarantee 0 * inf = NaN, both of which the
+// CUDA kernel's IEEE multiplication preserves.
+kernel void relu_backward_inplace_kernel(
+    device const float* activation [[buffer(0)]],
+    device float*       gradient   [[buffer(1)]],
+    uint id [[thread_position_in_grid]])
+{
+    if (activation[id] > 0.0f) return;
+    const uint bits = as_type<uint>(gradient[id]);
+    const bool nonfinite = (bits & 0x7f800000u) == 0x7f800000u;
+    gradient[id] = as_type<float>(nonfinite ? 0x7fc00000u : (bits & 0x80000000u));
+}
+
+// Maximum of each logical column of a (rows x cols) matrix, written as a
+// plain row-major (1 x cols) row. Same comparison as the generic reduction.
+kernel void column_max_kernel(
+    device const float* src [[buffer(0)]],
+    device float* dst [[buffer(1)]],
+    constant uint& rows [[buffer(2)]],
+    constant uint& cols [[buffer(3)]],
+    constant bool& transpose [[buffer(4)]],
+    uint j [[thread_position_in_grid]])
+{
+    if (j >= cols) return;
+    const uint base   = transpose ? j * rows : j;
+    const uint stride = transpose ? 1u : cols;
+    float m = -INFINITY;
+    for (uint i = 0; i < rows; ++i) {
+        const float v = src[base + i * stride];
+        m = m > v ? m : v;
+    }
+    dst[j] = m;
+}
+
+kernel void clamp_kernel(
+    device const float* src [[buffer(0)]],
+    device float*       dst [[buffer(1)]],
+    constant float&     lo  [[buffer(2)]],
+    constant float&     hi  [[buffer(3)]],
+    uint id [[thread_position_in_grid]])
+{
+    const float x = src[id];
+    dst[id] = x < lo ? lo : (x > hi ? hi : x);
+}

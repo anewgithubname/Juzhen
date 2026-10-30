@@ -10,11 +10,13 @@
 #include <stdexcept>
 
 using namespace Juzhen;
-#if defined(ROCM_HIP) || defined(APPLE_SILICON) || (defined(CUDA) && !defined(CUDNN_AVAILABLE))
+#if defined(ROCM_HIP) || (defined(CUDA) && !defined(CUDNN_AVAILABLE))
 int compute() { return 77; }
 #else
 #ifdef CUDA
 using D = CUDAfloat;
+#elif defined(APPLE_SILICON)
+using D = MPSfloat;
 #else
 using D = float;
 #endif
@@ -163,6 +165,8 @@ static void restart(const std::string& phase,const std::filesystem::path& out) {
 static void device_sync() {
 #ifdef CUDA
     CudaErrorCheck(cudaDeviceSynchronize());
+#elif defined(APPLE_SILICON)
+    mpsSynchronize();
 #endif
 }
 static void bench() {
@@ -186,7 +190,7 @@ static void bench() {
 }
 int compute() {
     try {
-#ifdef CUDA
+#if defined(CUDA) || defined(APPLE_SILICON)
         GPUSampler sampler(42);
 #endif
         if(const char* p=std::getenv("CONV_TEST_PHASE")) {

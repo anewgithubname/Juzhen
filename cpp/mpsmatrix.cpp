@@ -361,6 +361,16 @@ Matrix<MPSfloat> d_relu(Matrix<MPSfloat>&& M){
     return std::move(M);
 }
 
+Matrix<MPSfloat> clamp(const Matrix<MPSfloat>& M, float lo, float hi){
+    Matrix<MPSfloat> clampM("clampM", M.numrow, M.numcol, M.transpose);
+    mpsClamp((float*) M.elements.get(), (float*) clampM.elements.get(), M.numrow * M.numcol, lo, hi);
+    return clampM;
+}
+Matrix<MPSfloat> clamp(Matrix<MPSfloat>&& M, float lo, float hi){
+    mpsClamp((float*) M.elements.get(), (float*) M.elements.get(), M.numrow * M.numcol, lo, hi);
+    return std::move(M);
+}
+
 Matrix<MPSfloat>& fill(Matrix<MPSfloat>& M, double a) {
     mpsFill((float*) M.elements.get(), M.numrow * M.numcol, (float) a);
     return M;

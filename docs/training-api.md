@@ -84,9 +84,10 @@ weights and biases; CPU convolution supports matrix transpose views.
 
 `AdamW` supports CPU `float`, CUDA `CUDAfloat`, Metal `MPSfloat`, and ROCm
 `ROCMfloat`, with parameter freezing, shared parameter registrations,
-learning-rate changes and optional global gradient clipping. CPU and CUDA use
-their optimized updates; Metal and ROCm use device matrix operations. ROCm has
-been run on hardware; Metal has not. The optimizer keeps its moments in the
+learning-rate changes and optional global gradient clipping. CPU, CUDA and
+Metal use their optimized updates (Metal: one fused kernel per parameter and an
+FP64 gradient norm); ROCm uses device matrix operations. ROCm and Metal have
+been run on hardware. The optimizer keeps its moments in the
 layers' Adam states, so they are saved and restored by checkpoints. Weight decay
 excludes parameters registered with `decay=false`.
 

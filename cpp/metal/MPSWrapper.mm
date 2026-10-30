@@ -41,6 +41,10 @@ static id<MTLComputePipelineState> addBiasPipelineState = nil;
 static id<MTLComputePipelineState> gatherPipelineState = nil;
 static id<MTLComputePipelineState> boxMullerPipelineState = nil;
 static id<MTLComputePipelineState> adamwPipelineState = nil;
+static id<MTLComputePipelineState> layernormJvpPipelineState = nil;
+static id<MTLComputePipelineState> reluBackwardPipelineState = nil;
+static id<MTLComputePipelineState> columnMaxPipelineState = nil;
+static id<MTLComputePipelineState> clampPipelineState = nil;
 
 // MPS kernel objects are expensive to create and fully reusable across
 // encodes, so cache them by shape. Training loops repeat a handful of shapes,
@@ -166,6 +170,10 @@ void mpsInit() {
     id<MTLFunction> gatherKernel = [defaultLibrary newFunctionWithName:@"matrix_gather_kernel"];
     id<MTLFunction> boxMullerKernel = [defaultLibrary newFunctionWithName:@"box_muller_kernel"];
     id<MTLFunction> adamwKernel = [defaultLibrary newFunctionWithName:@"adamw_kernel"];
+    id<MTLFunction> layernormJvpKernel = [defaultLibrary newFunctionWithName:@"layernorm_jvp_rm_kernel"];
+    id<MTLFunction> reluBackwardKernel = [defaultLibrary newFunctionWithName:@"relu_backward_inplace_kernel"];
+    id<MTLFunction> columnMaxKernel = [defaultLibrary newFunctionWithName:@"column_max_kernel"];
+    id<MTLFunction> clampKernel = [defaultLibrary newFunctionWithName:@"clamp_kernel"];
 
     // Create compute pipeline state
     zeroPipelineState = [device newComputePipelineStateWithFunction:zeroKernel error:&error];
@@ -199,6 +207,10 @@ void mpsInit() {
     gatherPipelineState = [device newComputePipelineStateWithFunction:gatherKernel error:&error];
     boxMullerPipelineState = [device newComputePipelineStateWithFunction:boxMullerKernel error:&error];
     adamwPipelineState = [device newComputePipelineStateWithFunction:adamwKernel error:&error];
+    layernormJvpPipelineState = [device newComputePipelineStateWithFunction:layernormJvpKernel error:&error];
+    reluBackwardPipelineState = [device newComputePipelineStateWithFunction:reluBackwardKernel error:&error];
+    columnMaxPipelineState = [device newComputePipelineStateWithFunction:columnMaxKernel error:&error];
+    clampPipelineState = [device newComputePipelineStateWithFunction:clampKernel error:&error];
 
 }
 
@@ -256,6 +268,10 @@ void mpsDestroy() {
     [gatherPipelineState release];
     [boxMullerPipelineState release];
     [adamwPipelineState release];
+    [layernormJvpPipelineState release];
+    [reluBackwardPipelineState release];
+    [columnMaxPipelineState release];
+    [clampPipelineState release];
     [commandQueue release];
     [device release];
     device = nil;
@@ -914,6 +930,66 @@ void mpsLayerNormBackward(const float* dy, const float* gamma, const float* xhat
     NSUInteger tgs = layernormBackwardPipelineState.maxTotalThreadsPerThreadgroup;
     if (tgs > (NSUInteger)N) tgs = N;
     [encoder dispatchThreads:gridSize threadsPerThreadgroup:MTLSizeMake(tgs, 1, 1)];
+
+    opEncoded();
+}
+
+void mpsLayerNormJvp(const float* dx, const float* gamma, const float* xhat,
+                     const float* invStd, float* dy, int dim, int N) {
+    if (N <= 0) return;
+    id<MTLComputeCommandEncoder> encoder = currentComputeEncoder();
+
+    [encoder setComputePipelineState:layernormJvpPipelineState];
+    [encoder setBuffer:bufferMap[(float*)dx] offset:0 atIndex:0];
+    [encoder setBuffer:bufferMap[(float*)gamma] offset:0 atIndex:1];
+    [encoder setBuffer:bufferMap[(float*)xhat] offset:0 atIndex:2];
+    [encoder setBuffer:bufferMap[(float*)invStd] offset:0 atIndex:3];
+    [encoder setBuffer:bufferMap[dy] offset:0 atIndex:4];
+    [encoder setBytes:&dim length:sizeof(int) atIndex:5];
+    [encoder setBytes:&N length:sizeof(int) atIndex:6];
+
+    NSUInteger tgs = layernormJvpPipelineState.maxTotalThreadsPerThreadgroup;
+    if (tgs > (NSUInteger)N) tgs = N;
+    [encoder dispatchThreads:MTLSizeMake(N, 1, 1) threadsPerThreadgroup:MTLSizeMake(tgs, 1, 1)];
+
+    opEncoded();
+}
+
+void mpsReluBackwardInplace(const float* activation, float* gradient, int total) {
+    encodeElemwise(reluBackwardPipelineState, activation, gradient, total);
+}
+
+void mpsColumnMax(const float* src, float* dst, int rows, int cols, bool transpose) {
+    if (cols <= 0) return;
+    id<MTLComputeCommandEncoder> encoder = currentComputeEncoder();
+
+    [encoder setComputePipelineState:columnMaxPipelineState];
+    [encoder setBuffer:bufferMap[(float*)src] offset:0 atIndex:0];
+    [encoder setBuffer:bufferMap[dst] offset:0 atIndex:1];
+    [encoder setBytes:&rows length:sizeof(int) atIndex:2];
+    [encoder setBytes:&cols length:sizeof(int) atIndex:3];
+    [encoder setBytes:&transpose length:sizeof(bool) atIndex:4];
+
+    NSUInteger tgs = columnMaxPipelineState.maxTotalThreadsPerThreadgroup;
+    if (tgs > (NSUInteger)cols) tgs = cols;
+    [encoder dispatchThreads:MTLSizeMake(cols, 1, 1) threadsPerThreadgroup:MTLSizeMake(tgs, 1, 1)];
+
+    opEncoded();
+}
+
+void mpsClamp(const float* src, float* dst, int N, float lo, float hi) {
+    if (N <= 0) return;
+    id<MTLComputeCommandEncoder> encoder = currentComputeEncoder();
+
+    [encoder setComputePipelineState:clampPipelineState];
+    [encoder setBuffer:bufferMap[(float*)src] offset:0 atIndex:0];
+    [encoder setBuffer:bufferMap[dst] offset:0 atIndex:1];
+    [encoder setBytes:&lo length:sizeof(float) atIndex:2];
+    [encoder setBytes:&hi length:sizeof(float) atIndex:3];
+
+    NSUInteger tgs = clampPipelineState.maxTotalThreadsPerThreadgroup;
+    if (tgs > (NSUInteger)N) tgs = N;
+    [encoder dispatchThreads:MTLSizeMake(N, 1, 1) threadsPerThreadgroup:MTLSizeMake(tgs, 1, 1)];
 
     opEncoded();
 }

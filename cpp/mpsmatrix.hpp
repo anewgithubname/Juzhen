@@ -181,6 +181,8 @@ Matrix<MPSfloat> relu(const Matrix<MPSfloat>& M);
 Matrix<MPSfloat> relu(Matrix<MPSfloat>&& M);
 Matrix<MPSfloat> d_relu(const Matrix<MPSfloat>& M);
 Matrix<MPSfloat> d_relu(Matrix<MPSfloat>&& M);
+Matrix<MPSfloat> clamp(const Matrix<MPSfloat>& M, float lo, float hi);
+Matrix<MPSfloat> clamp(Matrix<MPSfloat>&& M, float lo, float hi);
 
 Matrix<MPSfloat>& fill(Matrix<MPSfloat>& M, double a);
 // dest takes src's shape and layout in fresh storage.

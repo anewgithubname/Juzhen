@@ -60,6 +60,16 @@ void mpsLayerNormForward(const float* x, const float* gamma, const float* beta,
 // LayerNorm input gradient from dy, gamma and the cached xhat / inv_std.
 void mpsLayerNormBackward(const float* dy, const float* gamma, const float* xhat,
                           const float* invStd, float* dx, int dim, int N);
+// LayerNorm tangent: dy = gamma * inv_std * (dx - mean(dx) - xhat * mean(xhat * dx)).
+void mpsLayerNormJvp(const float* dx, const float* gamma, const float* xhat,
+                     const float* invStd, float* dy, int dim, int N);
+// gradient *= (activation > 0), elementwise over `total` elements.
+void mpsReluBackwardInplace(const float* activation, float* gradient, int total);
+// Maximum of each logical column of a (rows x cols) matrix (`transpose` is
+// its physical-layout flag); dst is a plain (1 x cols) row.
+void mpsColumnMax(const float* src, float* dst, int rows, int cols, bool transpose);
+// dst = min(max(src, lo), hi) elementwise; in place: src == dst.
+void mpsClamp(const float* src, float* dst, int N, float lo, float hi);
 // y[i, c] += b[i] over a (rows x N) matrix (total = rows * N elements).
 void mpsAddBias(float* y, const float* b, int N, int total);
 // rand and randn draw from one MTGP32 uniform generator (randn via

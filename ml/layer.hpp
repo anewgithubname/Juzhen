@@ -1025,7 +1025,9 @@ template<class D> Matrix<D> backward(const std::list<Layer<D>*>& net, const Matr
 	public:
 		ConvLayer(int N, int C_in, int H_in, int W_in,
 		          int C_out, int kH, int kW,
-		          int pad = 0, int stride = 1, bool relu = true)
+		          int pad = 0, int stride = 1, bool relu = true,
+		          // Metal kernels are deterministic (GEMM + gather, no atomics).
+		          bool /*deterministic*/ = false)
 			: Layer<D>(
 				  C_out * ((H_in + 2*pad - kH)/stride + 1) *
 				          ((W_in + 2*pad - kW)/stride + 1),
@@ -1211,7 +1213,9 @@ template<class D> Matrix<D> backward(const std::list<Layer<D>*>& net, const Matr
 	public:
 		convtransLayer(int N, int C_in, int H_in, int W_in,
 		               int C_out, int kH, int kW,
-		               int pad = 0, int stride = 1, bool relu = true)
+		               int pad = 0, int stride = 1, bool relu = true,
+		               // Metal kernels are deterministic (GEMM + gather, no atomics).
+		               bool /*deterministic*/ = false)
 			: Layer<D>(
 				  C_out * (((H_in - 1) * stride - 2 * pad + kH)) *
 				          (((W_in - 1) * stride - 2 * pad + kW)),
@@ -2906,6 +2910,21 @@ template<class D> Matrix<D> backward(const std::list<Layer<D>*>& net, const Matr
 				}
 			}
 #endif
+#ifdef APPLE_SILICON
+			if constexpr (std::is_same_v<D, MPSfloat>) {
+				if (!dx.get_transpose()) {
+					Matrix<D> dy("ln_jvp", dim, dx.num_col());
+					mpsLayerNormJvp(
+						reinterpret_cast<const float*>(dx.data()),
+						reinterpret_cast<const float*>(gamma.data()),
+						reinterpret_cast<const float*>(cached_xhat.data()),
+						reinterpret_cast<const float*>(cached_inv.data()),
+						const_cast<float*>(reinterpret_cast<const float*>(dy.data())),
+						dim, (int)dx.num_col());
+					return dy;
+				}
+			}
+#endif
 			const float invdim = 1.0f / (float)dim;
 			auto m1 = sum(dx, 0) * invdim;                       // (1,N)
 			auto m2 = sum(hadmd(dx, cached_xhat), 0) * invdim;   // (1,N)
@@ -3637,6 +3656,19 @@ template<class D> Matrix<D> backward(const std::list<Layer<D>*>& net, const Matr
 						reinterpret_cast<const float*>(cached_F1.data()),
 						const_cast<float*>(reinterpret_cast<const float*>(dF1.data())),
 						dF1.num_row() * dF1.num_col());
+				} else {
+					dF1 = hadmd(d_relu(Matrix<D>(cached_F1)), std::move(dF1_relu));
+				}
+			} else
+#endif
+#ifdef APPLE_SILICON
+			if constexpr (std::is_same_v<D, MPSfloat>) {
+				if (!cached_F1.get_transpose() && !dF1_relu.get_transpose()) {
+					dF1 = std::move(dF1_relu);
+					mpsReluBackwardInplace(
+						reinterpret_cast<const float*>(cached_F1.data()),
+						const_cast<float*>(reinterpret_cast<const float*>(dF1.data())),
+						(int)(dF1.num_row() * dF1.num_col()));
 				} else {
 					dF1 = hadmd(d_relu(Matrix<D>(cached_F1)), std::move(dF1_relu));
 				}

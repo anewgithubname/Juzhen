@@ -211,7 +211,38 @@ template<class D> void training_checks() {
     require(last < first * .5, "training reduces softmax CE: " + std::to_string(first) + " -> " + std::to_string(last));
 }
 
+// Column maxima and clamping run as device kernels on Metal; check both
+// layouts and NaN propagation against the host reference.
+template<class D> void column_max_and_clamp_checks() {
+    Matrix<float> h("h", 4, 3);
+    for (size_t j = 0; j < 3; ++j)
+        for (size_t i = 0; i < 4; ++i) h.elem(i, j) = std::sin(1.3f * float(i) + 0.7f * float(j)) * 4.f;
+    h.elem(2, 1) = -1e30f;
+    for (bool transposed : {false, true}) {
+        Matrix<float> storage("storage", 3, 4);
+        for (size_t j = 0; j < 3; ++j)
+            for (size_t i = 0; i < 4; ++i) storage.elem(j, i) = h.elem(i, j);
+        Matrix<D> x = transposed ? Matrix<D>(storage).T() : Matrix<D>(h);
+        auto maxima = host(loss_detail::column_max(x));
+        require(maxima.num_row() == 1 && maxima.num_col() == 3, "column max shape");
+        for (size_t j = 0; j < 3; ++j) {
+            float expected = -std::numeric_limits<float>::infinity();
+            for (size_t i = 0; i < 4; ++i) expected = std::max(expected, h.elem(i, j));
+            require(maxima.elem(0, j) == expected, "column max value");
+        }
+        auto clamped = host(clamp(x, -1.f, 2.f));
+        for (size_t j = 0; j < 3; ++j)
+            for (size_t i = 0; i < 4; ++i)
+                require(clamped.elem(i, j) == std::min(std::max(h.elem(i, j), -1.f), 2.f), "clamp value");
+        close(host(x), h, "clamp preserves its input", 0);
+    }
+    Matrix<float> nan("nan", 1, 1);
+    nan.elem(0, 0) = std::numeric_limits<float>::quiet_NaN();
+    require(std::isnan(host(clamp(Matrix<D>(nan), -1.f, 1.f)).elem(0, 0)), "clamp keeps NaN");
+}
+
 template<class D> void checks(const char* backend) {
+    column_max_and_clamp_checks<D>();
     mse_checks<D>();
     softmax_ce_checks<D>();
     masked_ce_checks<D>();
@@ -231,6 +262,10 @@ int compute() {
 #endif
 #ifdef ROCM_HIP
         checks<ROCMfloat>("ROCm");
+#endif
+#ifdef APPLE_SILICON
+        GPUSampler sampler(927);
+        checks<MPSfloat>("Metal");
 #endif
         return 0;
     } catch (const std::exception& error) {
