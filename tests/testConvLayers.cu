@@ -16,14 +16,19 @@
 
 using namespace Juzhen;
 
-#if !defined(CUDA) || !defined(CUDNN_AVAILABLE)
+#if !(defined(CUDA) && defined(CUDNN_AVAILABLE)) && !defined(APPLE_SILICON)
 int compute() {
-    std::cout << "testConvLayers requires CUDA + cuDNN. Skipping.\n";
+    std::cout << "testConvLayers requires CUDA + cuDNN or Metal. Skipping.\n";
     return 0;
 }
 #else
+#ifdef CUDA
+using GpuT = CUDAfloat;
+#else
+using GpuT = MPSfloat;
+#endif
 
-static float scalar_loss(const Matrix<CUDAfloat>& y, const Matrix<CUDAfloat>& g) {
+static float scalar_loss(const Matrix<GpuT>& y, const Matrix<GpuT>& g) {
     return item(sum(sum(hadmd(y, g), 0), 1));
 }
 
@@ -151,11 +156,11 @@ static int check_forward_conv() {
     constexpr int stride = 1;
 
     ConvLayer conv(N, Cin, H, W, Cout, k, k, pad, stride, false);
-    auto x = Matrix<CUDAfloat>::rand(Cin * H * W, N);
+    auto x = Matrix<GpuT>::rand(Cin * H * W, N);
 
     // Deterministic parameters for robust CPU/GPU forward comparison.
-    conv.W() = Matrix<CUDAfloat>::randn(Cout * Cin * k * k, 1) * 0.1f;
-    conv.b() = Matrix<CUDAfloat>::randn(Cout, 1) * 0.1f;
+    conv.W() = Matrix<GpuT>::randn(Cout * Cin * k * k, 1) * 0.1f;
+    conv.b() = Matrix<GpuT>::randn(Cout, 1) * 0.1f;
 
     conv.eval(x);
     auto y_gpu = conv.value().to_host();
@@ -191,10 +196,10 @@ static int check_forward_convtrans() {
     constexpr int stride = 2;
 
     convtransLayer deconv(N, Cin, H, W, Cout, k, k, pad, stride, false);
-    auto x = Matrix<CUDAfloat>::rand(Cin * H * W, N);
+    auto x = Matrix<GpuT>::rand(Cin * H * W, N);
 
-    deconv.W() = Matrix<CUDAfloat>::randn(Cin * Cout * k * k, 1) * 0.1f;
-    deconv.b() = Matrix<CUDAfloat>::randn(Cout, 1) * 0.1f;
+    deconv.W() = Matrix<GpuT>::randn(Cin * Cout * k * k, 1) * 0.1f;
+    deconv.b() = Matrix<GpuT>::randn(Cout, 1) * 0.1f;
 
     deconv.eval(x);
     auto y_gpu = deconv.value().to_host();
@@ -230,15 +235,15 @@ static int check_bias_broadcast_conv() {
     int ret = 0;
     for (bool relu : {false, true}) {
         ConvLayer conv(N, Cin, H, W, Cout, k, k, 1, 1, relu);
-        conv.W() = Matrix<CUDAfloat>::zeros(Cout * Cin * k * k, 1);
+        conv.W() = Matrix<GpuT>::zeros(Cout * Cin * k * k, 1);
 
         Matrix<float> b_h("b", Cout, 1);
         b_h.elem(0, 0) = -0.3f;
         b_h.elem(1, 0) = 0.2f;
         b_h.elem(2, 0) = 0.7f;
-        conv.b() = Matrix<CUDAfloat>(b_h);
+        conv.b() = Matrix<GpuT>(b_h);
 
-        auto x = Matrix<CUDAfloat>::rand(Cin * H * W, N);
+        auto x = Matrix<GpuT>::rand(Cin * H * W, N);
         conv.eval(x);
         auto y = conv.value().to_host();
 
@@ -283,14 +288,14 @@ static int check_bias_broadcast_convtrans() {
     int ret = 0;
     for (bool relu : {false, true}) {
         convtransLayer deconv(N, Cin, H, W, Cout, k, k, pad, stride, relu);
-        deconv.W() = Matrix<CUDAfloat>::zeros(Cin * Cout * k * k, 1);
+        deconv.W() = Matrix<GpuT>::zeros(Cin * Cout * k * k, 1);
 
         Matrix<float> b_h("b", Cout, 1);
         b_h.elem(0, 0) = -0.25f;
         b_h.elem(1, 0) = 0.4f;
-        deconv.b() = Matrix<CUDAfloat>(b_h);
+        deconv.b() = Matrix<GpuT>(b_h);
 
-        auto x = Matrix<CUDAfloat>::rand(Cin * H * W, N);
+        auto x = Matrix<GpuT>::rand(Cin * H * W, N);
         deconv.eval(x);
         auto y = deconv.value().to_host();
 
@@ -321,17 +326,17 @@ static int check_bias_broadcast_convtrans() {
 template <class LayerT>
 static int check_directional_derivative(const std::string& name,
                                         LayerT& layer,
-                                        const Matrix<CUDAfloat>& x,
-                                        const Matrix<CUDAfloat>& upstream,
-                                        const Matrix<CUDAfloat>& direction,
+                                        const Matrix<GpuT>& x,
+                                        const Matrix<GpuT>& upstream,
+                                        const Matrix<GpuT>& direction,
                                         float eps,
                                         float abs_tol,
                                         float rel_tol) {
-    std::list<Layer<CUDAfloat>*> layers = {&layer};
+    std::list<Layer<GpuT>*> layers = {&layer};
     freeze(layers);
 
     layer.eval(x);
-    auto dx = layer.backward(x, Matrix<CUDAfloat>(upstream));
+    auto dx = layer.backward(x, Matrix<GpuT>(upstream));
     const float lhs = scalar_loss(dx, direction);
 
     auto lp = forward_loss(layer, x + direction * eps, upstream);
@@ -364,9 +369,9 @@ static int check_forward_sweep_conv() {
     int ret = 0;
     for (const auto& c : cases) {
         ConvLayer conv(c.N, c.Cin, c.H, c.W, c.Cout, c.k, c.k, c.pad, c.stride, c.relu);
-        conv.W() = Matrix<CUDAfloat>::randn(c.Cout * c.Cin * c.k * c.k, 1) * 0.1f;
-        conv.b() = Matrix<CUDAfloat>::randn(c.Cout, 1) * 0.1f;
-        auto x = Matrix<CUDAfloat>::rand(c.Cin * c.H * c.W, c.N);
+        conv.W() = Matrix<GpuT>::randn(c.Cout * c.Cin * c.k * c.k, 1) * 0.1f;
+        conv.b() = Matrix<GpuT>::randn(c.Cout, 1) * 0.1f;
+        auto x = Matrix<GpuT>::rand(c.Cin * c.H * c.W, c.N);
 
         conv.eval(x);
         auto y_gpu = conv.value().to_host();
@@ -403,9 +408,9 @@ static int check_forward_sweep_convtrans() {
     int ret = 0;
     for (const auto& c : cases) {
         convtransLayer deconv(c.N, c.Cin, c.H, c.W, c.Cout, c.k, c.k, c.pad, c.stride, c.relu);
-        deconv.W() = Matrix<CUDAfloat>::randn(c.Cin * c.Cout * c.k * c.k, 1) * 0.1f;
-        deconv.b() = Matrix<CUDAfloat>::randn(c.Cout, 1) * 0.1f;
-        auto x = Matrix<CUDAfloat>::rand(c.Cin * c.H * c.W, c.N);
+        deconv.W() = Matrix<GpuT>::randn(c.Cin * c.Cout * c.k * c.k, 1) * 0.1f;
+        deconv.b() = Matrix<GpuT>::randn(c.Cout, 1) * 0.1f;
+        auto x = Matrix<GpuT>::rand(c.Cin * c.H * c.W, c.N);
 
         deconv.eval(x);
         auto y_gpu = deconv.value().to_host();
@@ -433,8 +438,8 @@ static int check_forward_sweep_convtrans() {
 
 template <class LayerT>
 static float forward_loss(LayerT& layer,
-                          const Matrix<CUDAfloat>& x,
-                          const Matrix<CUDAfloat>& upstream) {
+                          const Matrix<GpuT>& x,
+                          const Matrix<GpuT>& upstream) {
     layer.eval(x);
     return scalar_loss(layer.value(), upstream);
 }
@@ -462,16 +467,16 @@ static void compare_vectors(const std::string& tag,
 template <class LayerT>
 static int check_input_gradient(const std::string& name,
                                 LayerT& layer,
-                                const Matrix<CUDAfloat>& x,
-                                const Matrix<CUDAfloat>& upstream,
+                                const Matrix<GpuT>& x,
+                                const Matrix<GpuT>& upstream,
                                 float eps,
                                 float max_abs_tol,
                                 float rel_l2_tol) {
-    std::list<Layer<CUDAfloat>*> layers = {&layer};
+    std::list<Layer<GpuT>*> layers = {&layer};
     freeze(layers);
 
     layer.eval(x);
-    auto dx = layer.backward(x, Matrix<CUDAfloat>(upstream));
+    auto dx = layer.backward(x, Matrix<GpuT>(upstream));
     auto dx_h = dx.to_host();
 
     auto x_h = x.to_host();
@@ -485,8 +490,8 @@ static int check_input_gradient(const std::string& name,
         xp.elem(r, c) += eps;
         xm.elem(r, c) -= eps;
 
-        float lp = forward_loss(layer, Matrix<CUDAfloat>(xp), upstream);
-        float lm = forward_loss(layer, Matrix<CUDAfloat>(xm), upstream);
+        float lp = forward_loss(layer, Matrix<GpuT>(xp), upstream);
+        float lm = forward_loss(layer, Matrix<GpuT>(xm), upstream);
         numerical[idx] = (lp - lm) / (2.0f * eps);
     }
 
@@ -534,13 +539,13 @@ int compute() {
 
         ConvLayer conv(N, Cin, H, W, Cout, k, k, 1, 1, false);
 
-        auto x = Matrix<CUDAfloat>::rand(Cin * H * W, N);
-        auto g = Matrix<CUDAfloat>::rand(Cout * H * W, N);
+        auto x = Matrix<GpuT>::rand(Cin * H * W, N);
+        auto g = Matrix<GpuT>::rand(Cout * H * W, N);
 
         ret += check_input_gradient("ConvLayer dL/dx", conv, x, g,
                                     1e-3f, 3e-2f, 2e-2f);
 
-        auto v = Matrix<CUDAfloat>::rand(Cin * H * W, N) - 0.5f;
+        auto v = Matrix<GpuT>::rand(Cin * H * W, N) - 0.5f;
         ret += check_directional_derivative("ConvLayer", conv, x, g, v,
                             1e-3f, 3e-3f, 2e-3f);
     }
@@ -559,13 +564,13 @@ int compute() {
 
         convtransLayer deconv(N, Cin, H, W, Cout, k, k, 1, 2, false);
 
-        auto x = Matrix<CUDAfloat>::rand(Cin * H * W, N);
-        auto g = Matrix<CUDAfloat>::rand(Cout * Hout * Wout, N);
+        auto x = Matrix<GpuT>::rand(Cin * H * W, N);
+        auto g = Matrix<GpuT>::rand(Cout * Hout * Wout, N);
 
         ret += check_input_gradient("convtransLayer dL/dx", deconv, x, g,
                                     1e-3f, 5e-2f, 3e-2f);
 
-        auto v = Matrix<CUDAfloat>::rand(Cin * H * W, N) - 0.5f;
+        auto v = Matrix<GpuT>::rand(Cin * H * W, N) - 0.5f;
         ret += check_directional_derivative("convtransLayer", deconv, x, g, v,
                             1e-3f, 5e-3f, 3e-3f);
     }

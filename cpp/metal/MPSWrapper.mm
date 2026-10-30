@@ -47,6 +47,9 @@ static id<MTLComputePipelineState> reluBackwardPipelineState = nil;
 static id<MTLComputePipelineState> columnMaxPipelineState = nil;
 static id<MTLComputePipelineState> clampPipelineState = nil;
 static id<MTLComputePipelineState> stepPipelineState = nil;
+static id<MTLComputePipelineState> layernormForwardTiledPipelineState = nil;
+static id<MTLComputePipelineState> layernormBackwardTiledPipelineState = nil;
+static id<MTLComputePipelineState> layernormJvpTiledPipelineState = nil;
 
 // MPS kernel objects are expensive to create and fully reusable across
 // encodes, so cache them by shape. Training loops repeat a handful of shapes,
@@ -177,6 +180,9 @@ void mpsInit() {
     id<MTLFunction> columnMaxKernel = [defaultLibrary newFunctionWithName:@"column_max_kernel"];
     id<MTLFunction> clampKernel = [defaultLibrary newFunctionWithName:@"clamp_kernel"];
     id<MTLFunction> stepKernel = [defaultLibrary newFunctionWithName:@"step_kernel"];
+    id<MTLFunction> layernormForwardTiledKernel = [defaultLibrary newFunctionWithName:@"layernorm_forward_tiled_kernel"];
+    id<MTLFunction> layernormBackwardTiledKernel = [defaultLibrary newFunctionWithName:@"layernorm_backward_tiled_kernel"];
+    id<MTLFunction> layernormJvpTiledKernel = [defaultLibrary newFunctionWithName:@"layernorm_jvp_tiled_kernel"];
 
     // Create compute pipeline state
     zeroPipelineState = [device newComputePipelineStateWithFunction:zeroKernel error:&error];
@@ -215,6 +221,9 @@ void mpsInit() {
     columnMaxPipelineState = [device newComputePipelineStateWithFunction:columnMaxKernel error:&error];
     clampPipelineState = [device newComputePipelineStateWithFunction:clampKernel error:&error];
     stepPipelineState = [device newComputePipelineStateWithFunction:stepKernel error:&error];
+    layernormForwardTiledPipelineState = [device newComputePipelineStateWithFunction:layernormForwardTiledKernel error:&error];
+    layernormBackwardTiledPipelineState = [device newComputePipelineStateWithFunction:layernormBackwardTiledKernel error:&error];
+    layernormJvpTiledPipelineState = [device newComputePipelineStateWithFunction:layernormJvpTiledKernel error:&error];
 
 }
 
@@ -285,6 +294,9 @@ void mpsDestroy() {
     [columnMaxPipelineState release];
     [clampPipelineState release];
     [stepPipelineState release];
+    [layernormForwardTiledPipelineState release];
+    [layernormBackwardTiledPipelineState release];
+    [layernormJvpTiledPipelineState release];
     [commandQueue release];
     [device release];
     device = nil;
@@ -904,11 +916,29 @@ void mpsSoftmaxBackwardRowsBatched(const float* A, const float* dA, float* dS,
     opEncoded();
 }
 
+// LayerNorm kernels: one thread per column for narrow columns, otherwise a
+// (32 x 8) threadgroup per 32 columns (the CUDA warp kernels' threshold).
+static const int kLayerNormTiledMinDim = 32;
+
+static void dispatchLayerNorm(id<MTLComputeCommandEncoder> encoder,
+                              id<MTLComputePipelineState> serial, int dim, int N) {
+    if (dim >= kLayerNormTiledMinDim) {
+        [encoder dispatchThreadgroups:MTLSizeMake((N + 31) / 32, 1, 1)
+                threadsPerThreadgroup:MTLSizeMake(32, 8, 1)];
+    } else {
+        NSUInteger tgs = serial.maxTotalThreadsPerThreadgroup;
+        if (tgs > (NSUInteger)N) tgs = N;
+        [encoder dispatchThreads:MTLSizeMake(N, 1, 1) threadsPerThreadgroup:MTLSizeMake(tgs, 1, 1)];
+    }
+}
+
 void mpsLayerNormForward(const float* x, const float* gamma, const float* beta,
                          float* y, float* xhat, float* invStd, int dim, int N) {
+    if (N <= 0) return;
     id<MTLComputeCommandEncoder> encoder = currentComputeEncoder();
 
-    [encoder setComputePipelineState:layernormForwardPipelineState];
+    [encoder setComputePipelineState:dim >= kLayerNormTiledMinDim
+        ? layernormForwardTiledPipelineState : layernormForwardPipelineState];
     [encoder setBuffer:bufferMap[(float*)x] offset:0 atIndex:0];
     [encoder setBuffer:bufferMap[(float*)gamma] offset:0 atIndex:1];
     [encoder setBuffer:bufferMap[(float*)beta] offset:0 atIndex:2];
@@ -918,19 +948,18 @@ void mpsLayerNormForward(const float* x, const float* gamma, const float* beta,
     [encoder setBytes:&dim length:sizeof(int) atIndex:6];
     [encoder setBytes:&N length:sizeof(int) atIndex:7];
 
-    MTLSize gridSize = MTLSizeMake(N, 1, 1);
-    NSUInteger tgs = layernormForwardPipelineState.maxTotalThreadsPerThreadgroup;
-    if (tgs > (NSUInteger)N) tgs = N;
-    [encoder dispatchThreads:gridSize threadsPerThreadgroup:MTLSizeMake(tgs, 1, 1)];
+    dispatchLayerNorm(encoder, layernormForwardPipelineState, dim, N);
 
     opEncoded();
 }
 
 void mpsLayerNormBackward(const float* dy, const float* gamma, const float* xhat,
                           const float* invStd, float* dx, int dim, int N) {
+    if (N <= 0) return;
     id<MTLComputeCommandEncoder> encoder = currentComputeEncoder();
 
-    [encoder setComputePipelineState:layernormBackwardPipelineState];
+    [encoder setComputePipelineState:dim >= kLayerNormTiledMinDim
+        ? layernormBackwardTiledPipelineState : layernormBackwardPipelineState];
     [encoder setBuffer:bufferMap[(float*)dy] offset:0 atIndex:0];
     [encoder setBuffer:bufferMap[(float*)gamma] offset:0 atIndex:1];
     [encoder setBuffer:bufferMap[(float*)xhat] offset:0 atIndex:2];
@@ -939,10 +968,7 @@ void mpsLayerNormBackward(const float* dy, const float* gamma, const float* xhat
     [encoder setBytes:&dim length:sizeof(int) atIndex:5];
     [encoder setBytes:&N length:sizeof(int) atIndex:6];
 
-    MTLSize gridSize = MTLSizeMake(N, 1, 1);
-    NSUInteger tgs = layernormBackwardPipelineState.maxTotalThreadsPerThreadgroup;
-    if (tgs > (NSUInteger)N) tgs = N;
-    [encoder dispatchThreads:gridSize threadsPerThreadgroup:MTLSizeMake(tgs, 1, 1)];
+    dispatchLayerNorm(encoder, layernormBackwardPipelineState, dim, N);
 
     opEncoded();
 }
@@ -952,7 +978,8 @@ void mpsLayerNormJvp(const float* dx, const float* gamma, const float* xhat,
     if (N <= 0) return;
     id<MTLComputeCommandEncoder> encoder = currentComputeEncoder();
 
-    [encoder setComputePipelineState:layernormJvpPipelineState];
+    [encoder setComputePipelineState:dim >= kLayerNormTiledMinDim
+        ? layernormJvpTiledPipelineState : layernormJvpPipelineState];
     [encoder setBuffer:bufferMap[(float*)dx] offset:0 atIndex:0];
     [encoder setBuffer:bufferMap[(float*)gamma] offset:0 atIndex:1];
     [encoder setBuffer:bufferMap[(float*)xhat] offset:0 atIndex:2];
@@ -961,9 +988,7 @@ void mpsLayerNormJvp(const float* dx, const float* gamma, const float* xhat,
     [encoder setBytes:&dim length:sizeof(int) atIndex:5];
     [encoder setBytes:&N length:sizeof(int) atIndex:6];
 
-    NSUInteger tgs = layernormJvpPipelineState.maxTotalThreadsPerThreadgroup;
-    if (tgs > (NSUInteger)N) tgs = N;
-    [encoder dispatchThreads:MTLSizeMake(N, 1, 1) threadsPerThreadgroup:MTLSizeMake(tgs, 1, 1)];
+    dispatchLayerNorm(encoder, layernormJvpPipelineState, dim, N);
 
     opEncoded();
 }

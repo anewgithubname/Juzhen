@@ -19,14 +19,16 @@ using namespace Juzhen;
 using BackendT = CUDAfloat;
 #elif defined(ROCM_HIP)
 using BackendT = ROCMfloat;
+#elif defined(APPLE_SILICON)
+using BackendT = MPSfloat;
 #else
 int compute() {
-    std::cout << "testUNet requires CUDA+cuDNN or ROCm. Skipping.\n";
+    std::cout << "testUNet requires CUDA+cuDNN, ROCm or Metal. Skipping.\n";
     return 0;
 }
 #endif
 
-#if defined(CUDA) && defined(CUDNN_AVAILABLE) || defined(ROCM_HIP)
+#if defined(CUDA) && defined(CUDNN_AVAILABLE) || defined(ROCM_HIP) || defined(APPLE_SILICON)
 
 static float scalar_loss(const Matrix<BackendT>& y, const Matrix<BackendT>& g) {
     return item(sum(sum(hadmd(y, g), 0), 1));
@@ -250,7 +252,7 @@ static int check_directional_derivative() {
 }
 
 int compute() {
-#if defined(CUDA)
+#if defined(CUDA) || defined(APPLE_SILICON)
     GPUSampler sampler(7);
 #endif
     global_rand_gen.seed(7);

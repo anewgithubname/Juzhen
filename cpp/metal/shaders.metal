@@ -777,3 +777,117 @@ kernel void step_kernel(
 {
     dst[id] = src[id] > threshold ? 1.0f : 0.0f;
 }
+
+// ── tiled LayerNorm (dim >= 32) ─────────────────────────────────────────────
+// Mirrors the CUDA warp kernels: a (32 x 8) threadgroup owns 32 adjacent
+// columns, so each row read is one coalesced 128-byte segment, and the 8 row
+// slices of a column reduce through threadgroup memory. The serial kernels
+// above stay in use for narrow columns, as on CUDA.
+constant uint LN_COLS = 32;
+constant uint LN_SLICES = 8;
+
+// Sum `value` over the LN_SLICES row slices of each column; every thread of
+// the column receives the total.
+static inline float ln_column_sum(float value, threadgroup float* scratch, uint2 tid) {
+    scratch[tid.y * LN_COLS + tid.x] = value;
+    threadgroup_barrier(mem_flags::mem_threadgroup);
+    float total = 0.0f;
+    for (uint s = 0; s < LN_SLICES; ++s) total += scratch[s * LN_COLS + tid.x];
+    threadgroup_barrier(mem_flags::mem_threadgroup);
+    return total;
+}
+
+kernel void layernorm_forward_tiled_kernel(
+    device const float* x     [[buffer(0)]],
+    device const float* gamma [[buffer(1)]],
+    device const float* beta  [[buffer(2)]],
+    device float* y           [[buffer(3)]],
+    device float* xhat        [[buffer(4)]],
+    device float* inv_std     [[buffer(5)]],
+    constant uint& dim        [[buffer(6)]],
+    constant uint& N          [[buffer(7)]],
+    uint2 tid [[thread_position_in_threadgroup]],
+    uint2 group [[threadgroup_position_in_grid]])
+{
+    threadgroup float scratch[LN_SLICES * LN_COLS];
+    const uint c = group.x * LN_COLS + tid.x;
+    const bool live = c < N;  // dead lanes still join the barriers
+
+    // Center relative to the first entry, as in the serial kernel.
+    const float shift = live ? x[c] : 0.0f;
+    float s = 0.0f;
+    if (live) for (uint i = tid.y; i < dim; i += LN_SLICES) s += x[i * N + c] - shift;
+    const float mu = ln_column_sum(s, scratch, tid) / dim;
+
+    float v = 0.0f;
+    if (live) for (uint i = tid.y; i < dim; i += LN_SLICES) {
+        const float d = (x[i * N + c] - shift) - mu;
+        v += d * d;
+    }
+    const float inv = rsqrt(ln_column_sum(v, scratch, tid) / dim + 1e-5f);
+    if (!live) return;
+    if (tid.y == 0) inv_std[c] = inv;
+    for (uint i = tid.y; i < dim; i += LN_SLICES) {
+        const float xh = ((x[i * N + c] - shift) - mu) * inv;
+        xhat[i * N + c] = xh;
+        y[i * N + c] = gamma[i] * xh + beta[i];
+    }
+}
+
+kernel void layernorm_backward_tiled_kernel(
+    device const float* dy      [[buffer(0)]],
+    device const float* gamma   [[buffer(1)]],
+    device const float* xhat    [[buffer(2)]],
+    device const float* inv_std [[buffer(3)]],
+    device float* dx            [[buffer(4)]],
+    constant uint& dim          [[buffer(5)]],
+    constant uint& N            [[buffer(6)]],
+    uint2 tid [[thread_position_in_threadgroup]],
+    uint2 group [[threadgroup_position_in_grid]])
+{
+    threadgroup float scratch[LN_SLICES * LN_COLS];
+    const uint c = group.x * LN_COLS + tid.x;
+    const bool live = c < N;
+
+    float s1 = 0.0f, s2 = 0.0f;
+    if (live) for (uint i = tid.y; i < dim; i += LN_SLICES) {
+        const float dxh = gamma[i] * dy[i * N + c];
+        s1 += dxh;
+        s2 += dxh * xhat[i * N + c];
+    }
+    const float m1 = ln_column_sum(s1, scratch, tid) / dim;
+    const float m2 = ln_column_sum(s2, scratch, tid) / dim;
+    if (!live) return;
+    const float inv = inv_std[c];
+    for (uint i = tid.y; i < dim; i += LN_SLICES)
+        dx[i * N + c] = inv * (gamma[i] * dy[i * N + c] - m1 - xhat[i * N + c] * m2);
+}
+
+kernel void layernorm_jvp_tiled_kernel(
+    device const float* dx      [[buffer(0)]],
+    device const float* gamma   [[buffer(1)]],
+    device const float* xhat    [[buffer(2)]],
+    device const float* inv_std [[buffer(3)]],
+    device float* dy            [[buffer(4)]],
+    constant uint& dim          [[buffer(5)]],
+    constant uint& N            [[buffer(6)]],
+    uint2 tid [[thread_position_in_threadgroup]],
+    uint2 group [[threadgroup_position_in_grid]])
+{
+    threadgroup float scratch[LN_SLICES * LN_COLS];
+    const uint c = group.x * LN_COLS + tid.x;
+    const bool live = c < N;
+
+    float s1 = 0.0f, s2 = 0.0f;
+    if (live) for (uint i = tid.y; i < dim; i += LN_SLICES) {
+        const float d = dx[i * N + c];
+        s1 += d;
+        s2 += d * xhat[i * N + c];
+    }
+    const float m1 = ln_column_sum(s1, scratch, tid) / dim;
+    const float m2 = ln_column_sum(s2, scratch, tid) / dim;
+    if (!live) return;
+    const float inv = inv_std[c];
+    for (uint i = tid.y; i < dim; i += LN_SLICES)
+        dy[i * N + c] = gamma[i] * inv * (dx[i * N + c] - m1 - xhat[i * N + c] * m2);
+}

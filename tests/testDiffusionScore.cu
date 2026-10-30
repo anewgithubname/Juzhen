@@ -15,16 +15,21 @@
 
 using namespace Juzhen;
 
-#if !defined(CUDA) || !defined(CUDNN_AVAILABLE)
+#if !(defined(CUDA) && defined(CUDNN_AVAILABLE)) && !defined(APPLE_SILICON)
 int compute() {
-    std::cout << "testDiffusionScore requires CUDA + cuDNN. Skipping.\n";
+    std::cout << "testDiffusionScore requires CUDA + cuDNN or Metal. Skipping.\n";
     return 0;
 }
 #else
+#ifdef CUDA
+using GpuT = CUDAfloat;
+#else
+using GpuT = MPSfloat;
+#endif
 
-inline Matrix<CUDAfloat> ones(int m, int n) { return Matrix<CUDAfloat>::ones(m, n); }
-inline Matrix<CUDAfloat> randn(int m, int n) { return Matrix<CUDAfloat>::randn(m, n); }
-inline Matrix<CUDAfloat> vs(std::vector<MatrixView<CUDAfloat>> ms) { return vstack(ms); }
+inline Matrix<GpuT> ones(int m, int n) { return Matrix<GpuT>::ones(m, n); }
+inline Matrix<GpuT> randn(int m, int n) { return Matrix<GpuT>::randn(m, n); }
+inline Matrix<GpuT> vs(std::vector<MatrixView<GpuT>> ms) { return vstack(ms); }
 
 struct VPSchedule {
     std::vector<float> beta, alpha, abar, sqrt_abar, sqrt_one_minus_abar;
@@ -59,11 +64,11 @@ public:
     ConvLayer dec1;
     ConvLayer head;
 
-    Matrix<CUDAfloat> e1;
-    Matrix<CUDAfloat> e2;
-    Matrix<CUDAfloat> c_cat;
+    Matrix<GpuT> e1;
+    Matrix<GpuT> e2;
+    Matrix<GpuT> c_cat;
 
-    AdamW<CUDAfloat> optimizer;
+    AdamW<GpuT> optimizer;
 
     static AdamWOptions plain_adam() {
         AdamWOptions options;
@@ -82,13 +87,13 @@ public:
           c_cat("cc", 16 * d, bs),
           optimizer(Juzhen::parameters(layers()), plain_adam()) {}
 
-    std::list<Layer<CUDAfloat>*> layers() {
+    std::list<Layer<GpuT>*> layers() {
         return {&head, &dec1, &up1, &enc2, &enc1};
     }
 
     void set_lr(float alpha) { optimizer.set_lr(alpha); }
 
-    const Matrix<CUDAfloat>& fwd(const Matrix<CUDAfloat>& inp) {
+    const Matrix<GpuT>& fwd(const Matrix<GpuT>& inp) {
         enc1.eval(inp);
         e1 = enc1.value();
         enc2.eval(e1);
@@ -101,7 +106,7 @@ public:
     }
 
     // backpropagate g through the skip connection, then take one Adam step
-    void bwd(const Matrix<CUDAfloat>& inp, Matrix<CUDAfloat>&& g) {
+    void bwd(const Matrix<GpuT>& inp, Matrix<GpuT>&& g) {
         optimizer.zero_grad();
         auto g2 = head.backward(dec1.value(), std::move(g));
         auto g_cat = dec1.backward(c_cat, std::move(g2));
@@ -138,7 +143,7 @@ int compute() {
     TinyScoreUNet net(batchsize);
     net.set_lr(lr);
 
-    auto x0 = Matrix<CUDAfloat>::rand(TinyScoreUNet::d, batchsize);
+    auto x0 = Matrix<GpuT>::rand(TinyScoreUNet::d, batchsize);
     auto eps = randn(TinyScoreUNet::d, batchsize);
 
     Matrix<float> t_row("t", 1, batchsize);
@@ -155,10 +160,10 @@ int compute() {
         invsig_row.elem(0, b) = 1.f / std::max(1e-6f, sched.sqrt_one_minus_abar[t_idx]);
     }
 
-    auto t_cu = Matrix<CUDAfloat>(t_row);
-    auto c1 = Matrix<CUDAfloat>(c1_row);
-    auto c2 = Matrix<CUDAfloat>(c2_row);
-    auto invsig = Matrix<CUDAfloat>(invsig_row);
+    auto t_cu = Matrix<GpuT>(t_row);
+    auto c1 = Matrix<GpuT>(c1_row);
+    auto c2 = Matrix<GpuT>(c2_row);
+    auto invsig = Matrix<GpuT>(invsig_row);
 
     auto xt = hadmd(x0, ones(TinyScoreUNet::d, 1) * c1) + hadmd(eps, ones(TinyScoreUNet::d, 1) * c2);
     auto t_map = ones(TinyScoreUNet::d, 1) * t_cu;
