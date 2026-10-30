@@ -139,4 +139,4 @@ explicit graph traversal: `net.eval(input)`, `net.backward(input, upstream)` and
 `optimizer.step()`. Its backward method accumulates the two skip-branch gradients
 before propagating into each encoder layer. `demo_word2vec` and the standalone
 WebAssembly examples use their own matrix calculations rather than the layer
-training API. `demo_gui` remains an optional source with external GUI dependencies.
+training API.
