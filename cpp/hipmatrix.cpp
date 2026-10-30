@@ -694,15 +694,6 @@ int Juzhen::RocmGemmStridedBatched(bool transA, bool transB, int m, int n, int k
 #endif
 }
 
-int Juzhen::RocmGemmNN(const float* A_device, const float* B_device, float* C_device,
-                       int m, int n, int k, float alpha, float beta) {
-    return Juzhen::RocmGemm(A_device, B_device, C_device,
-                            m, n, k,
-                            false, false,
-                            m, k, m,
-                            alpha, beta);
-}
-
 int Juzhen::RocmGemv(const float* A_device, const float* x_device, float* y_device,
                      int m, int n,
                      bool transA,
