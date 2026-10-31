@@ -332,19 +332,28 @@ void mpsFree(float* ptr) {
         bufferMap.erase(it);
     }
 }
-// MPSMatrixMultiplication writes a band of NaNs into its result when the
-// result spans a 2 GiB-aligned GPU virtual address, and also when it ends less
-// than about 8 MiB below one. Reproduced on an M2 (macOS 27.0.1) in a
-// standalone Metal program; the operands, MPS gemv, MTGP32 and our own kernels
-// are unaffected by the same placement. Such results are computed into scratch
-// buffers that keep clear of the boundary, in blocks of at most
-// kGemmScratchBytes, and copied into place with our copy kernel.
+// TEMPORARY WORKAROUND for an Apple MPS bug. MPSMatrixMultiplication writes a
+// band of NaNs into its result when the result spans a 2 GiB-aligned GPU
+// virtual address, and also when it ends less than about 8 MiB below one.
+// Reproduced on an M2 (macOS 27.0.1) in a standalone Metal program; the
+// operands, MPS gemv, MTGP32 and our own kernels are unaffected by the same
+// placement. Such results are computed into scratch buffers that keep clear of
+// the boundary, in blocks of at most kGemmScratchBytes, and copied into place
+// with our copy kernel.
+//
+// To check whether a newer macOS has fixed the bug, configure with
+// -DJUZHEN_MPS_GEMM_WORKAROUND=OFF and run ctest -R mps_gemm_address_boundary.
+// If it passes, remove this block, gemmScratch and the scratch paths in
+// mpsGemm and mpsGemmBatched; keep the test.
+#ifndef JUZHEN_MPS_GEMM_WORKAROUND
+#define JUZHEN_MPS_GEMM_WORKAROUND 1
+#endif
 static const unsigned long long kGemmBoundary = 1ull << 31;
 static const unsigned long long kGemmGuardBytes = 16ull << 20;  // twice the measured 8 MiB
 static const NSUInteger kGemmScratchBytes = 256u << 20;
 
 static bool nearGemmBoundary(id<MTLBuffer> buffer, NSUInteger offset, NSUInteger bytes) {
-    if (bytes == 0) return false;
+    if (!JUZHEN_MPS_GEMM_WORKAROUND || bytes == 0) return false;
     const unsigned long long lo = buffer.gpuAddress + offset, hi = lo + bytes - 1;
     return lo / kGemmBoundary != (hi + kGemmGuardBytes) / kGemmBoundary;
 }
