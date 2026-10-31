@@ -8,6 +8,7 @@
  * buffers clear of the boundary. This test places results across the boundary
  * and just below it (by recycling a pool buffer at that address) and compares
  * plain, transposed, row-blocked and batched products with host references.
+ * It also repeats one such GEMM to check that the scratch buffers are freed.
  * Untouched placeholder buffers cost address space only.
  *
  * Built with -DJUZHEN_MPS_GEMM_WORKAROUND=OFF, the test checks MPS itself: a
@@ -28,6 +29,7 @@ int compute() {
     return 77;
 }
 #else
+#include <mach/mach.h>
 
 static void require(bool ok, const std::string& message) {
     if (!ok) throw std::runtime_error(message);
@@ -123,6 +125,35 @@ static void batched_case(int batch, int n, float beta, Placement where, std::str
     close(C.to_host(), expected, tag);
 }
 
+static double footprint_mb() {
+    task_vm_info_data_t info;
+    mach_msg_type_number_t count = TASK_VM_INFO_COUNT;
+    require(task_info(mach_task_self(), TASK_VM_INFO, (task_info_t)&info, &count) == KERN_SUCCESS, "task_info");
+    return info.phys_footprint / 1048576.0;
+}
+
+// Every GEMM into a result near the boundary gets a fresh ~4 MB scratch buffer;
+// 100 of them must not stay allocated.
+static void scratch_release_case() {
+    const std::string tag = "repeated GEMM result just below 2 GiB frees its scratch";
+    const size_t M = 1002, N = 1003, K = 64;
+    Matrix<MPSfloat> A(fixture(M, K, 0.2f)), B(fixture(K, N, 0.5f));
+    auto placeholders = leave_buffer(M, N, Placement::JustBelow);
+    Matrix<MPSfloat> C("C", M, N);
+    require(placed(C.data(), M * N * sizeof(float), Placement::JustBelow), tag + ": not placed as intended");
+    auto gemm = [&] {
+        mpsGemm(reinterpret_cast<const float*>(A.data()), reinterpret_cast<const float*>(B.data()),
+                const_cast<float*>(reinterpret_cast<const float*>(C.data())), M, K, K, N, false, false);
+        mpsSynchronize();
+    };
+    for (int i = 0; i < 5; ++i) gemm();
+    const double before = footprint_mb();
+    for (int i = 0; i < 100; ++i) gemm();
+    const double growth = footprint_mb() - before;
+    require(growth < 64, tag + ": footprint grew " + std::to_string(growth) + " MB");
+    std::cout << "[PASS] " << tag << " (footprint grew " << growth << " MB)\n";
+}
+
 int compute() {
 #if defined(JUZHEN_MPS_GEMM_WORKAROUND) && !JUZHEN_MPS_GEMM_WORKAROUND
     std::cout << "MPS GEMM workaround disabled: testing MPS itself\n";
@@ -141,6 +172,7 @@ int compute() {
         // > 256 MB of result: several batch groups
         batched_case(16400, 64, 1.0f, across, "grouped batched GEMM");
         batched_case(257, 64, 1.0f, below, "accumulating batched GEMM");
+        scratch_release_case();
         return 0;
     } catch (const std::exception& e) {
         std::cerr << "[FAIL] " << e.what() << '\n';
