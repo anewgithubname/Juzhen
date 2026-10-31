@@ -390,13 +390,8 @@ static MPSMatrixMultiplication* gemmKernel(bool transposeA, bool transposeB, int
     return kernel;
 }
 
-/**
- * MPSMatrixMultiplication
- * @param A: M x K
- * @param B: K x N
- * @param C: M x N
- */
-void mpsGemm(const float* A, const float* B, float* C, int rowA, int colA, int rowB, int colB, bool transposeA, bool transposeB) {
+static void encodeGemm(const float* A, const float* B, float* C, int rowA, int colA, int rowB, int colB,
+                       bool transposeA, bool transposeB) {
     const int resultRows = transposeA ? colA : rowA;
     const int resultColumns = transposeB ? rowB : colB;
     const int interiorColumns = transposeA ? rowA : colA;
@@ -436,6 +431,21 @@ void mpsGemm(const float* A, const float* B, float* C, int rowA, int colA, int r
     }
     [matB release];
     mpsFree(scratch);  // pending command buffers keep it alive until they finish
+}
+
+/**
+ * MPSMatrixMultiplication
+ * @param A: M x K
+ * @param B: K x N
+ * @param C: M x N
+ */
+void mpsGemm(const float* A, const float* B, float* C, int rowA, int colA, int rowB, int colB, bool transposeA, bool transposeB) {
+    // Encoding leaves autoreleased MPS objects that retain the result buffer.
+    // Callers have no pool to drain, so without this every scratch buffer
+    // would stay allocated for the life of the process.
+    @autoreleasepool {
+        encodeGemm(A, B, C, rowA, colA, rowB, colB, transposeA, transposeB);
+    }
 }
 
 void mpsAdd(const float* A, const float* B, float* C, int rowA, int colA, bool transpose, float a, float b){
@@ -861,9 +871,9 @@ void mpsCausalMask(float* S, int n, bool transpose, float maskVal) {
     opEncoded();
 }
 
-void mpsGemmBatched(const float* A, const float* B, float* C, int batch,
-                    int rowA, int colA, int rowB, int colB,
-                    bool transposeA, bool transposeB, float alpha, float beta) {
+static void encodeGemmBatched(const float* A, const float* B, float* C, int batch,
+                              int rowA, int colA, int rowB, int colB,
+                              bool transposeA, bool transposeB, float alpha, float beta) {
     const int resultRows = transposeA ? colA : rowA;
     const int resultColumns = transposeB ? rowB : colB;
     const int interiorColumns = transposeA ? rowA : colA;
@@ -920,6 +930,14 @@ void mpsGemmBatched(const float* A, const float* B, float* C, int batch,
         mpsCopyMatrixBlock(scratch, C, 1, span, false, 0, 0, 1, span, 1, batch * elementsC, false, 0, b0 * elementsC);
     }
     mpsFree(scratch);
+}
+
+void mpsGemmBatched(const float* A, const float* B, float* C, int batch,
+                    int rowA, int colA, int rowB, int colB,
+                    bool transposeA, bool transposeB, float alpha, float beta) {
+    @autoreleasepool {  // see mpsGemm
+        encodeGemmBatched(A, B, C, batch, rowA, colA, rowB, colB, transposeA, transposeB, alpha, beta);
+    }
 }
 
 // Shared encode path for the attention pack/unpack gather kernels.
