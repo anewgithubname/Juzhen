@@ -57,11 +57,23 @@ float comp_med(const Matrix<T> &a) {
     STATIC_TIC;
     size_t n = a.num_row() * a.num_row();
 #ifdef CUDA
-    const float *s = (float *)comp_dist(a, a).data();
-    thrust::device_vector<float> vec(s, s + n);
-    thrust::sort(vec.begin(), vec.end());
+    // Sort on the GPU; d keeps the distances alive until the median is read.
+    Matrix<T> d = comp_dist(a, a);
+    float *p = (float *)d.data();
+    float median;
+    if constexpr (std::is_same_v<T, CUDAfloat>) {
+        // device memory: sort it in place
+        auto s = thrust::device_pointer_cast(p);
+        thrust::sort(s, s + n);
+        median = s[n / 2];
+    } else {
+        // host memory: sort a device copy
+        thrust::device_vector<float> vec(p, p + n);
+        thrust::sort(vec.begin(), vec.end());
+        median = vec[n / 2];
+    }
     STATIC_TOC;
-    return sqrt(.5*vec[n / 2]);
+    return sqrt(.5*median);
 #else
     // Sort a host copy that outlives this statement; for device backends
     // to_host() also waits for the distance computation to finish.
