@@ -16,11 +16,19 @@
  *   RF_BATCH_SIZE        mini-batch size                     (default: 128)
  *   RF_LR                Adam learning rate                  (default: 2e-4)
  *   RF_EULER_STEPS       ODE sampling steps                  (default: 100)
+ *   RF_SAMPLER           ODE solver for samples: euler|heun  (default: euler)
  *   RF_SEED              random seed                         (default: 42)
  *   RF_FID_SAMPLES       images to dump per epoch for FID    (default: 1000)
+ *   RF_CHECKPOINT        network saved after every epoch     (default: res/generated_cifar10/unet.ckpt)
+ *   RF_EMA               decay of the weight EMA, 0 = off    (default: 0.9999); the
+ *                        averaged weights draw the samples and are saved as *_ema.ckpt
+ *   RF_FLIP              random horizontal flips, 0 = off    (default: 1)
+ *   RF_T_SAMPLING        training times: uniform|logitnormal (default: uniform); for this
+ *                        model logit-normal undertrains t near 0 and 1 and raised FID
  */
 
 #include "../cpp/juzhen.hpp"
+#include "../ml/checkpoint.hpp"
 #include "../ml/layer.hpp"
 #include "../ml/optimizer.hpp"
 
@@ -29,9 +37,12 @@
 #include <cstdio>
 #include <cstdlib>
 #include <cstring>
+#include <filesystem>
 #include <fstream>
+#include <functional>
 #include <iomanip>
 #include <iostream>
+#include <memory>
 #include <numeric>
 #include <random>
 #include <sstream>
@@ -258,6 +269,11 @@ public:
                                           &mid, &enc3, &enc2, &enc1});
     }
 
+    // every layer, input first (the order used by checkpoints)
+    std::list<Layer<FLOAT>*> layers() {
+        return {&enc1, &enc2, &enc3, &mid, &up2, &dec2, &up1, &dec1, &head};
+    }
+
     const Matrix<FLOAT>& eval(const Matrix<FLOAT>& inp) {
         enc1.eval(inp);
         e1 = enc1.value();
@@ -341,28 +357,58 @@ static void build_time_channels(Matrix<float>& out,
     }
 }
 
-// ── Euler ODE sampling ───────────────────────────────────────────────────────
-static Matrix<FLOAT> euler_sample(RectifiedUNet& net, int batchsize, int euler_steps) {
+// ── Exponential moving average of the weights ───────────────────────────────
+// Sampling from averaged weights gives cleaner images than the last iterate.
+class WeightEMA {
+    std::vector<Matrix<FLOAT>*> params_;
+    std::vector<Matrix<FLOAT>> average_;
+    float decay_;
+
+public:
+    WeightEMA(RectifiedUNet& net, float decay) : decay_(decay) {
+        for (auto* layer : net.layers())
+            for (auto& [name, m] : layer->checkpoint_parameters()) {
+                params_.push_back(m);
+                average_.push_back(*m);
+            }
+    }
+
+    // after each optimizer step; the warm-up keeps early weights from lingering
+    void update(int step) {
+        const float d = std::min(decay_, (1.0f + step) / (10.0f + step));
+        for (size_t i = 0; i < params_.size(); ++i)
+            average_[i] = average_[i] * d + *params_[i] * (1.0f - d);
+    }
+
+    // exchanges the network's weights with the averaged ones
+    void swap() {
+        for (size_t i = 0; i < params_.size(); ++i)
+            std::swap(*params_[i], average_[i]);
+    }
+};
+
+// ── ODE sampling (Euler or Heun) ────────────────────────────────────────────
+// Integrates dZ = v(Z, t) dt from noise at t = 0 to images at t = 1. Heun
+// evaluates the network twice per step. on_step, if given, sees the samples
+// after every step (and the noise at step 0).
+static Matrix<FLOAT> ode_sample(RectifiedUNet& net, int batchsize, int steps, bool heun = false,
+                                const std::function<void(int, const Matrix<FLOAT>&)>& on_step = {}) {
     const int C = 3, H = 32, W = 32;
     const int d = C * H * W;
     const int hw = H * W;
 
     auto Zs = randn(d, batchsize);
-    float dt = 1.0f / euler_steps;
+    float dt = 1.0f / steps;
+    if (on_step) on_step(0, Zs);
 
-    std::list<Layer<FLOAT>*> all_layers{
-        (Layer<FLOAT>*)&net.enc1, (Layer<FLOAT>*)&net.enc2,
-        (Layer<FLOAT>*)&net.enc3, (Layer<FLOAT>*)&net.mid,
-        (Layer<FLOAT>*)&net.up2,  (Layer<FLOAT>*)&net.dec2,
-        (Layer<FLOAT>*)&net.up1,  (Layer<FLOAT>*)&net.dec1,
-        (Layer<FLOAT>*)&net.head};
+    std::list<Layer<FLOAT>*> all_layers = net.layers();
     freeze(all_layers);
 
     Matrix<float> t_host("t_s", 1, batchsize);
     Matrix<float> temb_host("temb_s", TIME_CH * hw, batchsize);
 
-    for (int s = 0; s < euler_steps; ++s) {
-        float tv = (float)s / euler_steps;
+    // the network's velocity at (Z, tv); valid until the next call
+    auto velocity = [&](const Matrix<FLOAT>& Z, float tv) -> const Matrix<FLOAT>& {
         for (int b = 0; b < batchsize; ++b)
             t_host.elem(0, b) = tv;
         build_time_channels(temb_host, t_host, H, W, batchsize);
@@ -373,10 +419,24 @@ static Matrix<FLOAT> euler_sample(RectifiedUNet& net, int batchsize, int euler_s
         Matrix<FLOAT>& temb = temb_host;
 #endif
 
-        auto inp_s = vs({MatrixView<FLOAT>(Zs),
+        auto inp_s = vs({MatrixView<FLOAT>(Z),
                          MatrixView<FLOAT>(temb)});
-        const auto& vel = net.eval(inp_s);
-        Zs = Zs + vel * dt;
+        return net.eval(inp_s);
+    };
+
+    for (int s = 0; s < steps; ++s) {
+        float tv = (float)s / steps;
+        const auto& vel = velocity(Zs, tv);
+        if (heun) {
+            // average the slopes at both ends of an Euler step
+            auto half = Zs + vel * (dt / 2);
+            auto predicted = Zs + vel * dt;
+            const auto& vel_end = velocity(predicted, tv + dt);
+            Zs = half + vel_end * (dt / 2);
+        } else {
+            Zs = Zs + vel * dt;
+        }
+        if (on_step) on_step(s + 1, Zs);
     }
 
     unfreeze(all_layers);
@@ -395,6 +455,15 @@ int compute() {
     const std::string cifar_dir = env_str("CIFAR10_DIR",
         std::string(PROJECT_DIR) + "/datasets/CIFAR10/cifar-10-batches-bin");
     const std::string out_dir = std::string(PROJECT_DIR) + "/res/generated_cifar10";
+    const std::string checkpoint_path = env_str("RF_CHECKPOINT", out_dir + "/unet.ckpt");
+    const bool heun       = env_str("RF_SAMPLER", "euler") == "heun";
+    const float ema_decay = env_float("RF_EMA", 0.9999f);
+    const bool flip       = env_str("RF_FLIP", "1") != "0";
+    const bool logit_t    = env_str("RF_T_SAMPLING", "uniform") == "logitnormal";
+    // unet.ckpt -> unet_ema.ckpt
+    const std::string ema_path = checkpoint_path.size() > 5 && checkpoint_path.ends_with(".ckpt")
+        ? checkpoint_path.substr(0, checkpoint_path.size() - 5) + "_ema.ckpt"
+        : checkpoint_path + "_ema";
 
 #ifdef CUDA
     GPUSampler sampler(seed);
@@ -403,12 +472,9 @@ int compute() {
 
     // Create output directory
     {
-#ifdef _WIN32
-        std::string cmd = "mkdir \"" + out_dir + "\" 2>nul";
-#else
-        std::string cmd = "mkdir -p " + out_dir;
-#endif
-        if (system(cmd.c_str()) != 0)
+        std::error_code ec;
+        std::filesystem::create_directories(out_dir, ec);
+        if (ec)
             std::cerr << "Warning: could not create " << out_dir << std::endl;
     }
 
@@ -430,6 +496,9 @@ int compute() {
          << "  seed=" << seed
          << "  schedule=cosine"
          << "  time_freqs=" << TIME_NFREQ << endl;
+    cout << "  ema=" << ema_decay << "  flip=" << flip
+         << "  t_sampling=" << (logit_t ? "logitnormal" : "uniform")
+         << "  sampler=" << (heun ? "heun" : "euler") << endl;
 
     // ── Load CIFAR-10 ────────────────────────────────────────────────────
     cout << "Loading CIFAR-10 from: " << cifar_dir << endl;
@@ -450,6 +519,8 @@ int compute() {
     options.lr = lr;
     options.weight_decay = 0; // Preserve the original Adam training objective.
     AdamW<FLOAT> optimizer(net.parameters(), options);
+    std::unique_ptr<WeightEMA> ema;
+    if (ema_decay > 0) ema = std::make_unique<WeightEMA>(net, ema_decay);
 
     auto t_start = Clock::now();
     float ema_loss = 0.0f;
@@ -477,8 +548,12 @@ int compute() {
             Matrix<float> x1_host("x1", d, batchsize);
             for (int b = 0; b < batchsize; ++b) {
                 int img_idx = perm[offset + b];
-                for (int p = 0; p < d; ++p)
-                    x1_host.elem(p, b) = cifar_host.elem(p, img_idx);
+                // half the images mirrored left-right (pixel p is column p % W)
+                const bool mirror = flip && udist(global_rand_gen) < 0.5f;
+                for (int p = 0; p < d; ++p) {
+                    const int q = mirror ? p - p % W + (W - 1 - p % W) : p;
+                    x1_host.elem(p, b) = cifar_host.elem(q, img_idx);
+                }
             }
 
 #if defined(CUDA) || defined(ROCM_HIP) || defined(APPLE_SILICON)
@@ -487,10 +562,13 @@ int compute() {
             Matrix<FLOAT>& x1 = x1_host;
 #endif
 
-            // Sample random time t ~ U[0,1]
+            // Sample random time t ~ U[0,1], or logit-normal: sigmoid(N(0,1)),
+            // which concentrates training on the middle of the path
             Matrix<float> t_host("t_host", 1, batchsize);
+            std::normal_distribution<float> ndist(0.0f, 1.0f);
             for (int b = 0; b < batchsize; ++b)
-                t_host.elem(0, b) = udist(global_rand_gen);
+                t_host.elem(0, b) = logit_t ? 1.0f / (1.0f + std::exp(-ndist(global_rand_gen)))
+                                            : udist(global_rand_gen);
 
 #if defined(CUDA) || defined(ROCM_HIP) || defined(APPLE_SILICON)
             Matrix<FLOAT> t_val(t_host);
@@ -533,6 +611,7 @@ int compute() {
             auto grad = 2.0f * diff / (float)batchsize;
             net.backward(inp, std::move(grad));
             optimizer.step();
+            if (ema) ema->update(global_step);
 
             if (!ema_init) { ema_loss = loss; ema_init = true; }
             else           { ema_loss = 0.95f * ema_loss + 0.05f * loss; }
@@ -555,13 +634,28 @@ int compute() {
         cout << "Epoch " << (epoch + 1) << " done.  ema_loss=" << fixed << setprecision(5) << ema_loss
              << "  elapsed=" << fixed << setprecision(1) << elapsed << "s" << endl;
 
+        TrainingProgress progress;
+        progress.epoch = epoch + 1;
+        progress.step = (uint64_t)(epoch + 1) * steps_per_epoch;
+        std::string checkpoint_error;
+        if (!save_checkpoint(net.layers(), checkpoint_path, progress, &checkpoint_error))
+            cerr << "Warning: could not save " << checkpoint_path << ": " << checkpoint_error << endl;
+
+        // sample from the averaged weights, and save them for inference
+        if (ema) {
+            ema->swap();
+            if (!save_checkpoint(net.layers(), ema_path, progress, &checkpoint_error))
+                cerr << "Warning: could not save " << ema_path << ": " << checkpoint_error << endl;
+        }
+
         // ── End-of-epoch sampling (1000 images for FID) ────────────────
-        cout << "  Generating " << fid_samples << " samples (" << euler_steps << " Euler steps)..." << flush;
+        cout << "  Generating " << fid_samples << " samples (" << euler_steps << " "
+             << (heun ? "Heun" : "Euler") << " steps)..." << flush;
         int n_batches = (fid_samples + batchsize - 1) / batchsize;
         Matrix<float> all_samples("all_samples", d, fid_samples);
         int filled = 0;
         for (int bi = 0; bi < n_batches && filled < fid_samples; ++bi) {
-            auto Zs = euler_sample(net, batchsize, euler_steps);
+            auto Zs = ode_sample(net, batchsize, euler_steps, heun);
             auto Zh = to_host(Zs);
             int take = std::min(batchsize, fid_samples - filled);
             for (int i = 0; i < take; ++i)
@@ -585,11 +679,14 @@ int compute() {
         std::string ppm_path = out_dir + "/epoch_" + std::to_string(epoch + 1) + ".ppm";
         save_ppm(ppm_path, grid_samples, ncol, nrow);
         cout << " saved to " << bin_path << endl;
+        if (ema) ema->swap();
     }
 
     // ── Final samples ────────────────────────────────────────────────────
-    cout << "\nGenerating final samples (" << euler_steps << " Euler steps)..." << flush;
-    auto Zs = euler_sample(net, batchsize, euler_steps);
+    if (ema) ema->swap();
+    cout << "\nGenerating final samples (" << euler_steps << " " << (heun ? "Heun" : "Euler")
+         << " steps)..." << flush;
+    auto Zs = ode_sample(net, batchsize, euler_steps, heun);
     auto Zh = to_host(Zs);
 
     int sample_n = std::min(64, batchsize);

@@ -286,8 +286,13 @@ Environment variables for `demo_cnn_rectified`:
 | `RF_BATCH_SIZE` | 128 | Mini-batch size |
 | `RF_LR` | 2e-4 | Adam learning rate |
 | `RF_EULER_STEPS` | 100 | ODE sampling steps |
+| `RF_SAMPLER` | euler | ODE solver for samples: `euler` or `heun` |
 | `RF_FID_SAMPLES` | 1000 | Images dumped per epoch for FID |
 | `RF_SEED` | 42 | Random seed |
+| `RF_CHECKPOINT` | `res/generated_cifar10/unet.ckpt` | Network saved after every epoch |
+| `RF_EMA` | 0.9999 | Decay of the weight EMA (0 = off); saved as `*_ema.ckpt` |
+| `RF_FLIP` | 1 | Random horizontal flips (0 = off) |
+| `RF_T_SAMPLING` | uniform | Training times: `uniform` or `logitnormal` |
 
 Examples:
 ```bash
