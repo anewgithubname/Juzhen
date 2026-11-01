@@ -41,6 +41,7 @@
 #include <cstdio>
 #include <cstdlib>
 #include <fstream>
+#include <functional>
 #include <list>
 #include <mutex>
 #include <random>
@@ -110,7 +111,7 @@ static Matrix<float> sample_dataset(const string& name, int n) {
     return X;
 }
 
-static bool valid_dataset(const string& name) {
+bool valid_dataset(const string& name) {
     for (const char* d : DATASETS)
         if (name == d) return true;
     return false;
@@ -121,6 +122,142 @@ static void put_f(ostringstream& ss, float v) {
     char buf[16];
     snprintf(buf, sizeof(buf), "%.3f", v);
     ss << buf;
+}
+
+// Trains v_t(x) = argmin E||X' - X - u(X_t, t)||^2 with X_t = tX' + (1-t)X
+// and INDEPENDENT X ~ source, X' ~ target (eq. 5 of the paper), then
+// integrates M particles from t=0 to 1 and passes NDJSON lines to emit:
+//   {"phase":"train","iter":..,"loss":..}
+//   {"phase":"grid","x":[..],"y":[..]}
+//   {"phase":"frame","t":..,"mean_v":..,"pts":[x,y,s,..],"vec":[u,v,..]}
+//   {"phase":"done"}
+// Returns false if emit fails (client gone) before "done". Also called
+// directly by the iOS app in ios/JuzhenDemo.
+bool stream_zero_flow(const string& src, const string& tgt, int iters,
+                      const function<bool(const string&)>& emit) {
+    const int d = 2, batchsize = 256;
+    const float lr = 1e-3f;
+
+    // velocity-field MLP: (x, y, t) -> (vx, vy)
+    ReluLayer<FLOAT> L0(128, d + 1, batchsize),
+                     L1(128, 128, batchsize),
+                     L2(128, 128, batchsize);
+    LinearLayer<FLOAT> L3(d, 128, batchsize);
+    list<Layer<FLOAT>*> net({&L3, &L2, &L1, &L0});
+    // He initialization. With the default (randn * 0.001) about 1 run in 5
+    // kills every ReLU, leaving v = 0 everywhere: a false zero flow.
+    for (auto* L : net) {
+        const size_t m = L->W().num_row(), n = L->W().num_col();
+        L->W() = Matrix<FLOAT>::randn(m, n) * sqrtf(2.0f / n);
+        L->b() = Matrix<FLOAT>::zeros(m, 1);
+    }
+    Sequential<FLOAT> network(net);
+    AdamWOptions options;
+    options.lr = lr;
+    options.weight_decay = 0;
+    AdamW<FLOAT> optimizer(network.parameters(), options);
+
+    auto vs = [](vector<MatrixView<FLOAT>> v) { return vstack(v); };
+    auto ones21 = Matrix<FLOAT>::ones(d, 1);
+
+    // ── rectified-flow training with independent coupling ─────
+    for (int i = 0; i < iters; ++i) {
+        auto X0 = Matrix<FLOAT>(sample_dataset(src, batchsize));
+        auto X1 = Matrix<FLOAT>(sample_dataset(tgt, batchsize));
+        auto t = Matrix<FLOAT>::rand(1, batchsize);
+        auto Xt = hadmd(X0, ones21 * (1 - t)) + hadmd(X1, ones21 * t);
+        auto inp = vs({Xt, t});
+        optimizer.zero_grad();
+        const auto& prediction = network.eval(inp);
+        // regress the velocity X1 - X0
+        auto [loss_value, dprediction] = mse(prediction, X1 - X0);
+        float loss = item(loss_value);
+        network.backward(std::move(dprediction));
+        optimizer.step();
+
+        if (i % 200 == 0 || i == iters - 1) {
+            ostringstream ss;
+            ss << "{\"phase\":\"train\",\"iter\":" << i
+               << ",\"total\":" << iters << ",\"loss\":";
+            put_f(ss, loss);
+            ss << "}\n";
+            if (!emit(ss.str())) return false;   // client gone
+        }
+    }
+
+    // ── animation: particles + a velocity-field grid ──────────
+    const int M = 300;          // particles
+    const int K = 50;           // frames (t = 0 .. 1)
+    const int G = 12;           // G x G field grid
+    const float LO = -3.5f, HI = 3.5f;
+
+    // grid positions (fixed; sent once)
+    Matrix<float> grid_h("grid", 2, G * G);
+    grid_h.zeros();
+    {
+        ostringstream ss;
+        ss << "{\"phase\":\"grid\",\"x\":[";
+        for (int a = 0; a < G; ++a)
+            for (int b = 0; b < G; ++b) {
+                const int j = a * G + b;
+                grid_h.elem(0, j) = LO + (HI - LO) * (a + 0.5f) / G;
+                grid_h.elem(1, j) = LO + (HI - LO) * (b + 0.5f) / G;
+                if (j) ss << ",";
+                put_f(ss, grid_h.elem(0, j));
+            }
+        ss << "],\"y\":[";
+        for (int j = 0; j < G * G; ++j) {
+            if (j) ss << ",";
+            put_f(ss, grid_h.elem(1, j));
+        }
+        ss << "]}\n";
+        if (!emit(ss.str())) return false;
+    }
+    auto grid = Matrix<FLOAT>(grid_h);
+
+    auto Z = Matrix<FLOAT>(sample_dataset(src, M));
+    const float dt = 1.0f / K;
+    for (int k = 0; k <= K; ++k) {
+        const float tv = (float)k / K;
+        auto t_row = Matrix<FLOAT>::ones(1, M) * tv;
+        auto V = forward(net, vs({Z, t_row}));
+        auto Zh = as_host(Z);
+        auto Vh = as_host(V);
+
+        auto tg = Matrix<FLOAT>::ones(1, G * G) * tv;
+        auto VG = as_host(forward(net, vs({grid, tg})));
+
+        float mean_v = 0.0f;
+        ostringstream ss;
+        ss << "{\"phase\":\"frame\",\"t\":";
+        put_f(ss, tv);
+        ss << ",\"pts\":[";
+        for (int j = 0; j < M; ++j) {
+            const float sp = sqrtf(Vh.elem(0, j) * Vh.elem(0, j) +
+                                   Vh.elem(1, j) * Vh.elem(1, j));
+            mean_v += sp;
+            if (j) ss << ",";
+            put_f(ss, Zh.elem(0, j)); ss << ",";
+            put_f(ss, Zh.elem(1, j)); ss << ",";
+            put_f(ss, sp);
+        }
+        mean_v /= M;
+        ss << "],\"vec\":[";
+        for (int j = 0; j < G * G; ++j) {
+            if (j) ss << ",";
+            put_f(ss, VG.elem(0, j)); ss << ",";
+            put_f(ss, VG.elem(1, j));
+        }
+        ss << "],\"mean_v\":";
+        put_f(ss, mean_v);
+        ss << "}\n";
+        if (!emit(ss.str())) return false;
+
+        if (k < K) Z = Z + V * dt;   // Euler step
+    }
+
+    emit("{\"phase\":\"done\"}\n");
+    return true;
 }
 
 int compute() {
@@ -147,13 +284,7 @@ int compute() {
     });
 
     // POST /train?source=mixture&target=mixture&iters=4000
-    // Trains v_t(x) = argmin E||X' - X - u(X_t, t)||^2 with X_t = tX' + (1-t)X
-    // and INDEPENDENT X ~ source, X' ~ target (eq. 5 of the paper), then
-    // integrates M particles from t=0 to 1 and streams NDJSON:
-    //   {"phase":"train","iter":..,"loss":..}
-    //   {"phase":"grid","x":[..],"y":[..]}
-    //   {"phase":"frame","t":..,"mean_v":..,"pts":[x,y,s,..],"vec":[u,v,..]}
-    //   {"phase":"done"}
+    // streams stream_zero_flow() as NDJSON
     svr.Post("/train", [&](const httplib::Request& req, httplib::Response& res) {
         string src = req.get_param_value("source");
         string tgt = req.get_param_value("target");
@@ -174,122 +305,7 @@ int compute() {
                     return sink.write(line.c_str(), line.size());
                 };
 
-                const int d = 2, batchsize = 256;
-                const float lr = 1e-3f;
-
-                // velocity-field MLP: (x, y, t) -> (vx, vy)
-                ReluLayer<FLOAT> L0(128, d + 1, batchsize),
-                                 L1(128, 128, batchsize),
-                                 L2(128, 128, batchsize);
-                LinearLayer<FLOAT> L3(d, 128, batchsize);
-                list<Layer<FLOAT>*> net({&L3, &L2, &L1, &L0});
-                Sequential<FLOAT> network(net);
-                AdamWOptions options;
-                options.lr = lr;
-                options.weight_decay = 0;
-                AdamW<FLOAT> optimizer(network.parameters(), options);
-
-                auto vs = [](vector<MatrixView<FLOAT>> v) { return vstack(v); };
-                auto ones21 = Matrix<FLOAT>::ones(d, 1);
-
-                // ── rectified-flow training with independent coupling ─────
-                for (int i = 0; i < iters; ++i) {
-                    auto X0 = Matrix<FLOAT>(sample_dataset(src, batchsize));
-                    auto X1 = Matrix<FLOAT>(sample_dataset(tgt, batchsize));
-                    auto t = Matrix<FLOAT>::rand(1, batchsize);
-                    auto Xt = hadmd(X0, ones21 * (1 - t)) + hadmd(X1, ones21 * t);
-                    auto inp = vs({Xt, t});
-                    optimizer.zero_grad();
-                    const auto& prediction = network.eval(inp);
-                    // regress the velocity X1 - X0
-                    auto [loss_value, dprediction] = mse(prediction, X1 - X0);
-                    float loss = item(loss_value);
-                    network.backward(std::move(dprediction));
-                    optimizer.step();
-
-                    if (i % 200 == 0 || i == iters - 1) {
-                        ostringstream ss;
-                        ss << "{\"phase\":\"train\",\"iter\":" << i
-                           << ",\"total\":" << iters << ",\"loss\":";
-                        put_f(ss, loss);
-                        ss << "}\n";
-                        if (!emit(ss.str())) return true;   // client gone
-                    }
-                }
-
-                // ── animation: particles + a velocity-field grid ──────────
-                const int M = 300;          // particles
-                const int K = 50;           // frames (t = 0 .. 1)
-                const int G = 12;           // G x G field grid
-                const float LO = -3.5f, HI = 3.5f;
-
-                // grid positions (fixed; sent once)
-                Matrix<float> grid_h("grid", 2, G * G);
-                grid_h.zeros();
-                {
-                    ostringstream ss;
-                    ss << "{\"phase\":\"grid\",\"x\":[";
-                    for (int a = 0; a < G; ++a)
-                        for (int b = 0; b < G; ++b) {
-                            const int j = a * G + b;
-                            grid_h.elem(0, j) = LO + (HI - LO) * (a + 0.5f) / G;
-                            grid_h.elem(1, j) = LO + (HI - LO) * (b + 0.5f) / G;
-                            if (j) ss << ",";
-                            put_f(ss, grid_h.elem(0, j));
-                        }
-                    ss << "],\"y\":[";
-                    for (int j = 0; j < G * G; ++j) {
-                        if (j) ss << ",";
-                        put_f(ss, grid_h.elem(1, j));
-                    }
-                    ss << "]}\n";
-                    if (!emit(ss.str())) return true;
-                }
-                auto grid = Matrix<FLOAT>(grid_h);
-
-                auto Z = Matrix<FLOAT>(sample_dataset(src, M));
-                const float dt = 1.0f / K;
-                for (int k = 0; k <= K; ++k) {
-                    const float tv = (float)k / K;
-                    auto t_row = Matrix<FLOAT>::ones(1, M) * tv;
-                    auto V = forward(net, vs({Z, t_row}));
-                    auto Zh = as_host(Z);
-                    auto Vh = as_host(V);
-
-                    auto tg = Matrix<FLOAT>::ones(1, G * G) * tv;
-                    auto VG = as_host(forward(net, vs({grid, tg})));
-
-                    float mean_v = 0.0f;
-                    ostringstream ss;
-                    ss << "{\"phase\":\"frame\",\"t\":";
-                    put_f(ss, tv);
-                    ss << ",\"pts\":[";
-                    for (int j = 0; j < M; ++j) {
-                        const float sp = sqrtf(Vh.elem(0, j) * Vh.elem(0, j) +
-                                               Vh.elem(1, j) * Vh.elem(1, j));
-                        mean_v += sp;
-                        if (j) ss << ",";
-                        put_f(ss, Zh.elem(0, j)); ss << ",";
-                        put_f(ss, Zh.elem(1, j)); ss << ",";
-                        put_f(ss, sp);
-                    }
-                    mean_v /= M;
-                    ss << "],\"vec\":[";
-                    for (int j = 0; j < G * G; ++j) {
-                        if (j) ss << ",";
-                        put_f(ss, VG.elem(0, j)); ss << ",";
-                        put_f(ss, VG.elem(1, j));
-                    }
-                    ss << "],\"mean_v\":";
-                    put_f(ss, mean_v);
-                    ss << "}\n";
-                    if (!emit(ss.str())) return true;
-
-                    if (k < K) Z = Z + V * dt;   // Euler step
-                }
-
-                emit("{\"phase\":\"done\"}\n");
-                sink.done();
+                if (stream_zero_flow(src, tgt, iters, emit)) sink.done();
                 return true;
             });
     });

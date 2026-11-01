@@ -16,11 +16,19 @@
  *   RF_BATCH_SIZE        mini-batch size                     (default: 128)
  *   RF_LR                Adam learning rate                  (default: 2e-4)
  *   RF_EULER_STEPS       ODE sampling steps                  (default: 100)
+ *   RF_SAMPLER           ODE solver for samples: euler|heun  (default: euler)
  *   RF_SEED              random seed                         (default: 42)
  *   RF_FID_SAMPLES       images to dump per epoch for FID    (default: 1000)
+ *   RF_CHECKPOINT        network saved after every epoch     (default: res/generated_cifar10/unet.ckpt)
+ *   RF_EMA               decay of the weight EMA, 0 = off    (default: 0.9999); the
+ *                        averaged weights draw the samples and are saved as *_ema.ckpt
+ *   RF_FLIP              random horizontal flips, 0 = off    (default: 1)
+ *   RF_T_SAMPLING        training times: uniform|logitnormal (default: uniform); for this
+ *                        model logit-normal undertrains t near 0 and 1 and raised FID
  */
 
 #include "../cpp/juzhen.hpp"
+#include "../ml/checkpoint.hpp"
 #include "../ml/layer.hpp"
 #include "../ml/optimizer.hpp"
 
@@ -29,9 +37,12 @@
 #include <cstdio>
 #include <cstdlib>
 #include <cstring>
+#include <filesystem>
 #include <fstream>
+#include <functional>
 #include <iomanip>
 #include <iostream>
+#include <memory>
 #include <numeric>
 #include <random>
 #include <sstream>
@@ -190,15 +201,19 @@ static void save_raw_samples(const std::string& path,
 // Output channels: 3 (velocity prediction)
 //
 // Architecture (32×32 spatial, 3-level):
-//   enc1  : 11 → 64,  k3 s1 p1  (32×32)
-//   enc2  : 64 → 128, k3 s2 p1  (16×16)
+//   enc1  : 11 → 64,  k3 s1 p1  (32×32)  + residual block
+//   enc2  : 64 → 128, k3 s2 p1  (16×16)  + residual block
 //   enc3  : 128→ 256, k3 s2 p1  (8×8)
-//   mid   : 256→ 256, k3 s1 p1  (8×8)
+//   mid   : 256→ 256, k3 s1 p1  (8×8)    + residual block
 //   up2   : 256→ 128, k4 s2 p1  (16×16)
-//   dec2  : 256→ 128, k3 s1 p1  (16×16)  (cat with enc2 skip)
+//   dec2  : 256→ 128, k3 s1 p1  (16×16)  (cat with enc2 skip) + residual block
 //   up1   : 128→ 64,  k4 s2 p1  (32×32)
-//   dec1  : 128→ 64,  k3 s1 p1  (32×32)  (cat with enc1 skip)
+//   dec1  : 128→ 64,  k3 s1 p1  (32×32)  (cat with enc1 skip) + residual block
 //   head  : 64 → 3,   k3 s1 p1  (32×32, no ReLU)
+//
+// The residual blocks took FID-10k (2048-d) after 200 epochs from 68 to 41.
+// Feeding the time channels to every convolution, not just enc1, gained
+// about 1.5 without them and nothing with them.
 static constexpr int TIME_NFREQ = 4;       // sinusoidal frequencies
 static constexpr int TIME_CH = TIME_NFREQ * 2; // 8
 static constexpr float TIME_FREQS[TIME_NFREQ] = {
@@ -207,118 +222,6 @@ static constexpr float TIME_FREQS[TIME_NFREQ] = {
     8.0f * 3.14159265358979323846f,   // 8π
    16.0f * 3.14159265358979323846f    // 16π
 };
-
-class RectifiedUNet {
-public:
-    static constexpr int H = 32, W = 32;
-    static constexpr int in_ch = 3 + TIME_CH;  // 11
-    static constexpr int ch1 = 64;
-    static constexpr int ch2 = 128;
-    static constexpr int ch3 = 256;
-    static constexpr int out_ch = 3;
-    static constexpr int d32 = H * W;          // 1024
-    static constexpr int d16 = (H/2) * (W/2);  // 256
-    static constexpr int d8  = (H/4) * (W/4);  // 64
-
-    ConvLayer enc1;      // in_ch → ch1, 32×32
-    ConvLayer enc2;      // ch1   → ch2, 16×16
-    ConvLayer enc3;      // ch2   → ch3, 8×8
-    ConvLayer mid;       // ch3   → ch3, 8×8
-    ConvTransLayer up2;  // ch3   → ch2, 16×16
-    ConvLayer dec2;      // ch2*2 → ch2, 16×16 (skip from enc2)
-    ConvTransLayer up1;  // ch2   → ch1, 32×32
-    ConvLayer dec1;      // ch1*2 → ch1, 32×32 (skip from enc1)
-    ConvLayer head;      // ch1   → out_ch, 32×32 (no relu)
-
-    Matrix<FLOAT> e1, e2, e3, m_out, u2_out, cat2, d2_out, u1_out, cat1;
-
-    explicit RectifiedUNet(int bs)
-        : enc1(bs, in_ch,  H,   W,   ch1, 3, 3, 1, 1, true),   // 32→32
-          enc2(bs, ch1,    H,   W,   ch2, 3, 3, 1, 2, true),   // 32→16
-          enc3(bs, ch2,    H/2, W/2, ch3, 3, 3, 1, 2, true),   // 16→8
-          mid (bs, ch3,    H/4, W/4, ch3, 3, 3, 1, 1, true),   // 8→8
-          up2 (bs, ch3,    H/4, W/4, ch2, 4, 4, 1, 2, true),   // 8→16
-          dec2(bs, ch2*2,  H/2, W/2, ch2, 3, 3, 1, 1, true),   // 16→16
-          up1 (bs, ch2,    H/2, W/2, ch1, 4, 4, 1, 2, true),   // 16→32
-          dec1(bs, ch1*2,  H,   W,   ch1, 3, 3, 1, 1, true),   // 32→32
-          head(bs, ch1,    H,   W,   out_ch, 3, 3, 1, 1, false), // 32→32
-          e1("e1", ch1 * d32, bs),
-          e2("e2", ch2 * d16, bs),
-          e3("e3", ch3 * d8, bs),
-          m_out("m_out", ch3 * d8, bs),
-          u2_out("u2", ch2 * d16, bs),
-          cat2("cat2", ch2 * 2 * d16, bs),
-          d2_out("d2", ch2 * d16, bs),
-          u1_out("u1", ch1 * d32, bs),
-          cat1("cat1", ch1 * 2 * d32, bs)
-    {}
-
-    std::vector<ParameterRef<FLOAT>> parameters() {
-        return Juzhen::parameters<FLOAT>({&head, &dec1, &up1, &dec2, &up2,
-                                          &mid, &enc3, &enc2, &enc1});
-    }
-
-    const Matrix<FLOAT>& eval(const Matrix<FLOAT>& inp) {
-        enc1.eval(inp);
-        e1 = enc1.value();
-
-        enc2.eval(e1);
-        e2 = enc2.value();
-
-        enc3.eval(e2);
-        e3 = enc3.value();
-
-        mid.eval(e3);
-        m_out = mid.value();
-
-        up2.eval(m_out);
-        cat2 = vs({MatrixView<FLOAT>(up2.value()), MatrixView<FLOAT>(e2)});
-        dec2.eval(cat2);
-        d2_out = dec2.value();
-
-        up1.eval(d2_out);
-        cat1 = vs({MatrixView<FLOAT>(up1.value()), MatrixView<FLOAT>(e1)});
-        dec1.eval(cat1);
-
-        head.eval(dec1.value());
-        return head.value();
-    }
-
-    void backward(const Matrix<FLOAT>& inp, Matrix<FLOAT>&& g) {
-        auto g_head = head.backward(dec1.value(), std::move(g));
-        auto g_cat1 = dec1.backward(cat1, std::move(g_head));
-
-        const size_t skip1_sz = (size_t)ch1 * (size_t)d32;
-        auto g_u1   = g_cat1.rows(0, skip1_sz);
-        auto g_skip1 = g_cat1.rows(skip1_sz, g_cat1.num_row());
-
-        auto g_d2 = up1.backward(d2_out, std::move(g_u1));
-        auto g_cat2 = dec2.backward(cat2, std::move(g_d2));
-
-        const size_t skip2_sz = (size_t)ch2 * (size_t)d16;
-        auto g_u2   = g_cat2.rows(0, skip2_sz);
-        auto g_skip2 = g_cat2.rows(skip2_sz, g_cat2.num_row());
-
-        auto g_m  = up2.backward(m_out, std::move(g_u2));
-        auto g_e3 = mid.backward(e3, std::move(g_m));
-        auto g_e2 = enc3.backward(e2, std::move(g_e3));
-        g_e2 = g_e2 + g_skip2;
-        auto g_e1 = enc2.backward(e1, std::move(g_e2));
-        g_e1 = g_e1 + g_skip1;
-        enc1.backward(inp, std::move(g_e1));
-    }
-};
-
-// ── Cosine LR schedule with warmup ───────────────────────────────────────────
-static float cosine_lr(int step, int total_steps, float base_lr) {
-    int warmup = total_steps / 20;  // 5% warmup
-    float min_lr = base_lr * 0.01f;
-    if (step < warmup) {
-        return min_lr + (base_lr - min_lr) * (float)step / (float)warmup;
-    }
-    float progress = (float)(step - warmup) / (float)(total_steps - warmup);
-    return min_lr + 0.5f * (base_lr - min_lr) * (1.0f + std::cos(3.14159265358979323846f * progress));
-}
 
 // ── Build time-embedding channels ───────────────────────────────────────────
 // Returns a matrix of shape (TIME_CH * H * W, batchsize).
@@ -341,42 +244,231 @@ static void build_time_channels(Matrix<float>& out,
     }
 }
 
-// ── Euler ODE sampling ───────────────────────────────────────────────────────
-static Matrix<FLOAT> euler_sample(RectifiedUNet& net, int batchsize, int euler_steps) {
+// x + b(a(x)), with a ReLU after a. b starts at zero, so a new block passes x
+// through unchanged.
+class ResBlock {
+public:
+    ConvLayer a, b;
+
+    ResBlock(int bs, int ch, int h, int w)
+        : a(bs, ch, h, w, ch, 3, 3, 1, 1, true),
+          b(bs, ch, h, w, ch, 3, 3, 1, 1, false),
+          out_("res_out", (size_t)ch * h * w, bs) {
+        b.W() = zeros(b.W().num_row(), 1);
+    }
+
+    // x must stay alive until backward
+    const Matrix<FLOAT>& eval(const Matrix<FLOAT>& x) {
+        x_ = &x;
+        a.eval(x);
+        b.eval(a.value());
+        out_ = x + b.value();
+        return out_;
+    }
+
+    const Matrix<FLOAT>& value() const { return out_; }
+
+    // gradient with respect to x
+    Matrix<FLOAT> backward(Matrix<FLOAT>&& g) {
+        Matrix<FLOAT> g_skip = g;
+        auto g_h = b.backward(a.value(), std::move(g));
+        return a.backward(*x_, std::move(g_h)) + g_skip;
+    }
+
+private:
+    Matrix<FLOAT> out_;
+    const Matrix<FLOAT>* x_ = nullptr;
+};
+
+class RectifiedUNet {
+public:
+    static constexpr int H = 32, W = 32;
+    static constexpr int in_ch = 3 + TIME_CH;  // 11
+    static constexpr int ch1 = 64;
+    static constexpr int ch2 = 128;
+    static constexpr int ch3 = 256;
+    static constexpr int out_ch = 3;
+    static constexpr int d32 = H * W;          // 1024
+    static constexpr int d16 = (H/2) * (W/2);  // 256
+    static constexpr int d8  = (H/4) * (W/4);  // 64
+
+    ConvLayer enc1;      // in_ch → ch1, 32×32
+    ResBlock res_e1;
+    ConvLayer enc2;      // ch1   → ch2, 16×16
+    ResBlock res_e2;
+    ConvLayer enc3;      // ch2   → ch3, 8×8
+    ConvLayer mid;       // ch3   → ch3, 8×8
+    ResBlock res_mid;
+    ConvTransLayer up2;  // ch3   → ch2, 16×16
+    ConvLayer dec2;      // ch2*2 → ch2, 16×16 (skip from enc2)
+    ResBlock res_d2;
+    ConvTransLayer up1;  // ch2   → ch1, 32×32
+    ConvLayer dec1;      // ch1*2 → ch1, 32×32 (skip from enc1)
+    ResBlock res_d1;
+    ConvLayer head;      // ch1   → out_ch, 32×32 (no relu)
+
+    explicit RectifiedUNet(int bs)
+        : enc1(bs, in_ch,  H,   W,   ch1, 3, 3, 1, 1, true),   // 32→32
+          res_e1(bs, ch1,  H,   W),
+          enc2(bs, ch1,    H,   W,   ch2, 3, 3, 1, 2, true),   // 32→16
+          res_e2(bs, ch2,  H/2, W/2),
+          enc3(bs, ch2,    H/2, W/2, ch3, 3, 3, 1, 2, true),   // 16→8
+          mid (bs, ch3,    H/4, W/4, ch3, 3, 3, 1, 1, true),   // 8→8
+          res_mid(bs, ch3, H/4, W/4),
+          up2 (bs, ch3,    H/4, W/4, ch2, 4, 4, 1, 2, true),   // 8→16
+          dec2(bs, ch2*2,  H/2, W/2, ch2, 3, 3, 1, 1, true),   // 16→16
+          res_d2(bs, ch2,  H/2, W/2),
+          up1 (bs, ch2,    H/2, W/2, ch1, 4, 4, 1, 2, true),   // 16→32
+          dec1(bs, ch1*2,  H,   W,   ch1, 3, 3, 1, 1, true),   // 32→32
+          res_d1(bs, ch1,  H,   W),
+          head(bs, ch1,    H,   W,   out_ch, 3, 3, 1, 1, false), // 32→32
+          temb_host_("temb", TIME_CH * d32, bs),
+          inp_("inp", in_ch * d32, bs),
+          cat2_("cat2", ch2 * 2 * d16, bs),
+          cat1_("cat1", ch1 * 2 * d32, bs)
+    {}
+
+    std::vector<ParameterRef<FLOAT>> parameters() {
+        return Juzhen::parameters<FLOAT>(layers());
+    }
+
+    // every layer, input first (the order used by checkpoints)
+    std::list<Layer<FLOAT>*> layers() {
+        return {&enc1, &res_e1.a, &res_e1.b, &enc2, &res_e2.a, &res_e2.b, &enc3, &mid,
+                &res_mid.a, &res_mid.b, &up2, &dec2, &res_d2.a, &res_d2.b, &up1, &dec1,
+                &res_d1.a, &res_d1.b, &head};
+    }
+
+    // x: x_t, t: the time of each column (1 × batch)
+    const Matrix<FLOAT>& eval(const Matrix<FLOAT>& x, const Matrix<float>& t) {
+        build_time_channels(temb_host_, t, H, W, (int)t.num_col());
+        Matrix<FLOAT> temb(temb_host_);
+        inp_ = vs({MatrixView<FLOAT>(x), MatrixView<FLOAT>(temb)});
+
+        enc1.eval(inp_);
+        const auto& e1 = res_e1.eval(enc1.value());
+        enc2.eval(e1);
+        const auto& e2 = res_e2.eval(enc2.value());
+        enc3.eval(e2);
+        mid.eval(enc3.value());
+
+        up2.eval(res_mid.eval(mid.value()));
+        cat2_ = vs({MatrixView<FLOAT>(up2.value()), MatrixView<FLOAT>(e2)});
+        dec2.eval(cat2_);
+
+        up1.eval(res_d2.eval(dec2.value()));
+        cat1_ = vs({MatrixView<FLOAT>(up1.value()), MatrixView<FLOAT>(e1)});
+        dec1.eval(cat1_);
+
+        head.eval(res_d1.eval(dec1.value()));
+        return head.value();
+    }
+
+    // after eval; g is the gradient of the loss with respect to its output
+    void backward(Matrix<FLOAT>&& g) {
+        const size_t skip1_sz = (size_t)ch1 * (size_t)d32;
+        const size_t skip2_sz = (size_t)ch2 * (size_t)d16;
+
+        auto g_d1 = res_d1.backward(head.backward(res_d1.value(), std::move(g)));
+        auto g_cat1 = dec1.backward(cat1_, std::move(g_d1));
+
+        auto g_d2 = res_d2.backward(up1.backward(res_d2.value(), g_cat1.rows(0, skip1_sz)));
+        auto g_cat2 = dec2.backward(cat2_, std::move(g_d2));
+
+        auto g_m = res_mid.backward(up2.backward(res_mid.value(), g_cat2.rows(0, skip2_sz)));
+        auto g_e3 = mid.backward(enc3.value(), std::move(g_m));
+
+        auto g_e2 = enc3.backward(res_e2.value(), std::move(g_e3))
+                    + g_cat2.rows(skip2_sz, g_cat2.num_row());
+        auto g_e1 = enc2.backward(res_e1.value(), res_e2.backward(std::move(g_e2)))
+                    + g_cat1.rows(skip1_sz, g_cat1.num_row());
+        enc1.backward(inp_, res_e1.backward(std::move(g_e1)));
+    }
+
+private:
+    Matrix<float> temb_host_;
+    Matrix<FLOAT> inp_, cat2_, cat1_;
+};
+
+// ── Cosine LR schedule with warmup ───────────────────────────────────────────
+static float cosine_lr(int step, int total_steps, float base_lr) {
+    int warmup = total_steps / 20;  // 5% warmup
+    float min_lr = base_lr * 0.01f;
+    if (step < warmup) {
+        return min_lr + (base_lr - min_lr) * (float)step / (float)warmup;
+    }
+    float progress = (float)(step - warmup) / (float)(total_steps - warmup);
+    return min_lr + 0.5f * (base_lr - min_lr) * (1.0f + std::cos(3.14159265358979323846f * progress));
+}
+
+// ── Exponential moving average of the weights ───────────────────────────────
+// Sampling from averaged weights gives cleaner images than the last iterate.
+class WeightEMA {
+    std::vector<Matrix<FLOAT>*> params_;
+    std::vector<Matrix<FLOAT>> average_;
+    float decay_;
+
+public:
+    WeightEMA(RectifiedUNet& net, float decay) : decay_(decay) {
+        for (auto* layer : net.layers())
+            for (auto& [name, m] : layer->checkpoint_parameters()) {
+                params_.push_back(m);
+                average_.push_back(*m);
+            }
+    }
+
+    // after each optimizer step; the warm-up keeps early weights from lingering
+    void update(int step) {
+        const float d = std::min(decay_, (1.0f + step) / (10.0f + step));
+        for (size_t i = 0; i < params_.size(); ++i)
+            average_[i] = average_[i] * d + *params_[i] * (1.0f - d);
+    }
+
+    // exchanges the network's weights with the averaged ones
+    void swap() {
+        for (size_t i = 0; i < params_.size(); ++i)
+            std::swap(*params_[i], average_[i]);
+    }
+};
+
+// ── ODE sampling (Euler or Heun) ────────────────────────────────────────────
+// Integrates dZ = v(Z, t) dt from noise at t = 0 to images at t = 1. Heun
+// evaluates the network twice per step. on_step, if given, sees the samples
+// after every step (and the noise at step 0).
+static Matrix<FLOAT> ode_sample(RectifiedUNet& net, int batchsize, int steps, bool heun = false,
+                                const std::function<void(int, const Matrix<FLOAT>&)>& on_step = {}) {
     const int C = 3, H = 32, W = 32;
     const int d = C * H * W;
-    const int hw = H * W;
 
     auto Zs = randn(d, batchsize);
-    float dt = 1.0f / euler_steps;
+    float dt = 1.0f / steps;
+    if (on_step) on_step(0, Zs);
 
-    std::list<Layer<FLOAT>*> all_layers{
-        (Layer<FLOAT>*)&net.enc1, (Layer<FLOAT>*)&net.enc2,
-        (Layer<FLOAT>*)&net.enc3, (Layer<FLOAT>*)&net.mid,
-        (Layer<FLOAT>*)&net.up2,  (Layer<FLOAT>*)&net.dec2,
-        (Layer<FLOAT>*)&net.up1,  (Layer<FLOAT>*)&net.dec1,
-        (Layer<FLOAT>*)&net.head};
+    std::list<Layer<FLOAT>*> all_layers = net.layers();
     freeze(all_layers);
 
     Matrix<float> t_host("t_s", 1, batchsize);
-    Matrix<float> temb_host("temb_s", TIME_CH * hw, batchsize);
 
-    for (int s = 0; s < euler_steps; ++s) {
-        float tv = (float)s / euler_steps;
+    // the network's velocity at (Z, tv); valid until the next call
+    auto velocity = [&](const Matrix<FLOAT>& Z, float tv) -> const Matrix<FLOAT>& {
         for (int b = 0; b < batchsize; ++b)
             t_host.elem(0, b) = tv;
-        build_time_channels(temb_host, t_host, H, W, batchsize);
+        return net.eval(Z, t_host);
+    };
 
-#if defined(CUDA) || defined(ROCM_HIP) || defined(APPLE_SILICON)
-        Matrix<FLOAT> temb(temb_host);
-#else
-        Matrix<FLOAT>& temb = temb_host;
-#endif
-
-        auto inp_s = vs({MatrixView<FLOAT>(Zs),
-                         MatrixView<FLOAT>(temb)});
-        const auto& vel = net.eval(inp_s);
-        Zs = Zs + vel * dt;
+    for (int s = 0; s < steps; ++s) {
+        float tv = (float)s / steps;
+        const auto& vel = velocity(Zs, tv);
+        if (heun) {
+            // average the slopes at both ends of an Euler step
+            auto half = Zs + vel * (dt / 2);
+            auto predicted = Zs + vel * dt;
+            const auto& vel_end = velocity(predicted, tv + dt);
+            Zs = half + vel_end * (dt / 2);
+        } else {
+            Zs = Zs + vel * dt;
+        }
+        if (on_step) on_step(s + 1, Zs);
     }
 
     unfreeze(all_layers);
@@ -395,6 +487,15 @@ int compute() {
     const std::string cifar_dir = env_str("CIFAR10_DIR",
         std::string(PROJECT_DIR) + "/datasets/CIFAR10/cifar-10-batches-bin");
     const std::string out_dir = std::string(PROJECT_DIR) + "/res/generated_cifar10";
+    const std::string checkpoint_path = env_str("RF_CHECKPOINT", out_dir + "/unet.ckpt");
+    const bool heun       = env_str("RF_SAMPLER", "euler") == "heun";
+    const float ema_decay = env_float("RF_EMA", 0.9999f);
+    const bool flip       = env_str("RF_FLIP", "1") != "0";
+    const bool logit_t    = env_str("RF_T_SAMPLING", "uniform") == "logitnormal";
+    // unet.ckpt -> unet_ema.ckpt
+    const std::string ema_path = checkpoint_path.size() > 5 && checkpoint_path.ends_with(".ckpt")
+        ? checkpoint_path.substr(0, checkpoint_path.size() - 5) + "_ema.ckpt"
+        : checkpoint_path + "_ema";
 
 #ifdef CUDA
     GPUSampler sampler(seed);
@@ -403,12 +504,9 @@ int compute() {
 
     // Create output directory
     {
-#ifdef _WIN32
-        std::string cmd = "mkdir \"" + out_dir + "\" 2>nul";
-#else
-        std::string cmd = "mkdir -p " + out_dir;
-#endif
-        if (system(cmd.c_str()) != 0)
+        std::error_code ec;
+        std::filesystem::create_directories(out_dir, ec);
+        if (ec)
             std::cerr << "Warning: could not create " << out_dir << std::endl;
     }
 
@@ -430,6 +528,9 @@ int compute() {
          << "  seed=" << seed
          << "  schedule=cosine"
          << "  time_freqs=" << TIME_NFREQ << endl;
+    cout << "  ema=" << ema_decay << "  flip=" << flip
+         << "  t_sampling=" << (logit_t ? "logitnormal" : "uniform")
+         << "  sampler=" << (heun ? "heun" : "euler") << endl;
 
     // ── Load CIFAR-10 ────────────────────────────────────────────────────
     cout << "Loading CIFAR-10 from: " << cifar_dir << endl;
@@ -450,6 +551,8 @@ int compute() {
     options.lr = lr;
     options.weight_decay = 0; // Preserve the original Adam training objective.
     AdamW<FLOAT> optimizer(net.parameters(), options);
+    std::unique_ptr<WeightEMA> ema;
+    if (ema_decay > 0) ema = std::make_unique<WeightEMA>(net, ema_decay);
 
     auto t_start = Clock::now();
     float ema_loss = 0.0f;
@@ -477,8 +580,12 @@ int compute() {
             Matrix<float> x1_host("x1", d, batchsize);
             for (int b = 0; b < batchsize; ++b) {
                 int img_idx = perm[offset + b];
-                for (int p = 0; p < d; ++p)
-                    x1_host.elem(p, b) = cifar_host.elem(p, img_idx);
+                // half the images mirrored left-right (pixel p is column p % W)
+                const bool mirror = flip && udist(global_rand_gen) < 0.5f;
+                for (int p = 0; p < d; ++p) {
+                    const int q = mirror ? p - p % W + (W - 1 - p % W) : p;
+                    x1_host.elem(p, b) = cifar_host.elem(q, img_idx);
+                }
             }
 
 #if defined(CUDA) || defined(ROCM_HIP) || defined(APPLE_SILICON)
@@ -487,10 +594,13 @@ int compute() {
             Matrix<FLOAT>& x1 = x1_host;
 #endif
 
-            // Sample random time t ~ U[0,1]
+            // Sample random time t ~ U[0,1], or logit-normal: sigmoid(N(0,1)),
+            // which concentrates training on the middle of the path
             Matrix<float> t_host("t_host", 1, batchsize);
+            std::normal_distribution<float> ndist(0.0f, 1.0f);
             for (int b = 0; b < batchsize; ++b)
-                t_host.elem(0, b) = udist(global_rand_gen);
+                t_host.elem(0, b) = logit_t ? 1.0f / (1.0f + std::exp(-ndist(global_rand_gen)))
+                                            : udist(global_rand_gen);
 
 #if defined(CUDA) || defined(ROCM_HIP) || defined(APPLE_SILICON)
             Matrix<FLOAT> t_val(t_host);
@@ -509,30 +619,18 @@ int compute() {
             // target velocity = x1 - x0
             auto target_v = x1 - x0;
 
-            // Multi-frequency time encoding
-            Matrix<float> temb_host("temb", TIME_CH * H * W, batchsize);
-            build_time_channels(temb_host, t_host, H, W, batchsize);
-#if defined(CUDA) || defined(ROCM_HIP) || defined(APPLE_SILICON)
-            Matrix<FLOAT> temb(temb_host);
-#else
-            Matrix<FLOAT>& temb = temb_host;
-#endif
-
-            // Build input: [x_t (3*1024); time_channels (8*1024)]
-            auto inp = vs({MatrixView<FLOAT>(x_t),
-                           MatrixView<FLOAT>(temb)});
-
             optimizer.zero_grad();
 
             // Forward pass
-            const auto& pred_v = net.eval(inp);
+            const auto& pred_v = net.eval(x_t, t_host);
 
             // MSE loss + backward
             auto diff = pred_v - target_v;
             float loss = item(sum(sum(square(Matrix<FLOAT>(diff)), 0), 1)) / (float)batchsize;
             auto grad = 2.0f * diff / (float)batchsize;
-            net.backward(inp, std::move(grad));
+            net.backward(std::move(grad));
             optimizer.step();
+            if (ema) ema->update(global_step);
 
             if (!ema_init) { ema_loss = loss; ema_init = true; }
             else           { ema_loss = 0.95f * ema_loss + 0.05f * loss; }
@@ -555,13 +653,28 @@ int compute() {
         cout << "Epoch " << (epoch + 1) << " done.  ema_loss=" << fixed << setprecision(5) << ema_loss
              << "  elapsed=" << fixed << setprecision(1) << elapsed << "s" << endl;
 
+        TrainingProgress progress;
+        progress.epoch = epoch + 1;
+        progress.step = (uint64_t)(epoch + 1) * steps_per_epoch;
+        std::string checkpoint_error;
+        if (!save_checkpoint(net.layers(), checkpoint_path, progress, &checkpoint_error))
+            cerr << "Warning: could not save " << checkpoint_path << ": " << checkpoint_error << endl;
+
+        // sample from the averaged weights, and save them for inference
+        if (ema) {
+            ema->swap();
+            if (!save_checkpoint(net.layers(), ema_path, progress, &checkpoint_error))
+                cerr << "Warning: could not save " << ema_path << ": " << checkpoint_error << endl;
+        }
+
         // ── End-of-epoch sampling (1000 images for FID) ────────────────
-        cout << "  Generating " << fid_samples << " samples (" << euler_steps << " Euler steps)..." << flush;
+        cout << "  Generating " << fid_samples << " samples (" << euler_steps << " "
+             << (heun ? "Heun" : "Euler") << " steps)..." << flush;
         int n_batches = (fid_samples + batchsize - 1) / batchsize;
         Matrix<float> all_samples("all_samples", d, fid_samples);
         int filled = 0;
         for (int bi = 0; bi < n_batches && filled < fid_samples; ++bi) {
-            auto Zs = euler_sample(net, batchsize, euler_steps);
+            auto Zs = ode_sample(net, batchsize, euler_steps, heun);
             auto Zh = to_host(Zs);
             int take = std::min(batchsize, fid_samples - filled);
             for (int i = 0; i < take; ++i)
@@ -585,11 +698,14 @@ int compute() {
         std::string ppm_path = out_dir + "/epoch_" + std::to_string(epoch + 1) + ".ppm";
         save_ppm(ppm_path, grid_samples, ncol, nrow);
         cout << " saved to " << bin_path << endl;
+        if (ema) ema->swap();
     }
 
     // ── Final samples ────────────────────────────────────────────────────
-    cout << "\nGenerating final samples (" << euler_steps << " Euler steps)..." << flush;
-    auto Zs = euler_sample(net, batchsize, euler_steps);
+    if (ema) ema->swap();
+    cout << "\nGenerating final samples (" << euler_steps << " " << (heun ? "Heun" : "Euler")
+         << " steps)..." << flush;
+    auto Zs = ode_sample(net, batchsize, euler_steps, heun);
     auto Zh = to_host(Zs);
 
     int sample_n = std::min(64, batchsize);

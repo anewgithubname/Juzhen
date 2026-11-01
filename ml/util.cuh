@@ -27,6 +27,9 @@
 #ifdef ROCM_HIP
 #include "../cpp/hipbackend.hpp"
 #endif
+#ifdef __APPLE__
+#include <TargetConditionals.h>
+#endif
 
 #include <cfloat>       // DBL_MAX used by predict_one_hot
 #include <cmath>        // std::sqrt (float overload) in the fused CPU Adam
@@ -193,7 +196,7 @@ Matrix<T> predict_one_hot(const Matrix<T>& input){
 // maximum is marked), computed with device kernels instead of host
 // round trips through reduce() and elemwise().
 template <>
-Matrix<MPSfloat> predict_one_hot(const Matrix<MPSfloat>& input){
+inline Matrix<MPSfloat> predict_one_hot(const Matrix<MPSfloat>& input){
     Matrix<MPSfloat> colmax("colmax", 1, input.num_col());
     mpsColumnMax((const float*)input.data(), (float*)colmax.data(),
                  (int)input.num_row(), (int)input.num_col(), input.get_transpose());
@@ -204,7 +207,7 @@ Matrix<MPSfloat> predict_one_hot(const Matrix<MPSfloat>& input){
 #endif
 
 // convert label Y matrix (1 X n) to one-hot encoding. 
-Matrix<float> one_hot(const Matrix<int>& Y, int k) {
+inline Matrix<float> one_hot(const Matrix<int>& Y, int k) {
     Matrix<float> Y_one_hot("One_hot", k, Y.num_col());
     Y_one_hot.zeros();
 
@@ -215,19 +218,24 @@ Matrix<float> one_hot(const Matrix<int>& Y, int k) {
     return Y_one_hot;
 }
 
-std::vector<Matrix<float>> mnist_dataset(){
+inline std::vector<Matrix<float>> mnist_dataset(){
     const int k = 10;
     std::string base = PROJECT_DIR + std::string("/datasets/MNIST");
 
     // check if *.matrix files exist
     FILE *fp = fopen((base + "/train_x.matrix").c_str(), "r");
     if (!fp) {
-        // unzip dataset.zip to the folder 
+#if TARGET_OS_IPHONE
+        // iOS apps cannot run shell commands: ship the unzipped *.matrix files
+        ERROR_OUT;
+#else
+        // unzip dataset.zip to the folder
         std::string command = "unzip " + base + "/dataset.zip -d " + base;
         int result = system(command.c_str());
         if (result != 0) {
             ERROR_OUT;
         }
+#endif
     }
 
 

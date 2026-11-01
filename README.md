@@ -269,7 +269,8 @@ depend on workload, build, device and CPU thread configuration.
 | 12 | [demo_transformer.cu](examples/demo_transformer.cu) | Character-level transformer LM on enwik8 |
 | 13 | [demo_arithmetic.cu](examples/demo_arithmetic.cu) | Transformer that learns integer addition, char by char |
 | 14 | [demo_discretediffusion.cu](examples/demo_discretediffusion.cu) | Masked discrete-diffusion char LM on enwik8 (D3PM/MDLM) |
-| 15 | [compute_fid.py](examples/compute_fid.py) | Compute FID score from generated image folders |
+| 15 | [compute_fid.py](examples/compute_fid.py) | FID (2048-d Inception features, 50k real images) of CIFAR-10 samples |
+| 16 | [sample_cnn_rectified.cu](examples/sample_cnn_rectified.cu) | Draw CIFAR-10 samples from a `demo_cnn_rectified` checkpoint for FID |
 
 `demo_transformer` and `demo_discretediffusion` train on `datasets/enwik8` / `datasets/text8`
 if present (download instructions in the file headers), falling back to `datasets/corpus.txt`.
@@ -286,13 +287,25 @@ Environment variables for `demo_cnn_rectified`:
 | `RF_BATCH_SIZE` | 128 | Mini-batch size |
 | `RF_LR` | 2e-4 | Adam learning rate |
 | `RF_EULER_STEPS` | 100 | ODE sampling steps |
+| `RF_SAMPLER` | euler | ODE solver for samples: `euler` or `heun` |
 | `RF_FID_SAMPLES` | 1000 | Images dumped per epoch for FID |
 | `RF_SEED` | 42 | Random seed |
+| `RF_CHECKPOINT` | `res/generated_cifar10/unet.ckpt` | Network saved after every epoch |
+| `RF_EMA` | 0.9999 | Decay of the weight EMA (0 = off); saved as `*_ema.ckpt` |
+| `RF_FLIP` | 1 | Random horizontal flips (0 = off) |
+| `RF_T_SAMPLING` | uniform | Training times: `uniform` or `logitnormal` |
 
 Examples:
 ```bash
 RF_EPOCHS=200 RF_BATCH_SIZE=128 ./build_cuda/demo_cnn_rectified
 RF_EPOCHS=10 RF_BATCH_SIZE=128 ./build/demo_cnn_rectified
+```
+
+FID-10k of a trained checkpoint (200 epochs on an RTX 4090, about 30 minutes,
+scores about 41):
+```bash
+CKPT=res/generated_cifar10/unet.ckpt OUT=samples.bin ./build_cuda/sample_cnn_rectified
+python examples/compute_fid.py samples.bin
 ```
 
 Environment variables for `demo_cnn_mnist`:
