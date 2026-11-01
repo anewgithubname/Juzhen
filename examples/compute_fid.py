@@ -1,16 +1,24 @@
 #!/usr/bin/env python3
 """
 Compute FID (Fréchet Inception Distance) for generated CIFAR-10 samples
-saved by demo_cnn_rectified, using torchmetrics.image.fid.
+saved by demo_cnn_rectified, using torchmetrics.image.fid with the standard
+2048-d Inception pool features against all 50k training images, so the numbers
+are comparable with published CIFAR-10 FIDs. FID is biased upward for small
+sample counts: compare runs with the same number of samples (RF_FID_SAMPLES).
 
 Usage:
     python compute_fid.py [--samples-dir DIR] [--cifar-dir DIR]
                           [--real-images N] [--batch-size B]
                           [--device DEVICE] [--output PLOT.png]
+                          [SAMPLES.bin ...]
 
-Each epoch's samples are expected as:
+With no SAMPLES files, scores every epoch's samples in --samples-dir:
     <samples-dir>/epoch_<k>_samples.bin
-with header: int32 N, int32 C=3, int32 H=32, int32 W=32
+and saves the scores as a CSV and a plot. Otherwise scores just the given
+files, e.g. 10k samples drawn from a checkpoint by sample_cnn_rectified (the
+FID-10k this demo's results are quoted in).
+
+Samples files have the header int32 N, int32 C=3, int32 H=32, int32 W=32,
 followed by N*C*H*W float32 values in [-1,1], CHW per image.
 """
 
@@ -73,6 +81,28 @@ def to_float_tensor(images_np):
     return torch.from_numpy(images_np).float()
 
 
+def real_statistics(args, device):
+    """FID metric holding the real-image statistics, which reset() keeps."""
+    print(f"Loading {args.real_images} real CIFAR-10 images from {args.cifar_dir}...")
+    real_tensor = to_float_tensor(load_cifar10_real(args.cifar_dir, max_images=args.real_images))
+    print(f"  Loaded {len(real_tensor)} real images")
+    fid_metric = FrechetInceptionDistance(feature=2048, normalize=True,
+                                          reset_real_features=False).to(device)
+    for i in range(0, len(real_tensor), args.batch_size):
+        fid_metric.update(real_tensor[i:i+args.batch_size].to(device), real=True)
+    return fid_metric
+
+
+def score(fid_metric, path, batch_size, device):
+    """Feeds the samples in path to fid_metric in place of the previous ones;
+    returns how many there were."""
+    gen_tensor = to_float_tensor(load_bin_samples(path))
+    fid_metric.reset()
+    for i in range(0, len(gen_tensor), batch_size):
+        fid_metric.update(gen_tensor[i:i+batch_size].to(device), real=False)
+    return len(gen_tensor)
+
+
 # ── Main ─────────────────────────────────────────────────────────────────────
 def main():
     parser = argparse.ArgumentParser(description="Compute FID for rectified flow CIFAR-10 samples")
@@ -80,15 +110,25 @@ def main():
                         help="Directory containing epoch_*_samples.bin files")
     parser.add_argument("--cifar-dir", default="datasets/CIFAR10/cifar-10-batches-bin",
                         help="Path to cifar-10-batches-bin")
-    parser.add_argument("--real-images", type=int, default=10000,
+    parser.add_argument("--real-images", type=int, default=50000,
                         help="Number of real images to use for reference statistics")
-    parser.add_argument("--batch-size", type=int, default=64,
+    parser.add_argument("--batch-size", type=int, default=250,
                         help="Batch size for Inception forward pass")
     parser.add_argument("--device", default="cuda",
                         help="Device for Inception model (cuda or cpu)")
     parser.add_argument("--output", default="res/generated_cifar10/fid_plot.png",
                         help="Output plot file")
+    parser.add_argument("samples", nargs="*",
+                        help="Samples files to score instead of --samples-dir")
     args = parser.parse_args()
+    device = args.device if torch.cuda.is_available() else "cpu"
+
+    if args.samples:
+        fid_metric = real_statistics(args, device)
+        for path in args.samples:
+            n = score(fid_metric, path, args.batch_size, device)
+            print(f"{path}: FID = {float(fid_metric.compute()):.2f} ({n} samples)", flush=True)
+        return
 
     # Find all epoch sample files
     pattern = os.path.join(args.samples_dir, "epoch_*_samples.bin")
@@ -106,35 +146,18 @@ def main():
     epoch_files.sort(key=lambda x: x[0])
     print(f"Found {len(epoch_files)} epoch sample files")
 
-    device = args.device if torch.cuda.is_available() else "cpu"
-
-    # Load real images and feed into FID once (shared across epochs)
-    print(f"Loading {args.real_images} real CIFAR-10 images from {args.cifar_dir}...")
-    real_images = load_cifar10_real(args.cifar_dir, max_images=args.real_images)
-    real_tensor = to_float_tensor(real_images)
-    print(f"  Loaded {len(real_images)} real images")
+    fid_metric = real_statistics(args, device)
 
     # Compute FID for each epoch
     epochs = []
     fids = []
     for epoch_num, filepath in epoch_files:
         print(f"Epoch {epoch_num}: loading {filepath}...", flush=True)
-        gen_images = load_bin_samples(filepath)
-        gen_tensor = to_float_tensor(gen_images)
-
-        fid_metric = FrechetInceptionDistance(feature=64, normalize=True).to(device)
-        # Feed real images in batches
-        for i in range(0, len(real_tensor), args.batch_size):
-            fid_metric.update(real_tensor[i:i+args.batch_size].to(device), real=True)
-        # Feed generated images in batches
-        for i in range(0, len(gen_tensor), args.batch_size):
-            fid_metric.update(gen_tensor[i:i+args.batch_size].to(device), real=False)
-
+        n = score(fid_metric, filepath, args.batch_size, device)
         fid_val = float(fid_metric.compute())
-        print(f"  FID = {fid_val:.2f}", flush=True)
+        print(f"  FID = {fid_val:.2f} ({n} samples)", flush=True)
         epochs.append(epoch_num)
         fids.append(fid_val)
-        del fid_metric
 
     # Save FID values to CSV
     csv_path = os.path.join(args.samples_dir, "fid_values.csv")
