@@ -25,6 +25,7 @@
  *   RF_FLIP              random horizontal flips, 0 = off    (default: 1)
  *   RF_T_SAMPLING        training times: uniform|logitnormal (default: uniform); for this
  *                        model logit-normal undertrains t near 0 and 1 and raised FID
+ *   RF_CH                UNet width: channels ch, 2ch, 4ch   (default: 64)
  */
 
 #include "../cpp/juzhen.hpp"
@@ -200,7 +201,7 @@ static void save_raw_samples(const std::string& path,
 // Input channels: 3 (RGB x_t) + 8 (4-freq sin/cos time embed) = 11
 // Output channels: 3 (velocity prediction)
 //
-// Architecture (32×32 spatial, 3-level):
+// Architecture (32×32 spatial, 3-level), shown for the default width 64:
 //   enc1  : 11 → 64,  k3 s1 p1  (32×32)  + residual block
 //   enc2  : 64 → 128, k3 s2 p1  (16×16)  + residual block
 //   enc3  : 128→ 256, k3 s2 p1  (8×8)
@@ -214,6 +215,10 @@ static void save_raw_samples(const std::string& path,
 // The residual blocks took FID-10k (2048-d) after 200 epochs from 68 to 41.
 // Feeding the time channels to every convolution, not just enc1, gained
 // about 1.5 without them and nothing with them.
+//
+// Width and training length (FID-10k, 100 Euler steps):
+//   RF_CH=64,  200 epochs   41      RF_CH=128, 200 epochs   28
+//   RF_CH=64, 1000 epochs   29      RF_CH=128, 1000 epochs  22
 static constexpr int TIME_NFREQ = 4;       // sinusoidal frequencies
 static constexpr int TIME_CH = TIME_NFREQ * 2; // 8
 static constexpr float TIME_FREQS[TIME_NFREQ] = {
@@ -284,13 +289,11 @@ class RectifiedUNet {
 public:
     static constexpr int H = 32, W = 32;
     static constexpr int in_ch = 3 + TIME_CH;  // 11
-    static constexpr int ch1 = 64;
-    static constexpr int ch2 = 128;
-    static constexpr int ch3 = 256;
     static constexpr int out_ch = 3;
     static constexpr int d32 = H * W;          // 1024
     static constexpr int d16 = (H/2) * (W/2);  // 256
     static constexpr int d8  = (H/4) * (W/4);  // 64
+    const int ch1, ch2, ch3;                   // ch, 2ch, 4ch
 
     ConvLayer enc1;      // in_ch → ch1, 32×32
     ResBlock res_e1;
@@ -307,8 +310,9 @@ public:
     ResBlock res_d1;
     ConvLayer head;      // ch1   → out_ch, 32×32 (no relu)
 
-    explicit RectifiedUNet(int bs)
-        : enc1(bs, in_ch,  H,   W,   ch1, 3, 3, 1, 1, true),   // 32→32
+    explicit RectifiedUNet(int bs, int ch = 64)
+        : ch1(ch), ch2(2 * ch), ch3(4 * ch),
+          enc1(bs, in_ch,  H,   W,   ch1, 3, 3, 1, 1, true),   // 32→32
           res_e1(bs, ch1,  H,   W),
           enc2(bs, ch1,    H,   W,   ch2, 3, 3, 1, 2, true),   // 32→16
           res_e2(bs, ch2,  H/2, W/2),
@@ -492,6 +496,7 @@ int compute() {
     const float ema_decay = env_float("RF_EMA", 0.9999f);
     const bool flip       = env_str("RF_FLIP", "1") != "0";
     const bool logit_t    = env_str("RF_T_SAMPLING", "uniform") == "logitnormal";
+    const int width       = env_int("RF_CH", 64);
     // unet.ckpt -> unet_ema.ckpt
     const std::string ema_path = checkpoint_path.size() > 5 && checkpoint_path.ends_with(".ckpt")
         ? checkpoint_path.substr(0, checkpoint_path.size() - 5) + "_ema.ckpt"
@@ -530,7 +535,8 @@ int compute() {
          << "  time_freqs=" << TIME_NFREQ << endl;
     cout << "  ema=" << ema_decay << "  flip=" << flip
          << "  t_sampling=" << (logit_t ? "logitnormal" : "uniform")
-         << "  sampler=" << (heun ? "heun" : "euler") << endl;
+         << "  sampler=" << (heun ? "heun" : "euler")
+         << "  width=" << width << endl;
 
     // ── Load CIFAR-10 ────────────────────────────────────────────────────
     cout << "Loading CIFAR-10 from: " << cifar_dir << endl;
@@ -546,7 +552,7 @@ int compute() {
     const int C = 3, H = 32, W = 32;
     const int d = C * H * W;
 
-    RectifiedUNet net(batchsize);
+    RectifiedUNet net(batchsize, width);
     AdamWOptions options;
     options.lr = lr;
     options.weight_decay = 0; // Preserve the original Adam training objective.

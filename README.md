@@ -294,6 +294,7 @@ Environment variables for `demo_cnn_rectified`:
 | `RF_EMA` | 0.9999 | Decay of the weight EMA (0 = off); saved as `*_ema.ckpt` |
 | `RF_FLIP` | 1 | Random horizontal flips (0 = off) |
 | `RF_T_SAMPLING` | uniform | Training times: `uniform` or `logitnormal` |
+| `RF_CH` | 64 | UNet width: channels `ch`, `2ch`, `4ch` |
 
 Examples:
 ```bash
@@ -301,8 +302,13 @@ RF_EPOCHS=200 RF_BATCH_SIZE=128 ./build_cuda/demo_cnn_rectified
 RF_EPOCHS=10 RF_BATCH_SIZE=128 ./build/demo_cnn_rectified
 ```
 
-FID-10k of a trained checkpoint (200 epochs on an RTX 4090, about 30 minutes,
-scores about 41):
+FID-10k of a trained checkpoint (100 Euler steps; training time on an RTX 4090):
+
+| Width | 200 epochs | 1000 epochs |
+|---|---|---|
+| `RF_CH=64` | 41 (30 min) | 29 (2.5 h) |
+| `RF_CH=128` | 28 (1.4 h) | 22 (7 h) |
+
 ```bash
 CKPT=res/generated_cifar10/unet.ckpt OUT=samples.bin ./build_cuda/sample_cnn_rectified
 python examples/compute_fid.py samples.bin

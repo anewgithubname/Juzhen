@@ -38,9 +38,13 @@ double available_mb() {
 
 double seconds_since(Clock::time_point t0) { return time_in_ms(t0, Clock::now()) / 1000.0; }
 
-// Forward FLOPs of RectifiedUNet per image (convolutions as im2col GEMMs);
-// a training step is counted as 3x forward.
-constexpr double kForwardFlops = 1359e6;
+// UNet width (RF_CH) of the checkpoint in Weights/: 128, trained 1000 epochs,
+// scores FID-10k 22. Width 64 is 4x cheaper and scores 29.
+constexpr int kWidth = 128;
+
+// Forward FLOPs of RectifiedUNet per image at width kWidth (convolutions as
+// im2col GEMMs; 1359e6 at width 64); a training step is counted as 3x forward.
+constexpr double kForwardFlops = 5402e6;
 
 // Times `steps` training steps (after 2 warm-up steps) and one Euler sampling
 // run at batch size bs. Returns the memory the run added, in MB.
@@ -49,7 +53,7 @@ double run_batch(int bs, int steps, int euler_steps) {
     const int d = C * H * W;
     const double base_mb = footprint_mb();
 
-    RectifiedUNet net(bs);
+    RectifiedUNet net(bs, kWidth);
     AdamWOptions options;
     options.lr = 2e-4f;
     options.weight_decay = 0;
@@ -134,7 +138,8 @@ int juzhen_cifar_speed() {
     global_rand_gen.seed(42);
 
     cout << "CIFAR-10 rectified flow (examples/demo_cnn_rectified.cu), random data" << endl;
-    cout << "UNet 11->64->128->256, ~" << setprecision(2) << fixed << 3 * kForwardFlops / 1e9
+    cout << "UNet 11->" << kWidth << "->" << 2 * kWidth << "->" << 4 * kWidth << ", ~"
+         << setprecision(2) << fixed << 3 * kForwardFlops / 1e9
          << " GFLOP per training image; " << steps << " timed steps after 2 warm-up" << endl << endl;
 
     double mb_per_image = 0;
@@ -189,7 +194,7 @@ bool juzhen_cifar_generate(const std::string& checkpoint, int count, int steps, 
                            int* epochs,
                            const std::function<void(int, const std::vector<uint8_t>&, int, int)>& frame,
                            std::string* error) {
-    RectifiedUNet net(count);
+    RectifiedUNet net(count, kWidth);
     TrainingProgress progress;
     if (!load_checkpoint(net.layers(), checkpoint, progress, error))
         return false;
