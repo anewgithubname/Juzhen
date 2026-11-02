@@ -75,8 +75,8 @@ final class CIFARModel: ObservableObject {
         let image: CGImage
     }
 
-    // FID-10k 41 at 100 Euler steps, 43 at 50
-    @Published var steps = 100
+    // FID-10k 22 at 100 Euler steps, 23 at 50, 27 at 20
+    @Published var steps = 50
     /// Heun's method: two network evaluations per step, more accurate per step
     @Published var heun = false
     @Published var index = 0

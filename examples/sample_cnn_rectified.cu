@@ -14,6 +14,7 @@
  *   STEPS     ODE steps                              (default: 100)
  *   SAMPLER   euler|heun                             (default: euler)
  *   SEED      random seed                            (default: 7)
+ *   RF_CH     UNet width the checkpoint was trained with (default: 64)
  */
 
 #define compute juzhen_cnn_rectified
@@ -34,7 +35,7 @@ int compute() {
 #endif
     global_rand_gen.seed(seed);
 
-    RectifiedUNet net(bs);
+    RectifiedUNet net(bs, env_int("RF_CH", 64));
     TrainingProgress progress;
     std::string error;
     if (!load_checkpoint(net.layers(), ckpt, progress, &error)) {
