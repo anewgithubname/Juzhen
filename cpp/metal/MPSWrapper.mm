@@ -6,6 +6,7 @@
 #include <iostream>
 #include <algorithm>
 #include <map>
+#include <stdexcept>
 #include <string>
 #include <tuple>
 #include <vector>
@@ -140,8 +141,7 @@ void mpsInit() {
     // Load the Metal shader source file
     id<MTLLibrary> defaultLibrary = [device newDefaultLibrary];
     if(!defaultLibrary) {
-        NSLog(@"Could not load default Metal library.");
-        exit(1);
+        throw std::runtime_error("Could not load default Metal library.");
     }
 
     // Compile the zero kernel

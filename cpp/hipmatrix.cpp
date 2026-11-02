@@ -120,13 +120,21 @@ void Matrix<ROCMfloat>::zeros() { Juzhen::RocmFill(reinterpret_cast<float*>(elem
 
 Matrix<ROCMfloat> Matrix<ROCMfloat>::randn(size_t m, size_t n) {
     Matrix<ROCMfloat> M("randn", m, n);
-    Juzhen::RocmRandNormal(reinterpret_cast<float*>(M.elements.get()), m * n, 0.0f, 1.0f, 0);
+    int rc = Juzhen::RocmRandNormal(reinterpret_cast<float*>(M.elements.get()), m * n, 0.0f, 1.0f, 0);
+    if (rc != 0) {
+        LOG_ERROR("RocmRandNormal failed with code {}", rc);
+        ERROR_OUT;
+    }
     return M;
 }
 
 Matrix<ROCMfloat> Matrix<ROCMfloat>::rand(size_t m, size_t n) {
     Matrix<ROCMfloat> M("rand", m, n);
-    Juzhen::RocmRandUniform(reinterpret_cast<float*>(M.elements.get()), m * n, 0);
+    int rc = Juzhen::RocmRandUniform(reinterpret_cast<float*>(M.elements.get()), m * n, 0);
+    if (rc != 0) {
+        LOG_ERROR("RocmRandUniform failed with code {}", rc);
+        ERROR_OUT;
+    }
     return M;
 }
 

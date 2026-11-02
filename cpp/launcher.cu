@@ -64,7 +64,7 @@ int main()
 
     int ret = 1;
 
-    {
+    try {
         Memory<int> mdi;
         Memory<float> md32;
         Memory<double> md64;
@@ -97,6 +97,10 @@ int main()
 #ifdef CUDA
         CuBLASErrorCheck(cublasDestroy(Matrix<CUDAfloat>::global_handle));
 #endif
+    } catch (const std::exception& e) {
+        // keep the old exit code of ERROR_OUT for command-line programs
+        std::cerr << "Uncaught exception: " << e.what() << std::endl;
+        ret = 1;
     }
     
     return ret;

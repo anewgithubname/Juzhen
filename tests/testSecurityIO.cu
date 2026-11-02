@@ -31,8 +31,7 @@ template<class D> bool stream_lifetime(const std::filesystem::path& root){
     auto independent=moved;moved.elem(0,0)=D(99);
     return moved.num_row()==2&&moved.num_col()==3&&moved.elem(1,2)==D(6)&&moved.elem(0,0)==D(99)&&independent.elem(0,0)==D(1);
 }
-int main(){
-    Memory<float> mf;Memory<int> mi;Memory<double> md;
+int run(){
     auto raw=getenv("JUZHEN_IO_CASE");auto dir=getenv("JUZHEN_IO_ROOT");if(!raw||!dir)return 2;
     std::string c=raw;auto root=std::filesystem::path(dir);auto path=(root/"matrix.bin").string();
     if(c=="csv"||c=="csv_negative"||c=="csv_missing"){
@@ -79,4 +78,9 @@ int main(){
     if(c=="transposed")return m.num_row()!=3||m.num_col()!=2||!m.get_transpose()||m.elem(2,1)!=6;
     if(c=="empty")return m.num_row()!=0||m.num_col()!=3;
     return 0;
+}
+int main(){
+    Memory<float> mf;Memory<int> mi;Memory<double> md;
+    // rejected files raise Juzhen::Error; report them with exit code 1
+    try{return run();}catch(const std::exception& e){std::cerr<<e.what()<<'\n';return 1;}
 }

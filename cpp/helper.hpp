@@ -33,6 +33,7 @@
 typedef std::chrono::high_resolution_clock Clock;
 
 #include <string>
+#include <stdexcept>
 #include <random>
 #include <list>
 #include <algorithm>
@@ -131,8 +132,15 @@ inline double time_in_ms(Clock::time_point start, Clock::time_point end) {
 #define LOG_ERROR(...)
 #define LOG_DEBUG(...)
 #endif
-//for force quiting the program
-#define ERROR_OUT exit(1)
+namespace Juzhen {
+// Raised by ERROR_OUT; the details were logged just before it.
+struct Error : std::runtime_error {
+    using std::runtime_error::runtime_error;
+};
+}
+// abort the current operation; launcher.cu turns an uncaught error into exit code 1
+#define ERROR_OUT \
+    throw Juzhen::Error(std::string("Juzhen error at ") + __FILE__ + ":" + std::to_string(__LINE__))
 
 /**
  * @brief simple profiler class, will only print out the cumulative time. 

@@ -24,6 +24,9 @@ int RocmMemcpyD2D(float* dst_device, const float* src_device, std::size_t count)
 int RocmRandUniform(float* dst_device, std::size_t count, std::uint64_t seed);
 int RocmRandNormal(float* dst_device, std::size_t count, float mean, float stddev,
                    std::uint64_t seed);
+// Reseed the generator behind RocmRandUniform/RocmRandNormal and restart its stream.
+int RocmRandSeed(std::uint64_t seed);
+int RocmSynchronize();
 
 
 int Rocm_layernorm_forward(const float* x, const float* gamma, const float* beta,
