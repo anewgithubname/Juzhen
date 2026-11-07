@@ -93,24 +93,24 @@ float comp_med(const Matrix<T> &a) {
 
 template <class T>
 Matrix<T> kernel_gau(Matrix<T> &&b, float sigma) {
-    return exp(-b / (2 * sigma * sigma));
+    return exp(-std::move(b) / (2 * sigma * sigma));
 }
 
 template <class T>
 Matrix<T> relu(Matrix<T> &&M) {
-    return elemwise([=] __GPU_CPU__(float x) { return x > 0.0 ? x : 0.0; }, M);
+    return elemwise([=] __GPU_CPU__(float x) { return x > 0.0 ? x : 0.0; }, std::move(M));
 }
 
 template <class T>
 Matrix<T> d_relu(Matrix<T> &&M) {
-    return elemwise([=] __GPU_CPU__(float x) { return x > 0.0 ? 1.0 : 0.0; }, M);
+    return elemwise([=] __GPU_CPU__(float x) { return x > 0.0 ? 1.0 : 0.0; }, std::move(M));
 }
 
 template <class T>
 Matrix<T> clamp(Matrix<T> &&M, float lo, float hi) {
     return elemwise([=] __GPU_CPU__(float x) {
         return x < lo ? lo : (x > hi ? hi : x);
-    }, M);
+    }, std::move(M));
 }
 
 template <class T>
