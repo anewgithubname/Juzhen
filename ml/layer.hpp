@@ -105,8 +105,15 @@ namespace Juzhen
 		// (the bias is constant, so it contributes no tangent). Layers whose
 		// grad() means something else (conv, losses, transformer) must override.
 		virtual Matrix<D> jvp(const Matrix<D>& input, const Matrix<D>& tangent) {
-			return hadmd(grad(input), weights * tangent);
+			return activation_backward(input, weights * tangent);
 		}
+
+        // upstream .* s'(W*input + b): the gradient through the activation,
+        // used by backward() and jvp(). Layers that cache what they need in
+        // eval() can override it to skip recomputing W*input + b.
+        virtual Matrix<D> activation_backward(const Matrix<D>& input, Matrix<D>&& upstream) {
+            return hadmd(grad(input), std::move(upstream));
+        }
 
         // Layer itself is a trainable tanh dense layer. Subclasses must opt in
         // explicitly by overriding this together with backward().
@@ -123,7 +130,7 @@ namespace Juzhen
                 throw std::invalid_argument("dense backward shape mismatch");
 
             // t = dL/d(Wx + b), going back through the activation
-            auto t = hadmd(grad(input), std::move(upstream));
+            auto t = activation_backward(input, std::move(upstream));
             auto dx = weights.T() * t;
             if (need_update)
                 add_parameter_gradients(t * input.T(), sum(t, 1));
@@ -211,11 +218,60 @@ namespace Juzhen
 		}
 	};
 
+#ifdef CUDA
+	// Preserve d_relu's x > 0 convention, including at zero. Multiplication
+	// also preserves the previous behavior for nonfinite upstream gradients.
+	__global__ void relu_backward_inplace_kernel(const float* activation, float* gradient, size_t total) {
+		const size_t i = (size_t)blockIdx.x * blockDim.x + threadIdx.x;
+		if (i < total) gradient[i] *= activation[i] > 0.f ? 1.f : 0.f;
+	}
+
+	inline void cuda_relu_backward_inplace(const float* activation, float* gradient, size_t total) {
+		if (!total) return;
+		relu_backward_inplace_kernel<<<(total + 255) / 256, 256>>>(activation, gradient, total);
+		CudaErrorCheck(cudaGetLastError());
+	}
+
+#endif
+
+	// gradient .* d_relu(activation), where activation is the ReLU's input or
+	// output (both are positive at the same entries). The gradient is updated
+	// in place by one kernel when the two share a storage layout.
+	template <class D>
+	Matrix<D> relu_backward(const Matrix<D>& activation, Matrix<D>&& gradient) {
+		if (activation.num_row() != gradient.num_row() || activation.num_col() != gradient.num_col())
+			throw std::invalid_argument("relu_backward shape mismatch");
+		if (activation.get_transpose() == gradient.get_transpose()) {
+			const auto* a = reinterpret_cast<const float*>(activation.data());
+			auto* g = const_cast<float*>(reinterpret_cast<const float*>(gradient.data()));
+			const size_t total = gradient.num_row() * gradient.num_col();
+#ifdef CUDA
+			if constexpr (std::is_same_v<D, CUDAfloat>) {
+				cuda_relu_backward_inplace(a, g, total);
+				return std::move(gradient);
+			}
+#endif
+#ifdef APPLE_SILICON
+			if constexpr (std::is_same_v<D, MPSfloat>) {
+				mpsReluBackwardInplace(a, g, (int)total);
+				return std::move(gradient);
+			}
+#endif
+			if constexpr (std::is_same_v<D, float>) {
+				for (size_t i = 0; i < total; ++i)
+					g[i] *= a[i] > 0.f ? 1.f : 0.f;
+				return std::move(gradient);
+			}
+		}
+		return hadmd(d_relu(Matrix<D>(activation)), std::move(gradient));
+	}
+
     /*
      * relu layer
      */
     template <class D>
     class ReluLayer : public Layer<D> {
+        bool has_forward = false;  // val holds relu(W*x + b) of the last eval
 
     public:
         ReluLayer(size_t m, size_t n, size_t nb) : Layer<D>(m, n, nb) {
@@ -227,6 +283,16 @@ namespace Juzhen
 
         void eval(const Matrix<D>& input) override {
             Layer<D>::val = relu(Layer<D>::weights * input + Layer<D>::bias * Matrix<D>::ones(1, input.num_col()));
+            has_forward = true;
+        }
+
+        // The mask comes from the output of eval(input), which backward() and
+        // jvp() follow; it is recomputed from input when there is none.
+        Matrix<D> activation_backward(const Matrix<D>& input, Matrix<D>&& upstream) override {
+            const auto& out = Layer<D>::val;
+            if (has_forward && out.num_row() == upstream.num_row() && out.num_col() == input.num_col())
+                return relu_backward(out, std::move(upstream));
+            return Layer<D>::activation_backward(input, std::move(upstream));
         }
 
     };
@@ -585,7 +651,7 @@ template<class D> Matrix<D> backward(const std::list<Layer<D>*>& net, const Matr
 
 			// Optional ReLU activation
 			if (use_relu)
-				this->val = relu(Matrix<D>(this->val));
+				this->val = relu(std::move(this->val));
 			has_forward = true;
 		}
 
@@ -617,7 +683,7 @@ template<class D> Matrix<D> backward(const std::list<Layer<D>*>& net, const Matr
 			// With ReLU:    t = upstream_grad ⊙ d_relu(val)
 			// Without ReLU: t = upstream_grad  (linear — derivative is 1)
 			auto t = use_relu
-				? hadmd(d_relu(Matrix<D>(this->val)), std::move(upstream_grad))
+				? relu_backward(this->val, std::move(upstream_grad))
 				: std::move(upstream_grad);
 
 			const float alpha = 1.0f, beta = 0.0f;
@@ -672,7 +738,7 @@ template<class D> Matrix<D> backward(const std::list<Layer<D>*>& net, const Matr
 				&beta, y_desc, ptr(out)));
 
 			if (use_relu)
-				return hadmd(d_relu(Matrix<D>(this->val)), std::move(out));
+				return relu_backward(this->val, std::move(out));
 			return out;
 		}
 #undef CUDNN_CHECK
@@ -888,7 +954,7 @@ template<class D> Matrix<D> backward(const std::list<Layer<D>*>& net, const Matr
 				&one,  y_desc, ptr(this->val)));
 
 			if (use_relu)
-				this->val = relu(Matrix<D>(this->val));
+				this->val = relu(std::move(this->val));
 			has_forward = true;
 		}
 
@@ -909,7 +975,7 @@ template<class D> Matrix<D> backward(const std::list<Layer<D>*>& net, const Matr
 				throw std::invalid_argument("transposed convolution GPU upstream gradient requires contiguous, untransposed storage");
 			check_cached_activation();
 			auto t = use_relu
-				? hadmd(d_relu(Matrix<D>(this->val)), std::move(upstream_grad))
+				? relu_backward(this->val, std::move(upstream_grad))
 				: std::move(upstream_grad);
 
 			const float alpha = 1.0f, beta = 0.0f;
@@ -963,7 +1029,7 @@ template<class D> Matrix<D> backward(const std::list<Layer<D>*>& net, const Matr
 				&beta, y_desc, ptr(out)));
 
 			if (use_relu)
-				return hadmd(d_relu(Matrix<D>(this->val)), std::move(out));
+				return relu_backward(this->val, std::move(out));
 			return out;
 		}
 #undef CUDNN_CHECK
@@ -1063,7 +1129,7 @@ template<class D> Matrix<D> backward(const std::list<Layer<D>*>& net, const Matr
 			this->val = std::move(out);
 
 			if (use_relu) {
-				this->val = relu(Matrix<D>(this->val));
+				this->val = relu(std::move(this->val));
 			}
 			has_forward = true;
 		}
@@ -1088,7 +1154,7 @@ template<class D> Matrix<D> backward(const std::list<Layer<D>*>& net, const Matr
 			mpsConv2dOutputAddBias(ptr(y2d), ptr(zero_bias), ptr(out), batchN, C_out, H_out, W_out);
 
 			if (use_relu)
-				return hadmd(d_relu(Matrix<D>(this->val)), std::move(out));
+				return relu_backward(this->val, std::move(out));
 			return out;
 		}
 
@@ -1109,7 +1175,7 @@ template<class D> Matrix<D> backward(const std::list<Layer<D>*>& net, const Matr
 				throw std::invalid_argument("convolution GPU upstream gradient requires contiguous, untransposed storage");
 			check_cached_activation();
 			auto t = use_relu
-				? hadmd(d_relu(Matrix<D>(this->val)), std::move(upstream_grad))
+				? relu_backward(this->val, std::move(upstream_grad))
 				: std::move(upstream_grad);
 
 
@@ -1260,7 +1326,7 @@ template<class D> Matrix<D> backward(const std::list<Layer<D>*>& net, const Matr
 			this->val = Matrix<D>("convtrans_out", C_out * H_out * W_out, batchN);
 			mpsConv2dOutputAddBias(ptr(packed_out), ptr(this->bias), ptr(this->val), batchN, C_out, H_out, W_out);
 			if (use_relu) {
-				this->val = relu(Matrix<D>(this->val));
+				this->val = relu(std::move(this->val));
 			}
 			has_forward = true;
 		}
@@ -1283,7 +1349,7 @@ template<class D> Matrix<D> backward(const std::list<Layer<D>*>& net, const Matr
 			          kH, kW, pad_h, pad_w, stride_h, stride_w, H_in, W_in);
 
 			if (use_relu)
-				return hadmd(d_relu(Matrix<D>(this->val)), std::move(out));
+				return relu_backward(this->val, std::move(out));
 			return out;
 		}
 
@@ -1304,7 +1370,7 @@ template<class D> Matrix<D> backward(const std::list<Layer<D>*>& net, const Matr
 				throw std::invalid_argument("transposed convolution GPU upstream gradient requires contiguous, untransposed storage");
 			check_cached_activation();
 			auto t = use_relu
-				? hadmd(d_relu(Matrix<D>(this->val)), std::move(upstream_grad))
+				? relu_backward(this->val, std::move(upstream_grad))
 				: std::move(upstream_grad);
 
 			const int P_in = H_in * W_in;
@@ -1435,7 +1501,7 @@ template<class D> Matrix<D> backward(const std::list<Layer<D>*>& net, const Matr
 
 			// 4. Optional ReLU
 			if (use_relu)
-				this->val = relu(Matrix<D>(this->val));
+				this->val = relu(std::move(this->val));
 			has_forward = true;
 		}
 
@@ -1466,7 +1532,7 @@ template<class D> Matrix<D> backward(const std::list<Layer<D>*>& net, const Matr
 			                            C_out, P, batchN);
 
 			if (use_relu)
-				return hadmd(d_relu(Matrix<D>(this->val)), std::move(out));
+				return relu_backward(this->val, std::move(out));
 			return out;
 		}
 
@@ -1487,7 +1553,7 @@ template<class D> Matrix<D> backward(const std::list<Layer<D>*>& net, const Matr
 				throw std::invalid_argument("convolution GPU upstream gradient requires contiguous, untransposed storage");
 			check_cached_activation();
 			auto t = use_relu
-				? hadmd(d_relu(Matrix<D>(this->val)), std::move(upstream_grad))
+				? relu_backward(this->val, std::move(upstream_grad))
 				: std::move(upstream_grad);
 
 			const int K = C_in * kH * kW;
@@ -1625,7 +1691,7 @@ template<class D> Matrix<D> backward(const std::list<Layer<D>*>& net, const Matr
 			                      kH, kW, pad_h, pad_w, stride_h, stride_w, batchN);
 
 			if (use_relu)
-				this->val = relu(Matrix<D>(this->val));
+				this->val = relu(std::move(this->val));
 			has_forward = true;
 		}
 
@@ -1654,7 +1720,7 @@ template<class D> Matrix<D> backward(const std::list<Layer<D>*>& net, const Matr
 			                      kH, kW, pad_h, pad_w, stride_h, stride_w, batchN);
 
 			if (use_relu)
-				return hadmd(d_relu(Matrix<D>(this->val)), std::move(out));
+				return relu_backward(this->val, std::move(out));
 			return out;
 		}
 
@@ -1675,7 +1741,7 @@ template<class D> Matrix<D> backward(const std::list<Layer<D>*>& net, const Matr
 				throw std::invalid_argument("transposed convolution GPU upstream gradient requires contiguous, untransposed storage");
 			check_cached_activation();
 			auto t = use_relu
-				? hadmd(d_relu(Matrix<D>(this->val)), std::move(upstream_grad))
+				? relu_backward(this->val, std::move(upstream_grad))
 				: std::move(upstream_grad);
 
 			const int P_in = H_in * W_in;
@@ -1918,7 +1984,7 @@ template<class D> Matrix<D> backward(const std::list<Layer<D>*>& net, const Matr
 			const Matrix<D> y2d = w2d * col;
 			this->val = unpack_output_add_bias(y2d);
 			if (use_relu) {
-				this->val = relu(Matrix<D>(this->val));
+				this->val = relu(std::move(this->val));
 			}
 			has_forward = true;
 		}
@@ -1934,7 +2000,7 @@ template<class D> Matrix<D> backward(const std::list<Layer<D>*>& net, const Matr
 			const Matrix<D> w2d = flatten_weights_2d(this->weights);
 			Matrix<D> out = unpack_output_add_bias(w2d * col, /*with_bias=*/false);
 			if (use_relu)
-				return hadmd(d_relu(Matrix<D>(this->val)), std::move(out));
+				return relu_backward(this->val, std::move(out));
 			return out;
 		}
 
@@ -1953,7 +2019,7 @@ template<class D> Matrix<D> backward(const std::list<Layer<D>*>& net, const Matr
 				throw std::invalid_argument("convolution upstream gradient shape mismatch");
 			check_cached_activation();
 			auto t = use_relu
-				? hadmd(d_relu(Matrix<D>(this->val)), std::move(upstream_grad))
+				? relu_backward(this->val, std::move(upstream_grad))
 				: std::move(upstream_grad);
 
 			const Matrix<D> col = make_im2col(input);
@@ -2171,7 +2237,7 @@ template<class D> Matrix<D> backward(const std::list<Layer<D>*>& net, const Matr
 			const Matrix<D> patches = w2d * x2d;
 			this->val = unpack_forward_from_patches(patches);
 			if (use_relu) {
-				this->val = relu(Matrix<D>(this->val));
+				this->val = relu(std::move(this->val));
 			}
 			has_forward = true;
 		}
@@ -2186,7 +2252,7 @@ template<class D> Matrix<D> backward(const std::list<Layer<D>*>& net, const Matr
 			const Matrix<D> w2d = flatten_weights_2d(this->weights);
 			Matrix<D> out = unpack_forward_from_patches(w2d * x2d, /*with_bias=*/false);
 			if (use_relu)
-				return hadmd(d_relu(Matrix<D>(this->val)), std::move(out));
+				return relu_backward(this->val, std::move(out));
 			return out;
 		}
 
@@ -2205,7 +2271,7 @@ template<class D> Matrix<D> backward(const std::list<Layer<D>*>& net, const Matr
 				throw std::invalid_argument("transposed convolution upstream gradient shape mismatch");
 			check_cached_activation();
 			auto t = use_relu
-				? hadmd(d_relu(Matrix<D>(this->val)), std::move(upstream_grad))
+				? relu_backward(this->val, std::move(upstream_grad))
 				: std::move(upstream_grad);
 
 			const Matrix<D> x2d = pack_input_2d(input);
@@ -2501,19 +2567,6 @@ template<class D> Matrix<D> backward(const std::list<Layer<D>*>& net, const Matr
 		const float inv = inv_std[c];
 		for (int i = lane; i < dim; i += 32)
 			dx[c0 + i] = inv * (gamma[i] * dy[c0 + i] - m1 - xhat[c0 + i] * m2);
-	}
-
-	// Preserve d_relu's x > 0 convention, including at zero. Multiplication
-	// also preserves the previous behavior for nonfinite upstream gradients.
-	__global__ void relu_backward_inplace_kernel(const float* activation, float* gradient, size_t total) {
-		const size_t i = (size_t)blockIdx.x * blockDim.x + threadIdx.x;
-		if (i < total) gradient[i] *= activation[i] > 0.f ? 1.f : 0.f;
-	}
-
-	inline void cuda_relu_backward_inplace(const float* activation, float* gradient, size_t total) {
-		if (!total) return;
-		relu_backward_inplace_kernel<<<(total + 255) / 256, 256>>>(activation, gradient, total);
-		CudaErrorCheck(cudaGetLastError());
 	}
 
 	// Fused LayerNorm tangent. Unlike the reverse-mode kernel above, gamma
@@ -2992,8 +3045,7 @@ template<class D> Matrix<D> backward(const std::list<Layer<D>*>& net, const Matr
 		Matrix<D> cached_H;             // attention output before Wo
 		Matrix<D> cached_R;             // residual after attention
 		Matrix<D> cached_x1, cached_x2; // LN1(x) and LN2(R): inputs to attn / FFN
-		Matrix<D> cached_F1;            // W1*x2 + b1  (pre-relu)
-		Matrix<D> cached_F1_relu;       // relu(F1)
+		Matrix<D> cached_F1_relu;       // relu(W1*x2 + b1)
 
 		// Per-sequence attention weight matrices: A_i = softmax(...)  shape (seq_len, seq_len)
 		// Stored concatenated: (seq_len, seq_len * batchN)
@@ -3095,7 +3147,7 @@ template<class D> Matrix<D> backward(const std::list<Layer<D>*>& net, const Matr
 			  cached_V("tv", d_k, seq_len * batch), cached_H("th", d_k, seq_len * batch),
 			  cached_R("tr", d_model, seq_len * batch),
 			  cached_x1("tx1", d_model, seq_len * batch), cached_x2("tx2", d_model, seq_len * batch),
-			  cached_F1("tf1", d_ff, seq_len * batch), cached_F1_relu("tf1r", d_ff, seq_len * batch),
+			  cached_F1_relu("tf1r", d_ff, seq_len * batch),
 			  cached_A("ta", seq_len, seq_len * batch * heads),
 			  ones_1N("ones_1N", 1, seq_len * batch),
 			  ones_1seq("ones_1seq", 1, seq_len),
@@ -3324,9 +3376,9 @@ template<class D> Matrix<D> backward(const std::list<Layer<D>*>& net, const Matr
 
 			// 4. LN2 then FFN: relu(W1*x2 + b1) then W2*...+b2
 			cached_x2 = ln2.forward(cached_R);
-			cached_F1 = W1 * cached_x2;
-			add_bias(cached_F1, b1);
-			cached_F1_relu = relu(Matrix<D>(cached_F1));
+			auto F1 = W1 * cached_x2;
+			add_bias(F1, b1);
+			cached_F1_relu = relu(std::move(F1));
 			auto F = W2 * cached_F1_relu;
 			add_bias(F, b2);
 
@@ -3594,7 +3646,7 @@ template<class D> Matrix<D> backward(const std::list<Layer<D>*>& net, const Matr
 
 				// 4. LN2 + FFN tangent.
 				auto dx2 = ln2.jvp(dR);
-				auto dF1 = hadmd(d_relu(Matrix<D>(cached_F1)), W1 * dx2);
+				auto dF1 = relu_backward(cached_F1_relu, W1 * dx2);
 				auto dF = W2 * dF1;
 
 				// 5. Residual 2.
@@ -3655,36 +3707,7 @@ template<class D> Matrix<D> backward(const std::list<Layer<D>*>& net, const Matr
 			auto dW2 = dout * cached_F1_relu.T();          // (d_model, d_ff)
 			auto db2 = sum(dout, 1);                        // (d_model, 1)
 			auto dF1_relu = W2.T() * dout;                  // (d_ff, N)
-			Matrix<D> dF1;
-#ifdef CUDA
-			if constexpr (std::is_same_v<D, CUDAfloat>) {
-				if (!cached_F1.get_transpose() && !dF1_relu.get_transpose()) {
-					dF1 = std::move(dF1_relu);
-					cuda_relu_backward_inplace(
-						reinterpret_cast<const float*>(cached_F1.data()),
-						const_cast<float*>(reinterpret_cast<const float*>(dF1.data())),
-						dF1.num_row() * dF1.num_col());
-				} else {
-					dF1 = hadmd(d_relu(Matrix<D>(cached_F1)), std::move(dF1_relu));
-				}
-			} else
-#endif
-#ifdef APPLE_SILICON
-			if constexpr (std::is_same_v<D, MPSfloat>) {
-				if (!cached_F1.get_transpose() && !dF1_relu.get_transpose()) {
-					dF1 = std::move(dF1_relu);
-					mpsReluBackwardInplace(
-						reinterpret_cast<const float*>(cached_F1.data()),
-						const_cast<float*>(reinterpret_cast<const float*>(dF1.data())),
-						(int)(dF1.num_row() * dF1.num_col()));
-				} else {
-					dF1 = hadmd(d_relu(Matrix<D>(cached_F1)), std::move(dF1_relu));
-				}
-			} else
-#endif
-			{
-				dF1 = hadmd(d_relu(Matrix<D>(cached_F1)), std::move(dF1_relu));
-			}
+			auto dF1 = relu_backward(cached_F1_relu, std::move(dF1_relu));
 			auto dW1 = dF1 * cached_x2.T();                // (d_ff, d_model)
 			auto db1 = sum(dF1, 1);                         // (d_ff, 1)
 			auto dx2 = W1.T() * dF1;                        // (d_model, N) — grad wrt LN2 output
