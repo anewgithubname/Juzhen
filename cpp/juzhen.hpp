@@ -66,7 +66,7 @@ Matrix<T> sqrt(const Matrix<T> &M) {
 
 template <class T>
 Matrix<T> sqrt(Matrix<T> &&M) {
-    return elemwise([=] __GPU_CPU__(float x) { return sqrt(x); }, M);
+    return elemwise([=] __GPU_CPU__(float x) { return sqrt(x); }, std::move(M));
 }
 
 template <class T>
