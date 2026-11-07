@@ -54,9 +54,11 @@
  *   TSFM_WD       AdamW weight decay                       (default: 0.01)
  *   TSFM_SYNTH    fraction of synthetic windows            (default: 0.3)
  *   TSFM_SIGMA_FLOOR  scale floor, x context std           (default: 0.25)
+ *   TSFM_HOST_LOSS  1 = compute the loss on the CPU even on CUDA (default: 0)
  *   TSFM_LOG      steps between log lines                  (default: 200)
  *   TSFM_VAL      steps between in-domain backtest checks  (default: 5000)
  *   TSFM_SEED     random seed                              (default: 1)
+ *   NVIDIA_TF32   1 = TF32 tensor-core GEMMs (read by the Juzhen launcher)
  */
 
 #include "../cpp/juzhen.hpp"
@@ -427,14 +429,16 @@ static void write_tokens(const Config& c, const float* x, const Norm& nm, Matrix
     }
 }
 
-// A training batch: tokens, per-token targets (the next `horizon` points)
-// and the mask of targets that count.
+// A training batch: tokens and per-token targets (the next `horizon` points,
+// NaN where a target does not count), with the number of counted targets.
 struct Batch {
-    Matrix<float> tokens, target, mask;
+    Matrix<float> tokens, target;
     vector<float> window;  // batch x window(), scratch
+    vector<int> counted;   // counted targets per window
+    double count = 0;
     Batch(const Config& c)
         : tokens("tokens", c.in_dim(), c.cols()), target("target", c.horizon, c.cols()),
-          mask("mask", c.horizon, c.cols()), window((size_t)c.batch * c.window()) {}
+          window((size_t)c.batch * c.window()), counted(c.batch) {}
 };
 
 class Sampler {
@@ -459,14 +463,18 @@ public:
             }
             const int col0 = i * c_.tokens();
             write_tokens(c_, x, nm, b.tokens, col0);
+            int counted = 0;
             for (int j = 0; j < c_.tokens(); ++j)
                 for (int h = 0; h < c_.horizon; ++h) {
                     const int pos = (j + 1) * c_.patch + h;
                     const bool ok = nm.j0 >= 0 && j >= nm.j0 && pos < c_.window() && isfinite(x[pos]);
-                    b.target.elem(h, col0 + j) = ok ? normed(nm, x[pos]) : 0.0f;
-                    b.mask.elem(h, col0 + j) = ok ? 1.0f : 0.0f;
+                    b.target.elem(h, col0 + j) = ok ? normed(nm, x[pos]) : NaN;
+                    counted += ok;
                 }
+            b.counted[i] = counted;
         });
+        b.count = 0;
+        for (int v : b.counted) b.count += v;
     }
 
 private:
@@ -511,20 +519,16 @@ private:
 // quantile k of step h).
 static double loss_and_grad(const Config& c, const Matrix<float>& P, const Batch& b, Matrix<float>& G) {
     const int H = c.horizon, cols = c.cols();
-    vector<double> loss(cols, 0.0), cnt(cols, 0.0);
-    parallel_for(cols, [&](int j) {
-        for (int h = 0; h < H; ++h) cnt[j] += b.mask.elem(h, j);
-    });
-    double total = 0;
-    for (double v : cnt) total += v;
+    vector<double> loss(cols, 0.0);
+    const double total = b.count;
     const float inv = total > 0 ? (float)(1.0 / total) : 0.0f;
     parallel_for(cols, [&](int j) {
         for (int h = 0; h < H; ++h) {
-            if (b.mask.elem(h, j) == 0) {
+            const float y = b.target.elem(h, j);
+            if (!isfinite(y)) {
                 for (int k = 0; k < kQ; ++k) G.elem(k * H + h, j) = 0;
                 continue;
             }
-            const float y = b.target.elem(h, j);
             double l = 0;
             for (int k = 0; k < kQ; ++k) {
                 const float u = y - P.elem(k * H + h, j), t = kTau[k];
@@ -538,6 +542,76 @@ static double loss_and_grad(const Config& c, const Matrix<float>& P, const Batch
     for (int j = 0; j < cols; ++j) L += loss[j];
     return total > 0 ? L / total : 0;
 }
+
+#ifdef CUDA
+// The same loss and gradient on the GPU, one thread per (h, column): P and G
+// are out_dim x cols, Y is horizon x cols (NaN = not counted), all column
+// major. Each block adds its share of the mean loss to *loss, so the host
+// reads the loss only when it logs.
+__global__ void pinball_grad_kernel(const float* __restrict__ P, const float* __restrict__ Y,
+                                    float* __restrict__ G, int H, size_t n, float inv, double* loss) {
+    __shared__ double part[256];
+    const size_t i = (size_t)blockIdx.x * blockDim.x + threadIdx.x;
+    double l = 0;
+    if (i < n) {
+        const size_t base = (i / H) * (size_t)kQ * H + i % H;
+        const float y = Y[i];
+        const bool ok = isfinite(y);
+        const float tau[kQ] = {.1f, .2f, .3f, .4f, .5f, .6f, .7f, .8f, .9f};  // = kTau
+        for (int k = 0; k < kQ; ++k) {
+            float g = 0;
+            if (ok) {
+                const float t = tau[k], u = y - P[base + (size_t)k * H];
+                l += u > 0 ? t * u : (t - 1) * u;
+                g = (u > 0 ? -t : 1 - t) * inv;
+            }
+            G[base + (size_t)k * H] = g;
+        }
+    }
+    part[threadIdx.x] = l;
+    __syncthreads();
+    for (int s = blockDim.x / 2; s > 0; s >>= 1) {
+        if (threadIdx.x < s) part[threadIdx.x] += part[threadIdx.x + s];
+        __syncthreads();
+    }
+    if (threadIdx.x == 0 && part[0] != 0) atomicAdd(loss, part[0] * inv);
+}
+
+class DeviceLoss {
+    double* acc_ = nullptr;
+
+public:
+    DeviceLoss() {
+        CudaErrorCheck(cudaMalloc(&acc_, sizeof(double)));
+        CudaErrorCheck(cudaMemset(acc_, 0, sizeof(double)));
+    }
+    ~DeviceLoss() { cudaFree(acc_); }
+    DeviceLoss(const DeviceLoss&) = delete;
+    DeviceLoss& operator=(const DeviceLoss&) = delete;
+
+    // gradient of the loss at P for targets Y; the loss is accumulated
+    Matrix<CUDAfloat> grad(const Config& c, const Matrix<CUDAfloat>& P, const Matrix<CUDAfloat>& Y, double count) {
+        if (P.get_transpose() || Y.get_transpose() || (int)P.num_row() != c.out_dim() ||
+            (int)Y.num_row() != c.horizon || P.num_col() != Y.num_col())
+            throw std::invalid_argument("pinball_grad layout mismatch");
+        Matrix<CUDAfloat> G("grad", P.num_row(), P.num_col());
+        const size_t n = Y.num_row() * Y.num_col();
+        const float inv = count > 0 ? (float)(1.0 / count) : 0.0f;
+        pinball_grad_kernel<<<(unsigned)((n + 255) / 256), 256>>>(
+            reinterpret_cast<const float*>(P.data()), reinterpret_cast<const float*>(Y.data()),
+            const_cast<float*>(reinterpret_cast<const float*>(G.data())), c.horizon, n, inv, acc_);
+        CudaErrorCheck(cudaGetLastError());
+        return G;
+    }
+    // loss accumulated since the last call
+    double take() {
+        double v = 0;
+        CudaErrorCheck(cudaMemcpy(&v, acc_, sizeof(double), cudaMemcpyDeviceToHost));
+        CudaErrorCheck(cudaMemset(acc_, 0, sizeof(double)));
+        return v;
+    }
+};
+#endif
 
 // ─────────────────────────── forecasting ────────────────────────
 
@@ -742,6 +816,13 @@ int compute() {
         Sampler sampler(c, train, synth, (uint64_t)seed);
         Batch batches[2] = {Batch(c), Batch(c)};
         Matrix<float> G("grad", c.out_dim(), cols);
+#ifdef CUDA
+        const bool device_loss = env_int("TSFM_HOST_LOSS", 0) == 0;
+        DeviceLoss dloss;
+#else
+        const bool device_loss = false;
+#endif
+        cout << "loss on the " << (device_loss ? "GPU" : "CPU") << endl;
         const int warmup = min(2000, max(1, steps / 20));
         const double PI = 3.14159265358979323846;
         auto lr_at = [&](int step) {
@@ -765,20 +846,28 @@ int compute() {
             optimizer.set_lr(lr_t);
             Matrix<FLOAT> X(b.tokens);
             optimizer.zero_grad();
-            auto P = to_host(model.eval(X));
-            const double loss = loss_and_grad(c, P, b, G);
-            model.backward(Matrix<FLOAT>(G));
+            const auto& out = model.eval(X);
+            if (device_loss) {
+#ifdef CUDA
+                model.backward(dloss.grad(c, out, Matrix<FLOAT>(b.target), b.count));
+#endif
+            } else {
+                sum_loss += loss_and_grad(c, to_host(out), b, G);
+                model.backward(Matrix<FLOAT>(G));
+            }
+            ++n_log;
             try {
                 optimizer.clip_grad_norm(1.0);
                 optimizer.step();
-                sum_loss += loss;
-                ++n_log;
             } catch (const std::runtime_error&) {
                 ++skipped;  // non-finite gradient
             }
             progress.step = step + 1;
 
             if ((step + 1) % log_every == 0 || step + 1 == steps) {
+#ifdef CUDA
+                if (device_loss) sum_loss = dloss.take();
+#endif
                 const double secs = chrono::duration<double>(chrono::steady_clock::now() - t0).count();
                 cout << "step " << setw(7) << step + 1 << "  lr " << scientific << setprecision(2) << lr_t << fixed
                      << setprecision(4) << "  loss " << sum_loss / max(1, n_log) << setprecision(0) << "  ("
