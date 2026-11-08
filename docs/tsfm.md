@@ -11,6 +11,12 @@ Chronos-Bolt-small. It is about 0.01 behind Chronos-Bolt-base. On the datasets
 it was trained on, it is level with the smallest Chronos models but does not
 improve with size. See [Results](#results).
 
+![Zero-shot forecasts of the 39M model on six datasets it never saw in training](tsfm_forecasts.png)
+
+The figure shows zero-shot forecasts of the 39M model, one random series per
+dataset. The last panel is a miss: the model forecasts a decline, but the
+series rose.
+
 ## Model
 
 - **Tokens.** A context of 512 points is cut into 16 patches of 32. Each token
@@ -79,6 +85,9 @@ NVIDIA_TF32=1 TSFM_DMODEL=512 TSFM_LAYERS=12 TSFM_HEADS=8 TSFM_LR=3e-4 ./build_c
 
 python examples/tsfm_evaluate.py datasets/tsfm res/tsfm/forecasts --split eval_zs
 python examples/tsfm_evaluate.py datasets/tsfm res/tsfm/forecasts --split eval_id
+
+# plot one random series per dataset (needs matplotlib)
+python examples/tsfm_plot.py datasets/tsfm res/tsfm/forecasts --out tsfm_forecasts.png
 ```
 
 `TSFM_MODE=forecast` loads `TSFM_CKPT` and only forecasts, and `TSFM_RESUME=1`
