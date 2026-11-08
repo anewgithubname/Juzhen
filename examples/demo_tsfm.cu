@@ -29,6 +29,8 @@
  * generator (trends, multi-seasonality, Gaussian-process random features, AR
  * noise, level shifts, spikes, intermittent and count series).
  *
+ * CUDA only: the loss and its gradient are computed by a kernel in this file.
+ *
  * Modes (TSFM_MODE):
  *   train     train, checkpointing to TSFM_CKPT; then forecast the backtests
  *   forecast  load TSFM_CKPT and forecast the backtests only
@@ -54,7 +56,6 @@
  *   TSFM_WD       AdamW weight decay                       (default: 0.01)
  *   TSFM_SYNTH    fraction of synthetic windows            (default: 0.3)
  *   TSFM_SIGMA_FLOOR  scale floor, x context std           (default: 0.25)
- *   TSFM_HOST_LOSS  1 = compute the loss on the CPU even on CUDA (default: 0)
  *   TSFM_LOG      steps between log lines                  (default: 200)
  *   TSFM_VAL      steps between in-domain backtest checks  (default: 5000)
  *   TSFM_SEED     random seed                              (default: 1)
@@ -91,23 +92,9 @@ using namespace std;
 using namespace Juzhen;
 namespace fs = std::filesystem;
 
-#ifdef CUDA
-#define FLOAT CUDAfloat
-#elif defined(ROCM_HIP)
-#define FLOAT ROCMfloat
-#elif defined(APPLE_SILICON)
-#define FLOAT MPSfloat
-#else
-#define FLOAT float
+#ifndef CUDA
+#error "demo_tsfm needs the CUDA backend"
 #endif
-
-static Matrix<float> to_host(const Matrix<FLOAT>& M) {
-#if defined(CUDA) || defined(ROCM_HIP) || defined(APPLE_SILICON)
-    return M.to_host();
-#else
-    return M;
-#endif
-}
 
 static int env_int(const char* key, int default_v) {
     const char* v = getenv(key);
@@ -124,7 +111,6 @@ static string env_str(const char* key, const string& default_v) {
 
 static const float NaN = numeric_limits<float>::quiet_NaN();
 constexpr int kQ = 9;  // quantile heads
-static const float kTau[kQ] = {.1f, .2f, .3f, .4f, .5f, .6f, .7f, .8f, .9f};
 constexpr int kPos = 16;       // sinusoidal position features per token
 constexpr float kClamp = 100;  // bound on normalized values
 
@@ -515,39 +501,11 @@ private:
 };
 
 // Pinball loss summed over the quantile heads, per counted target, and its
-// gradient with respect to the network output P (row k*horizon + h holds
-// quantile k of step h).
-static double loss_and_grad(const Config& c, const Matrix<float>& P, const Batch& b, Matrix<float>& G) {
-    const int H = c.horizon, cols = c.cols();
-    vector<double> loss(cols, 0.0);
-    const double total = b.count;
-    const float inv = total > 0 ? (float)(1.0 / total) : 0.0f;
-    parallel_for(cols, [&](int j) {
-        for (int h = 0; h < H; ++h) {
-            const float y = b.target.elem(h, j);
-            if (!isfinite(y)) {
-                for (int k = 0; k < kQ; ++k) G.elem(k * H + h, j) = 0;
-                continue;
-            }
-            double l = 0;
-            for (int k = 0; k < kQ; ++k) {
-                const float u = y - P.elem(k * H + h, j), t = kTau[k];
-                l += u > 0 ? t * u : (t - 1) * u;
-                G.elem(k * H + h, j) = (u > 0 ? -t : 1 - t) * inv;
-            }
-            loss[j] += l;
-        }
-    });
-    double L = 0;
-    for (int j = 0; j < cols; ++j) L += loss[j];
-    return total > 0 ? L / total : 0;
-}
-
-#ifdef CUDA
-// The same loss and gradient on the GPU, one thread per (h, column): P and G
-// are out_dim x cols, Y is horizon x cols (NaN = not counted), all column
-// major. Each block adds its share of the mean loss to *loss, so the host
-// reads the loss only when it logs.
+// gradient with respect to the network output P; one thread per (h, column).
+// P and G are out_dim x cols (row k*horizon + h holds quantile k of step h),
+// Y is horizon x cols (NaN = not counted), all column major. Each block adds
+// its share of the mean loss to *loss, so the host reads the loss only when
+// it logs.
 __global__ void pinball_grad_kernel(const float* __restrict__ P, const float* __restrict__ Y,
                                     float* __restrict__ G, int H, size_t n, float inv, double* loss) {
     __shared__ double part[256];
@@ -557,7 +515,7 @@ __global__ void pinball_grad_kernel(const float* __restrict__ P, const float* __
         const size_t base = (i / H) * (size_t)kQ * H + i % H;
         const float y = Y[i];
         const bool ok = isfinite(y);
-        const float tau[kQ] = {.1f, .2f, .3f, .4f, .5f, .6f, .7f, .8f, .9f};  // = kTau
+        const float tau[kQ] = {.1f, .2f, .3f, .4f, .5f, .6f, .7f, .8f, .9f};
         for (int k = 0; k < kQ; ++k) {
             float g = 0;
             if (ok) {
@@ -611,7 +569,6 @@ public:
         return v;
     }
 };
-#endif
 
 // ─────────────────────────── forecasting ────────────────────────
 
@@ -622,7 +579,7 @@ struct Forecast {
 
 // Forecasts the last `horizon` points of every series of a backtest set from
 // the points before them, batch-by-batch with the training-shaped network.
-static Forecast forecast_set(const Config& c, Sequential<FLOAT>& model, const SeriesSet& s,
+static Forecast forecast_set(const Config& c, Sequential<CUDAfloat>& model, const SeriesSet& s,
                              size_t max_series = 0) {
     Forecast fc;
     fc.H = s.horizon;
@@ -647,8 +604,8 @@ static Forecast forecast_set(const Config& c, Sequential<FLOAT>& model, const Se
             norms[b] = window_norm(c, x);
             write_tokens(c, x, norms[b], tok, b * c.tokens());
         });
-        Matrix<FLOAT> X(tok);
-        auto P = to_host(model.eval(X));
+        Matrix<CUDAfloat> X(tok);
+        auto P = model.eval(X).to_host();
         for (int b = 0; b < nb; ++b) {
             float* out = &fc.v[(first + b) * stride];
             const Norm& nm = norms[b];
@@ -741,9 +698,7 @@ int compute() {
         return 1;
     }
 
-#ifdef CUDA
     GPUSampler gpu_sampler(seed);
-#endif
     global_rand_gen.seed(seed);
 
     const int N = c.tokens(), cols = c.cols();
@@ -752,34 +707,34 @@ int compute() {
          << " heads), batch " << c.batch << " ===" << endl;
 
     // in-MLP -> blocks -> LayerNorm -> out-MLP; Sequential runs back() to front()
-    ReluLayer<FLOAT> in1(c.dm, c.in_dim(), cols);
-    in1.W() = Matrix<FLOAT>::randn(c.dm, c.in_dim()) * sqrtf(2.0f / c.in_dim());
-    in1.b() = Matrix<FLOAT>::zeros(c.dm, 1);
-    LinearLayer<FLOAT> in2(c.dm, c.dm, cols);
-    in2.W() = Matrix<FLOAT>::randn(c.dm, c.dm) * sqrtf(1.0f / c.dm);
-    in2.b() = Matrix<FLOAT>::zeros(c.dm, 1);
-    vector<unique_ptr<TransformerLayer<FLOAT>>> blocks;
+    ReluLayer<CUDAfloat> in1(c.dm, c.in_dim(), cols);
+    in1.W() = Matrix<CUDAfloat>::randn(c.dm, c.in_dim()) * sqrtf(2.0f / c.in_dim());
+    in1.b() = Matrix<CUDAfloat>::zeros(c.dm, 1);
+    LinearLayer<CUDAfloat> in2(c.dm, c.dm, cols);
+    in2.W() = Matrix<CUDAfloat>::randn(c.dm, c.dm) * sqrtf(1.0f / c.dm);
+    in2.b() = Matrix<CUDAfloat>::zeros(c.dm, 1);
+    vector<unique_ptr<TransformerLayer<CUDAfloat>>> blocks;
     for (int i = 0; i < c.layers; ++i)
-        blocks.push_back(make_unique<TransformerLayer<FLOAT>>(c.dm, c.dm, 4 * c.dm, N, c.batch, c.heads, true));
-    LayerNormLayer<FLOAT> ln(c.dm, cols);
-    ReluLayer<FLOAT> out1(c.dm, c.dm, cols);
-    out1.W() = Matrix<FLOAT>::randn(c.dm, c.dm) * sqrtf(2.0f / c.dm);
-    out1.b() = Matrix<FLOAT>::zeros(c.dm, 1);
-    LinearLayer<FLOAT> out2(c.out_dim(), c.dm, cols);
-    out2.W() = Matrix<FLOAT>::randn(c.out_dim(), c.dm) * sqrtf(0.1f / c.dm);
+        blocks.push_back(make_unique<TransformerLayer<CUDAfloat>>(c.dm, c.dm, 4 * c.dm, N, c.batch, c.heads, true));
+    LayerNormLayer<CUDAfloat> ln(c.dm, cols);
+    ReluLayer<CUDAfloat> out1(c.dm, c.dm, cols);
+    out1.W() = Matrix<CUDAfloat>::randn(c.dm, c.dm) * sqrtf(2.0f / c.dm);
+    out1.b() = Matrix<CUDAfloat>::zeros(c.dm, 1);
+    LinearLayer<CUDAfloat> out2(c.out_dim(), c.dm, cols);
+    out2.W() = Matrix<CUDAfloat>::randn(c.out_dim(), c.dm) * sqrtf(0.1f / c.dm);
     {  // quantile heads start at the standard normal quantiles
         Matrix<float> b0("b0", c.out_dim(), 1);
         static const float z[kQ] = {-1.2816f, -.8416f, -.5244f, -.2533f, 0, .2533f, .5244f, .8416f, 1.2816f};
         for (int k = 0; k < kQ; ++k)
             for (int h = 0; h < c.horizon; ++h) b0.elem(k * c.horizon + h, 0) = z[k];
-        out2.b() = Matrix<FLOAT>(b0);
+        out2.b() = Matrix<CUDAfloat>(b0);
     }
 
-    list<Layer<FLOAT>*> net{&out2, &out1, &ln};
+    list<Layer<CUDAfloat>*> net{&out2, &out1, &ln};
     for (int i = c.layers - 1; i >= 0; --i) net.push_back(blocks[i].get());
     net.push_back(&in2);
     net.push_back(&in1);
-    Sequential<FLOAT> model(net);
+    Sequential<CUDAfloat> model(net);
     size_t n_params = 0;
     for (auto* l : net)
         for (auto& [name, m] : l->checkpoint_parameters()) n_params += m->num_row() * m->num_col();
@@ -788,7 +743,7 @@ int compute() {
     AdamWOptions options;
     options.lr = lr;
     options.weight_decay = wd;
-    AdamW<FLOAT> optimizer(model.parameters(), options);
+    AdamW<CUDAfloat> optimizer(model.parameters(), options);
 
     TrainingProgress progress{};
     string err;
@@ -815,14 +770,7 @@ int compute() {
 
         Sampler sampler(c, train, synth, (uint64_t)seed);
         Batch batches[2] = {Batch(c), Batch(c)};
-        Matrix<float> G("grad", c.out_dim(), cols);
-#ifdef CUDA
-        const bool device_loss = env_int("TSFM_HOST_LOSS", 0) == 0;
         DeviceLoss dloss;
-#else
-        const bool device_loss = false;
-#endif
-        cout << "loss on the " << (device_loss ? "GPU" : "CPU") << endl;
         const int warmup = min(2000, max(1, steps / 20));
         const double PI = 3.14159265358979323846;
         auto lr_at = [&](int step) {
@@ -831,7 +779,6 @@ int compute() {
             return (float)(lr * (0.1 + 0.45 * (1 + cos(PI * t))));
         };
 
-        double sum_loss = 0;
         int n_log = 0, skipped = 0;
         auto t0 = chrono::steady_clock::now();
         const int start = (int)progress.step;
@@ -844,17 +791,9 @@ int compute() {
 
             const float lr_t = lr_at(step);
             optimizer.set_lr(lr_t);
-            Matrix<FLOAT> X(b.tokens);
+            Matrix<CUDAfloat> X(b.tokens);
             optimizer.zero_grad();
-            const auto& out = model.eval(X);
-            if (device_loss) {
-#ifdef CUDA
-                model.backward(dloss.grad(c, out, Matrix<FLOAT>(b.target), b.count));
-#endif
-            } else {
-                sum_loss += loss_and_grad(c, to_host(out), b, G);
-                model.backward(Matrix<FLOAT>(G));
-            }
+            model.backward(dloss.grad(c, model.eval(X), Matrix<CUDAfloat>(b.target), b.count));
             ++n_log;
             try {
                 optimizer.clip_grad_norm(1.0);
@@ -865,16 +804,13 @@ int compute() {
             progress.step = step + 1;
 
             if ((step + 1) % log_every == 0 || step + 1 == steps) {
-#ifdef CUDA
-                if (device_loss) sum_loss = dloss.take();
-#endif
+                const double sum_loss = dloss.take();
                 const double secs = chrono::duration<double>(chrono::steady_clock::now() - t0).count();
                 cout << "step " << setw(7) << step + 1 << "  lr " << scientific << setprecision(2) << lr_t << fixed
                      << setprecision(4) << "  loss " << sum_loss / max(1, n_log) << setprecision(0) << "  ("
                      << secs << " s";
                 if (skipped) cout << ", " << skipped << " skipped";
                 cout << ")" << endl;
-                sum_loss = 0;
                 n_log = 0;
             }
             const bool last = step + 1 == steps;

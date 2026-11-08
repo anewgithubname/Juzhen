@@ -16,6 +16,7 @@ Requires a C++20-capable compiler. Supports NVIDIA CUDA 12.x (with cuDNN), Apple
 - [Training checkpoints](docs/checkpoint-resume.md) restore model parameters, Adam state, training progress and the host RNG. CPU and AMD tests include restarting in a new process.
 - A [CPU linear assignment solver](docs/cpu-assignment.md) using the Hungarian shortest-augmenting-path algorithm, with rectangular and min/max matching support.
 - [Reproducible CPU/AMD benchmarks](docs/amd-cpu-benchmark.md), including CPU thread-count comparisons and numerical output checks.
+- A [TimesFM-style time-series foundation model](docs/tsfm.md) (CUDA), pretrained on public series and evaluated zero-shot on the Chronos benchmarks.
 
 ## Example
 
