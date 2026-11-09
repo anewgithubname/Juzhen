@@ -469,6 +469,10 @@ add_test(NAME cuda_slice_assignment COMMAND testCUDAMatrixContracts)
 set_tests_properties(cuda_slice_assignment PROPERTIES
     LABELS "unit;cuda;indexing" SKIP_RETURN_CODE 77 TIMEOUT 120
     ENVIRONMENT "JUZHEN_CUDA_CONTRACT_CASE=slice")
+# Runtime setup and pool release (all backends).
+GENERATE_PROJ(testRuntime tests/testRuntime.cu)
+add_test(NAME runtime COMMAND testRuntime)
+set_tests_properties(runtime PROPERTIES LABELS "unit;memory" TIMEOUT 60)
 
 set(SECURITY_TEST_OUTPUT "" CACHE PATH "Output directory for file-validation fixtures and results")
 if(SECURITY_TEST_OUTPUT)

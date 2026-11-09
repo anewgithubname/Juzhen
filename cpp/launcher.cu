@@ -65,43 +65,17 @@ int main()
     int ret = 1;
 
     try {
-        Memory<int> mdi;
-        Memory<float> md32;
-        Memory<double> md64;
-#ifdef CUDA
-        CuBLASErrorCheck(cublasCreate(&Matrix<CUDAfloat>::global_handle));
-        // opt-in TF32 tensor-core math for all cuBLAS GEMMs (fp32 storage,
-        // 10-bit mantissa multiplies). Enable with NVIDIA_TF32=1.
-        const char *tf32 = std::getenv("NVIDIA_TF32");
-        if (tf32 && *tf32 && std::string(tf32) != "0") {
-            CuBLASErrorCheck(cublasSetMathMode(Matrix<CUDAfloat>::global_handle, CUBLAS_TF32_TENSOR_OP_MATH));
-            std::cout << "TF32 tensor-core math: ON (NVIDIA_TF32=" << tf32 << ")" << std::endl;
-        }
-        Memory<CUDAfloat> gpumd;
-#endif
-#ifdef ROCM_HIP
-        Memory<ROCMfloat> rocmmd;
-#endif
-#ifdef APPLE_SILICON
-        mpsInit();
-        Memory<MPSfloat> mpsmd;
-#endif
+        Juzhen::init();
         std::cout << std::endl;
-        {
-           ret = compute();
-        }
+        ret = compute();
         std::cout << std::endl;
-#ifdef APPLE_SILICON
-        mpsDestroy();
-#endif
-#ifdef CUDA
-        CuBLASErrorCheck(cublasDestroy(Matrix<CUDAfloat>::global_handle));
-#endif
     } catch (const std::exception& e) {
         // keep the old exit code of ERROR_OUT for command-line programs
         std::cerr << "Uncaught exception: " << e.what() << std::endl;
         ret = 1;
     }
-    
+    // free the memory pools and the GPU backend, also after an error
+    Juzhen::shutdown();
+
     return ret;
 }

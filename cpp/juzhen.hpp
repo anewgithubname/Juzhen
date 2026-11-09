@@ -33,6 +33,8 @@ typedef Matrix<ROCMfloat> CM;
 #include "mpsmatrix.hpp"
 #endif
 
+#include "runtime.hpp"
+
 template <class D>
 Matrix<D> randn_like(const Matrix<D> &M) {
     return Matrix<D>::randn(M.num_row(), M.num_col());

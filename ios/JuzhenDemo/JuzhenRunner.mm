@@ -33,21 +33,12 @@ namespace {
 std::mutex juzhen_mutex;
 
 // One run of Juzhen code. Metal is set up on the first run and kept for the
-// life of the app; the memory pools are released when each run ends, as at
-// the end of main() in cpp/launcher.cu.
+// life of the app; the memory pools are released when each run ends.
 struct Run {
     std::lock_guard<std::mutex> lock{juzhen_mutex};
-    Memory<int> mdi;
-    Memory<float> md32;
-    Memory<double> md64;
-    Memory<MPSfloat> mpsmd;
 
-    Run() {
-        static std::once_flag metal;
-        std::call_once(metal, mpsInit);
-    }
-    // Let the GPU finish with the buffers before the pools free them.
-    ~Run() { mpsSynchronize(); }
+    Run() { Juzhen::init(); }
+    ~Run() { Juzhen::release_memory(); }
 };
 
 // Hands each flushed chunk of std::cout to the UI and echoes it to stdout,
