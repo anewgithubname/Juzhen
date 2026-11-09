@@ -101,6 +101,10 @@ class LayerNorm(Layer):
     def create(self, core, n_in):
         return core.LayerNorm(n_in, self.batch_size)
 
+    def __repr__(self):
+        features = f"{self.in_features}, " if self.in_features else ""
+        return f"LayerNorm({features}batch_size={self.batch_size})"
+
 
 class Conv2d(Layer):
     """2-D convolution (optionally followed by ReLU) on a fixed batch size.
@@ -135,6 +139,13 @@ class Conv2d(Layer):
         return getattr(core, self._core_name)(self.batch_size, self.c_in, self.h, self.w, self.c_out,
                                               self.kh, self.kw, self.padding, self.stride, self.relu)
 
+    def __repr__(self):
+        kernel = self.kh if self.kh == self.kw else (self.kh, self.kw)
+        image = self.h if self.h == self.w else (self.h, self.w)
+        return (f"{type(self).__name__}({self.c_in}, {self.c_out}, {kernel}, image_size={image}, "
+                f"batch_size={self.batch_size}, padding={self.padding}, stride={self.stride}, "
+                f"relu={self.relu})")
+
 
 class ConvTranspose2d(Conv2d):
     """Transposed 2-D convolution (upsampling), the counterpart of Conv2d."""
@@ -162,6 +173,11 @@ class Transformer(Layer):
 
     def create(self, core, n_in):
         return core.Transformer(*self.args)
+
+    def __repr__(self):
+        d_model, d_k, d_ff, seq_len, batch_size, heads, causal = self.args
+        return (f"Transformer({d_model}, {d_k}, {d_ff}, seq_len={seq_len}, batch_size={batch_size}, "
+                f"heads={heads}, causal={causal})")
 
 
 def _pair(v):

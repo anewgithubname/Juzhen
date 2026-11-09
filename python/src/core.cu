@@ -844,7 +844,7 @@ void bind_training(nb::module_ &sub) {
 template <class D>
 void bind(nb::module_ &top, nb::module_ &sub) {
     using Mat = Matrix<D>;
-    nb::class_<Mat>(sub, "Matrix", "A float32 matrix in Juzhen's memory pool.")
+    auto cls = nb::class_<Mat>(sub, "Matrix", "A float32 matrix in Juzhen's memory pool.")
         .def_prop_ro("shape", [](const Mat &m) { return std::make_tuple(m.num_row(), m.num_col()); })
         .def_prop_ro("device", [](const Mat &) { return device_name<D>(); })
         .def_prop_ro("T", [](const Mat &m) { return transposed(m); }, "The transpose; shares storage, no copy.")
@@ -888,6 +888,19 @@ void bind(nb::module_ &top, nb::module_ &sub) {
         .def("__isub__", [](Mat &a, double s) -> Mat & { a.add((float)-s, 1.0f); return a; }, nb::rv_policy::none)
         .def("__imul__", [](Mat &a, double s) -> Mat & { a.scale((float)s); return a; }, nb::rv_policy::none)
         .def("__itruediv__", [](Mat &a, double s) -> Mat & { a.scale((float)(1.0 / s)); return a; }, nb::rv_policy::none);
+
+#ifdef JZ_HAS_GPU
+    // A matrix of the other device: say so, instead of nanobind's list of
+    // the overloads that did not match.
+    using Other = std::conditional_t<std::is_same_v<D, float>, GPU, float>;
+    for (const char *op : {"__add__", "__sub__", "__mul__", "__truediv__", "__matmul__", "__iadd__", "__isub__"})
+        cls.def(op, [](const Mat &, const Matrix<Other> &) -> Mat {
+            throw std::invalid_argument(std::string("the matrices are on different devices ('") +
+                                        device_name<D>() + "' and '" + device_name<Other>() +
+                                        "'); move one with .to('" + device_name<D>() + "') or .to('" +
+                                        device_name<Other>() + "')");
+        });
+#endif
 
     sub.def("from_numpy", &from_numpy<D>, "array"_a);
     sub.def("zeros", [](size_t r, size_t c) { return Mat::zeros(r, c); }, "rows"_a, "cols"_a);

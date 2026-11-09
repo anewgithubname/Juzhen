@@ -20,6 +20,31 @@ print(model.evaluate(X_test, Y_test))
   GPU backend of the build. Converting to or from numpy copies.
 - Reading values (`.numpy()`, `.item()`, `print`) waits for the GPU.
 
+New to the library? Start with the notebook `examples/tutorial.ipynb`.
+
+## Performance notes
+
+Every operator returns a new matrix: `A @ B / n` computes `A @ B`, then a
+second matrix for the division. The C++ library reuses the temporary in that
+case; Python cannot tell that `A @ B` is a temporary. On large matrices,
+scale or accumulate in place instead:
+
+```python
+A3 += A1 @ A2 / n        # one extra matrix and pass over memory for "/ n"
+
+C = A1 @ A2              # the same result without it
+C /= n                   # in place: *=, /=, += and -= do not allocate
+A3 += C
+```
+
+On an RTX 4090 with 5000 x 5000 matrices the first form runs at 43 TFLOPS,
+the second at 46 TFLOPS, the speed of the C++ demo. Matrix products and the
+layers themselves run at the speed of C++.
+
+Reading a value back (`.item()`, `.numpy()`) waits for the GPU to finish, so
+in a training loop read the loss every few hundred steps rather than every
+step when speed matters.
+
 ## Examples
 
 The scripts in `examples/` run on the GPU when the build has one; `--device cpu`
@@ -27,6 +52,7 @@ The scripts in `examples/` run on the GPU when the build has one; `--device cpu`
 
 | file | what it shows | C++ original |
 |---|---|---|
+| `tutorial.ipynb` | a guided tour of the whole library, step by step | |
 | `helloworld.py` | matrix arithmetic on both devices | `helloworld.cu` |
 | `fit_mnist.py` | `fit()` and `evaluate()` | |
 | `fit_sin.py` | a hand-written training loop | |

@@ -254,6 +254,17 @@ class TestDevices:
         close(A.to("cpu"), a)
         assert A.to("cpu").device == "cpu"
 
+    @pytest.mark.skipif(not jz.has_gpu(), reason="needs a GPU build")
+    def test_mixing_devices_says_so(self, rng):
+        a, A = pair(rng, "cpu")
+        G = A.to("gpu")
+        for operation in (lambda: A + G, lambda: G - A, lambda: A * G, lambda: G / A, lambda: A @ G.T):
+            with pytest.raises(ValueError, match="different devices"):
+                operation()
+        with pytest.raises(ValueError, match="different devices"):
+            A += G
+        close(A + 1, a + 1)  # numbers still work
+
     def test_random_and_seed(self, device):
         jz.manual_seed(7)
         a = jz.randn(50, 40, device=device).numpy()
