@@ -1,0 +1,31 @@
+[build-system]
+requires = ["scikit-build-core>=0.10", "nanobind>=2.0"]
+build-backend = "scikit_build_core.build"
+
+[project]
+name = "juzhen"
+version = "0.1.0"
+description = "Python interface to Juzhen, a small and readable C++ matrix and neural network library"
+readme = "README.md"
+requires-python = ">=3.9"
+license = { text = "GPL-3.0-or-later" }
+dependencies = ["numpy"]
+
+[project.optional-dependencies]
+test = ["pytest"]
+
+[tool.scikit-build]
+minimum-version = "build-system.requires"
+# The CMake project is the whole repository; python/CMakeLists.txt adds the module.
+cmake.source-dir = ".."
+build-dir = "build/{wheel_tag}"
+wheel.packages = ["juzhen"]
+
+[tool.scikit-build.cmake.define]
+JUZHEN_PYTHON = "ON"
+# CPU by default; a GPU build overrides one of these, e.g.
+#   pip install ./python -C cmake.define.NVIDIA_CUDA=ON
+NVIDIA_CUDA = "OFF"
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
