@@ -86,9 +86,12 @@ class Memory {
 
         auto it = alive_mems.find(ptr);
         if (it == alive_mems.end()) {
+            // Runs inside shared_ptr deleters, where throwing would terminate:
+            // report the unknown address and leave it alone.
             LOG_ERROR(
                 "Failed to find address {} in alive memory type: {}", fmt::ptr(ptr), datatype(D));
-            ERROR_OUT;
+            STATIC_TOC;
+            return;
         }
 
         dead_mems.emplace(it->second, ptr);

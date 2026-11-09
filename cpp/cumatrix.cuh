@@ -278,7 +278,8 @@ class Matrix<CUDAfloat> {
         if(!count)return result;
         auto indices=[](const idxlist& input){
             size_t* device=nullptr;CudaErrorCheck(cudaMalloc(&device,input.size()*sizeof(size_t)));
-            std::shared_ptr<size_t> owner(device,[](size_t* p){if(p)CudaErrorCheck(cudaFree(p));});
+            // deleters must not throw
+            std::shared_ptr<size_t> owner(device,[](size_t* p){if(p)cudaFree(p);});
             CudaErrorCheck(cudaMemcpy(device,input.data(),input.size()*sizeof(size_t),cudaMemcpyHostToDevice));
             return owner;
         };
@@ -369,8 +370,8 @@ struct GPUSampler {
         // destroy generator
         stats = curandDestroyGenerator(gen);
         if (stats != CURAND_STATUS_SUCCESS) {
+            // destructors must not throw
             LOG_ERROR("curand destroy generator failed!");
-            ERROR_OUT;
         }
         LOG_INFO("GPU sampler is destroyed!");
     }

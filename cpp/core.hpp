@@ -492,7 +492,7 @@ Matrix<D> Matrix<D>::eleminv(double l) const {
 // composable: validate available payload when seekable, but preserve pipe input.
 namespace matrix_io_detail {
 
-// log the reason and quit the program
+// log the reason and abort the read
 [[noreturn]] inline void fail(const char* reason) {
     LOG_ERROR("matrix/data read: {}", reason);
     ERROR_OUT;

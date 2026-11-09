@@ -164,6 +164,19 @@ Matrix<ROCMfloat>& fill(Matrix<ROCMfloat>& M, double a);
 Matrix<ROCMfloat> hstack(std::vector<MatrixView<ROCMfloat>> matrices);
 Matrix<ROCMfloat> vstack(std::vector<MatrixView<ROCMfloat>> matrices);
 
+// Seeds the device generator behind randn/rand, like the CUDA and Metal
+// GPUSampler. setseed restarts the stream from the beginning.
+struct GPUSampler {
+    explicit GPUSampler(int seed) { setseed(seed); }
+    void setseed(int seed) {
+        int rc = Juzhen::RocmRandSeed(static_cast<std::uint64_t>(seed));
+        if (rc != 0) {
+            LOG_ERROR("rocRAND reseed failed with code {}", rc);
+            ERROR_OUT;
+        }
+    }
+};
+
 #ifdef __HIPCC__
 
 template <class Function>

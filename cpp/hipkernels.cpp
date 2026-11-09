@@ -596,28 +596,35 @@ inline rocrand_generator& GlobalRocRandGenerator() {
     return gen;
 }
 
+struct RocRandSeedState {
+    bool seeded = false;
+    std::uint64_t seed = 0;
+};
+
+inline RocRandSeedState& GlobalRocRandSeed() {
+    static RocRandSeedState state;
+    return state;
+}
+
+// Restart the stream from its beginning, whatever was drawn or offset before.
+inline int ReseedRocRand(rocrand_generator gen, std::uint64_t seed) {
+    auto st = rocrand_set_seed(gen, seed);
+    if (st == ROCRAND_STATUS_SUCCESS) st = rocrand_set_offset(gen, 0);
+    if (st != ROCRAND_STATUS_SUCCESS) return RocRandToInt(st);
+    GlobalRocRandSeed() = {true, seed};
+    return 0;
+}
+
 inline int EnsureRocRandSeed(rocrand_generator gen, std::uint64_t seed) {
-    static bool seeded = false;
-    static std::uint64_t currentSeed = 0;
+    const auto& state = GlobalRocRandSeed();
 
     // seed=0 means keep advancing current generator state without reseeding.
     if (seed == 0) {
-        if (!seeded) {
-            constexpr std::uint64_t kDefaultSeed = 0x9E3779B97F4A7C15ULL;
-            auto st = rocrand_set_seed(gen, kDefaultSeed);
-            if (st != ROCRAND_STATUS_SUCCESS) return RocRandToInt(st);
-            seeded = true;
-            currentSeed = kDefaultSeed;
-        }
-        return 0;
+        constexpr std::uint64_t kDefaultSeed = 0x9E3779B97F4A7C15ULL;
+        return state.seeded ? 0 : ReseedRocRand(gen, kDefaultSeed);
     }
 
-    if (!seeded || currentSeed != seed) {
-        auto st = rocrand_set_seed(gen, seed);
-        if (st != ROCRAND_STATUS_SUCCESS) return RocRandToInt(st);
-        seeded = true;
-        currentSeed = seed;
-    }
+    if (!state.seeded || state.seed != seed) return ReseedRocRand(gen, seed);
     return 0;
 }
 
@@ -717,6 +724,27 @@ int RocmRandNormal(float* dst_device, std::size_t count, float mean, float stdde
     (void)stddev;
     (void)seed;
     LOG_ERROR("rocRAND headers not found; RocmRandNormal is unavailable.");
+    return -1;
+#endif
+}
+
+int RocmRandSeed(std::uint64_t seed) {
+#if JUZHEN_ROCM_KERNELS_AVAILABLE
+    rocrand_generator gen = GlobalRocRandGenerator();
+    if (gen == nullptr) return -1;
+    return ReseedRocRand(gen, seed);
+#else
+    (void)seed;
+    LOG_ERROR("rocRAND headers not found; RocmRandSeed is unavailable.");
+    return -1;
+#endif
+}
+
+int RocmSynchronize() {
+#if JUZHEN_ROCM_KERNELS_AVAILABLE
+    return HipToInt(hipDeviceSynchronize());
+#else
+    LOG_ERROR("ROCm runtime headers not found; RocmSynchronize is unavailable.");
     return -1;
 #endif
 }
