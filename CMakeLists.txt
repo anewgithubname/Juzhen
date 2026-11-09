@@ -150,6 +150,8 @@ endif()
 # target_precompile_headers(juzhen PRIVATE cpp/juzhen.hpp)
 target_include_directories(juzhen PUBLIC "external/spdlog/include")
 target_include_directories(juzhen PUBLIC ${OpenBLAS_INCLUDE_DIRS})
+# juzhen calls spdlog itself: link it after juzhen so single-pass linkers (GNU ld) resolve it
+target_link_libraries(juzhen spdlog::spdlog)
 
 if(NVIDIA_CUDA) # if we are on GPU, we need to include the cuda headers
     target_include_directories(juzhen PUBLIC ${CUDAToolkit_INCLUDE_DIRS})
