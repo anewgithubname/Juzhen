@@ -1,4 +1,5 @@
 #include <CoreFoundation/CoreFoundation.h>
+#include <dlfcn.h>
 #import <Foundation/Foundation.h>
 #import <Metal/Metal.h>
 #import <MetalPerformanceShaders/MetalPerformanceShaders.h>
@@ -127,6 +128,20 @@ static void opEncoded() {
     if (++encodedOps >= kMaxEncodedOps) commitCurrent();
 }
 
+// newDefaultLibrary finds default.metallib next to the executable or in the
+// app bundle. When Juzhen is a library loaded into another program (the
+// Python module), the file sits next to that library instead.
+static id<MTLLibrary> loadShaderLibrary(id<MTLDevice> dev) {
+    id<MTLLibrary> library = [dev newDefaultLibrary];
+    if (library) return library;
+    Dl_info info;
+    if (!dladdr((const void*)&loadShaderLibrary, &info) || !info.dli_fname) return nil;
+    NSString* folder = [[NSString stringWithUTF8String:info.dli_fname] stringByDeletingLastPathComponent];
+    NSURL* url = [NSURL fileURLWithPath:[folder stringByAppendingPathComponent:@"default.metallib"]];
+    NSError* error = nil;
+    return [dev newLibraryWithURL:url error:&error];
+}
+
 void mpsInit() {
     device = MTLCreateSystemDefaultDevice();
 
@@ -138,8 +153,8 @@ void mpsInit() {
 
     NSError* error = nil;
 
-    // Load the Metal shader source file
-    id<MTLLibrary> defaultLibrary = [device newDefaultLibrary];
+    // Load the compiled shaders (default.metallib)
+    id<MTLLibrary> defaultLibrary = loadShaderLibrary(device);
     if(!defaultLibrary) {
         throw std::runtime_error("Could not load default Metal library.");
     }

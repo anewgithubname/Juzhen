@@ -100,10 +100,18 @@ class Memory {
     }
 
     /**
-    * @brief release all memory
-    * @note this function is called when the program exits
+    * @brief release the cached blocks that no matrix is using
     */
-    ~Memory() {
+    static void release_cached() {
+        for (auto &[sz, ptr] : dead_mems) _free(ptr);
+        dead_mems.clear();
+    }
+
+    /**
+    * @brief release all memory, including blocks still in use
+    * @note called by Juzhen::shutdown() and the destructor
+    */
+    static void release_all() {
         size_t size = 0;
         for (auto &[ptr, sz] : alive_mems) {
             _free(ptr);
@@ -120,6 +128,9 @@ class Memory {
         LOG_INFO("Total {} memory released: {:.2f} MB.", datatype(D),
                  size * sizeof(D) / 1024.0 / 1024.0);
     }
+
+    // A scoped guard: release all memory of this type when it goes out of scope.
+    ~Memory() { release_all(); }
 };
 
 /**

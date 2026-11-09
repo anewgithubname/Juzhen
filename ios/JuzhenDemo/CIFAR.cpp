@@ -152,15 +152,9 @@ int juzhen_cifar_speed() {
                  << available_mb() << " MB available" << endl;
             continue;
         }
-        {
-            // Release this batch size's buffers before the next one.
-            Memory<int> mdi;
-            Memory<float> md32;
-            Memory<double> md64;
-            Memory<MPSfloat> mpsmd;
-            mb_per_image = run_batch(bs, steps, euler_steps) / bs;
-            mpsSynchronize();
-        }
+        mb_per_image = run_batch(bs, steps, euler_steps) / bs;
+        // Release this batch size's buffers before the next one.
+        Juzhen::release_memory();
         cout << endl;
     }
     return 0;

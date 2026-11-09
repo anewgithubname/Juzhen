@@ -99,6 +99,7 @@ Testing/
 build*/**
 
 *.txt
+!python/CMakeLists.txt
 *.log
 external/boost**
 

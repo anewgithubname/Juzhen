@@ -11,10 +11,13 @@ option(ROCM_HIP "Build with AMD ROCm/HIP backend (scaffold)" OFF)
 option(APPLE_SILICON "Build with Apple Silicon backend" OFF)
 option(BLAS_FREE "Build without an external BLAS; CPU gemm/gemv use the handwritten kernels in cpp/cpulinalg.hpp" OFF)
 set(ROCM_OFFLOAD_ARCH "" CACHE STRING "ROCm offload architecture, e.g. gfx1151")
+# Build the Python module in python/ instead of the tests and examples.
+option(JUZHEN_PYTHON "Build the Python module instead of the tests and examples" OFF)
 
 set(CMAKE_CXX_STANDARD 20)
 set(CMAKE_CXX_STANDARD_REQUIRED ON)
 
+if(NOT JUZHEN_PYTHON) # only the examples use FTXUI
 include(FetchContent)
  
 FetchContent_Declare(ftxui
@@ -23,6 +26,7 @@ FetchContent_Declare(ftxui
 )
  
 FetchContent_MakeAvailable(ftxui)
+endif()
 
 if(NVIDIA_CUDA)
     message("BUILD WITH CUDA SUPPORT!")
@@ -206,6 +210,11 @@ elseif(ROCM_HIP)
 else()
     set_source_files_properties(cpp/launcher.cu PROPERTIES LANGUAGE CXX) # specify cuda files lanaugae to be CXX
     set_target_properties(juzhen PROPERTIES LINKER_LANGUAGE CXX)
+endif()
+
+if(JUZHEN_PYTHON)
+    add_subdirectory(python)
+    return()
 endif()
 
 macro(GENERATE_PROJ TARGETNAME FILE)
@@ -469,6 +478,10 @@ add_test(NAME cuda_slice_assignment COMMAND testCUDAMatrixContracts)
 set_tests_properties(cuda_slice_assignment PROPERTIES
     LABELS "unit;cuda;indexing" SKIP_RETURN_CODE 77 TIMEOUT 120
     ENVIRONMENT "JUZHEN_CUDA_CONTRACT_CASE=slice")
+# Runtime setup and pool release (all backends).
+GENERATE_PROJ(testRuntime tests/testRuntime.cu)
+add_test(NAME runtime COMMAND testRuntime)
+set_tests_properties(runtime PROPERTIES LABELS "unit;memory" TIMEOUT 60)
 
 set(SECURITY_TEST_OUTPUT "" CACHE PATH "Output directory for file-validation fixtures and results")
 if(SECURITY_TEST_OUTPUT)
