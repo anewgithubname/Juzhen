@@ -93,6 +93,23 @@ Matrix<D> copy_of(const Matrix<D> &m) {
     return Matrix<D>(m);
 }
 
+// A deep copy stored without the transpose flag. Layers and some kernels
+// read their inputs and parameters as plain column-major arrays.
+template <class D>
+Matrix<D> plain_copy(const Matrix<D> &m) {
+    if (!m.get_transpose())
+        return copy_of(m);
+    Matrix<D> out = Matrix<D>::zeros(m.num_row(), m.num_col());
+    out += m;
+    return out;
+}
+
+// m itself when it has no transpose flag, otherwise a plain copy.
+template <class D>
+Matrix<D> plain(const Matrix<D> &m) {
+    return m.get_transpose() ? plain_copy(m) : transposed(transposed(m));
+}
+
 // The matrix on the host (shares storage for a CPU matrix).
 template <class D>
 Matrix<float> host(const Matrix<D> &m) {
@@ -363,6 +380,147 @@ nb::object get_item(const Matrix<D> &m, nb::handle key) {
 }
 
 // ---------------------------------------------------------------------------
+// More functions: reductions along an axis, softmax, top-k, one-hot, stacking.
+// Axis 0 works down each column (one result per column, 1 x cols); axis 1
+// along each row (rows x 1). The reductions run on the device on CUDA and
+// ROCm; on Metal reduce() and elemwise() copy through the host.
+
+void check_axis(int axis) {
+    if (axis != 0 && axis != 1)
+        throw std::invalid_argument("axis must be 0 or 1, got " + std::to_string(axis));
+}
+
+template <class D>
+Matrix<D> max_axis(const Matrix<D> &m, int axis) {
+    check_axis(axis);
+    return reduce([] __GPU_CPU__(float *v, float *out, int n, int) {
+        float best = v[0];
+        for (int i = 1; i < n; ++i) best = v[i] > best ? v[i] : best;
+        out[0] = best;
+    }, m, axis, 1);
+}
+
+template <class D>
+Matrix<D> min_axis(const Matrix<D> &m, int axis) {
+    check_axis(axis);
+    return reduce([] __GPU_CPU__(float *v, float *out, int n, int) {
+        float best = v[0];
+        for (int i = 1; i < n; ++i) best = v[i] < best ? v[i] : best;
+        out[0] = best;
+    }, m, axis, 1);
+}
+
+// the position of the largest value (the first one on ties), as a float
+template <class D>
+Matrix<D> argmax_axis(const Matrix<D> &m, int axis) {
+    check_axis(axis);
+    return reduce([] __GPU_CPU__(float *v, float *out, int n, int) {
+        int best = 0;
+        for (int i = 1; i < n; ++i) best = v[i] > v[best] ? i : best;
+        out[0] = (float)best;
+    }, m, axis, 1);
+}
+
+template <class D>
+Matrix<D> abs_of(const Matrix<D> &m) {
+    return elemwise([] __GPU_CPU__(float x) { return fabsf(x); }, m);
+}
+
+// The k largest (or smallest) values along an axis, in order, and their
+// positions (as floats). NaNs are skipped.
+template <class D>
+std::tuple<Matrix<D>, Matrix<D>> topk_axis(const Matrix<D> &m, int k, int axis, bool largest) {
+    check_axis(axis);
+    const size_t n = axis == 0 ? m.num_row() : m.num_col();
+    if (k < 1 || (size_t)k > n)
+        throw std::invalid_argument("k must be between 1 and " + std::to_string(n) + ", got " +
+                                    std::to_string(k));
+    // the selection overwrites what it has taken, so it runs on a copy; with
+    // the sign flipped, the smallest values are the largest
+    const float sign = largest ? 1.0f : -1.0f;
+    Matrix<D> work = m * sign;
+    // each group gets 2k results: the values, then the positions
+    Matrix<D> both = reduce([=] __GPU_CPU__(float *v, float *out, int len, int) {
+        for (int i = 0; i < k; ++i) {
+            int best = -1;
+            float best_value = 0;  // kept in a register, not reread from v
+            for (int j = 0; j < len; ++j) {
+                const float x = v[j];
+                if (x == x && (best < 0 || x > best_value)) {
+                    best = j;
+                    best_value = x;
+                }
+            }
+            out[i] = best < 0 ? NAN : sign * best_value;
+            out[k + i] = (float)best;
+            if (best >= 0) v[best] = NAN;
+        }
+    }, work, axis, 2 * k);
+    if (axis == 0)
+        return {take_block(both, 0, k, 0, both.num_col()), take_block(both, k, 2 * k, 0, both.num_col())};
+    return {take_block(both, 0, both.num_row(), 0, k), take_block(both, 0, both.num_row(), k, 2 * k)};
+}
+
+// m arranged so that the groups of an axis are its columns (no copy)
+template <class D>
+Matrix<D> groups_as_columns(const Matrix<D> &m, int axis) {
+    check_axis(axis);
+    return axis == 0 ? transposed(transposed(m)) : transposed(m);
+}
+
+// softmax of each group, computed as in ml/loss.hpp: the largest value is
+// subtracted before exp() so it cannot overflow
+template <class D>
+Matrix<D> softmax_axis(const Matrix<D> &m, int axis) {
+    const Matrix<D> c = groups_as_columns(m, axis);
+    const auto ones = Matrix<D>::ones(c.num_row(), 1);
+    auto maximum = loss_detail::column_max(c);
+    auto exponents = exp(c - ones * maximum);
+    auto totals = sum(exponents, 0);
+    Matrix<D> p = exponents / (ones * std::move(totals));
+    return axis == 0 ? std::move(p) : transposed(p);
+}
+
+template <class D>
+Matrix<D> logsumexp_axis(const Matrix<D> &m, int axis) {
+    const Matrix<D> c = groups_as_columns(m, axis);
+    const auto ones = Matrix<D>::ones(c.num_row(), 1);
+    auto maximum = loss_detail::column_max(c);
+    auto totals = sum(exp(c - ones * maximum), 0);
+    Matrix<D> result = log(Matrix<D>(totals)) + maximum;  // 1 x groups
+    return axis == 0 ? std::move(result) : transposed(result);
+}
+
+// One-hot rows for the integer labels in an N x 1 matrix: N x classes,
+// built on the device (only the labels cross from the host).
+template <class D>
+Matrix<D> one_hot_of(const Matrix<D> &labels, size_t classes) {
+    if (labels.num_col() != 1)
+        throw std::invalid_argument("one_hot: labels must have shape (N, 1), got " + shape_str(labels));
+    const size_t n = labels.num_row();
+    Matrix<float> arange("arange", classes, 1);
+    for (size_t i = 0; i < classes; ++i) arange.elem(i, 0) = (float)i;
+    // classes x N, entry (c, j) = c - label_j: zero where label_j is c
+    Matrix<D> diff = to_device<D>(std::move(arange)) * Matrix<D>::ones(1, n) -
+                     Matrix<D>::ones(classes, 1) * transposed(labels);
+    return transposed(elemwise([] __GPU_CPU__(float x) { return fabsf(x) < 0.5f ? 1.0f : 0.0f; },
+                               std::move(diff)));
+}
+
+// numpy's hstack (side by side) or vstack (one above the other)
+template <class D>
+Matrix<D> stack_of(nb::list items, bool horizontal) {
+    if (items.size() == 0)
+        throw std::invalid_argument("nothing to stack");
+    std::vector<MatrixView<D>> views;
+    for (nb::handle item : items)
+        views.emplace_back(nb::cast<const Matrix<D> &>(item));
+    if (horizontal)
+        return hstack(views);
+    return vstack(views);
+}
+
+// ---------------------------------------------------------------------------
 // Neural networks
 
 // A network owned by Python: layers are given input first and kept here in
@@ -373,8 +531,11 @@ class Network {
     std::list<Layer<D> *> layers_;
     std::unique_ptr<Matrix<D>> input_;  // features x batch input of the last forward
 
-    // x is batch x features; the layers want features x batch
-    static Matrix<D> native(const Matrix<D> &x) { return transposed(x); }
+    // x is batch x features; the layers want features x batch, stored
+    // without the transpose flag (a numpy array already is; the result of
+    // hstack or a matrix product is not)
+    static Matrix<D> native(const Matrix<D> &x) { return plain(transposed(x)); }
+    static Matrix<D> native_copy(const Matrix<D> &x) { return plain_copy(transposed(x)); }
 
    public:
     explicit Network(const std::vector<Layer<D> *> &input_first) {
@@ -395,7 +556,7 @@ class Network {
     // Runs the layers on x and keeps a copy of x for backward().
     Matrix<D> forward(const Matrix<D> &x) {
         input_.reset();
-        auto input = std::make_unique<Matrix<D>>(native(copy_of(x)));
+        auto input = std::make_unique<Matrix<D>>(native_copy(x));
         const Matrix<D> &out = Juzhen::forward(layers_, *input);
         input_ = std::move(input);
         // a copy: the next forward() overwrites the layer's output
@@ -415,7 +576,7 @@ class Network {
         if (!input_)
             throw std::logic_error("call the network on a batch before backward()");
         // backward() may write into its argument, so it gets a copy
-        Matrix<D> upstream = native(copy_of(grad));
+        Matrix<D> upstream = native_copy(grad);
         return transposed(Juzhen::backward(layers_, *input_, std::move(upstream)));
     }
 
@@ -604,11 +765,7 @@ void bind_training(nb::module_ &sub) {
             if (value.num_row() != p.value->num_row() || value.num_col() != p.value->num_col())
                 throw std::invalid_argument("cannot assign shape " + shape_str(value) + " to parameter '" +
                                             p.name + "' of shape " + shape_str(*p.value));
-            // stored without the transpose flag, like a new parameter: some
-            // kernels read parameters as plain column-major arrays
-            Matrix<D> fresh = Matrix<D>::zeros(value.num_row(), value.num_col());
-            fresh += value;
-            *p.value = std::move(fresh);
+            *p.value = plain_copy(value);
         }, "value"_a, "Set the parameter to a copy of value (same shape, e.g. for a custom initialization).")
         .def("__repr__", [](const ParameterRef<D> &p) {
             return "Parameter('" + p.name + "', shape=" + shape_str(*p.value) + ")";
@@ -655,6 +812,15 @@ void bind_training(nb::module_ &sub) {
         auto r = Juzhen::mse(transposed(prediction), transposed(target));
         return std::make_tuple(std::move(r.value), transposed(r.grad));
     }, "prediction"_a, "target"_a);
+    // weights: one per sample (N x 1); already includes any scaling
+    sub.def("masked_softmax_cross_entropy", [](const Matrix<D> &logits, const Matrix<D> &labels,
+                                               const Matrix<D> &weights) {
+        if (weights.num_row() != logits.num_row() || weights.num_col() != 1)
+            throw std::invalid_argument("weights must have shape (" + std::to_string(logits.num_row()) +
+                                        ", 1), got " + shape_str(weights));
+        auto r = Juzhen::masked_softmax_cross_entropy(transposed(logits), transposed(labels), transposed(weights));
+        return std::make_tuple(std::move(r.value), transposed(r.grad));
+    }, "logits"_a, "labels"_a, "weights"_a);
     sub.def("error_rate", [](const Matrix<D> &scores, const Matrix<D> &labels) {
         return Juzhen::error_rate(transposed(scores), transposed(labels));
     }, "scores"_a, "labels"_a);
@@ -740,6 +906,15 @@ void bind(nb::module_ &top, nb::module_ &sub) {
     top.def("cos", &cos_of<D>);
     top.def("relu", &relu_of<D>);
     top.def("sum", &sum_axis<D>, "m"_a, "axis"_a);
+    top.def("abs", &abs_of<D>);
+    top.def("max", &max_axis<D>, "m"_a, "axis"_a);
+    top.def("min", &min_axis<D>, "m"_a, "axis"_a);
+    top.def("argmax", &argmax_axis<D>, "m"_a, "axis"_a);
+    top.def("topk", &topk_axis<D>, "m"_a, "k"_a, "axis"_a, "largest"_a);
+    top.def("softmax", &softmax_axis<D>, "m"_a, "axis"_a);
+    top.def("logsumexp", &logsumexp_axis<D>, "m"_a, "axis"_a);
+    sub.def("one_hot", &one_hot_of<D>, "labels"_a, "classes"_a);
+    sub.def("stack", &stack_of<D>, "matrices"_a, "horizontal"_a);
 
     bind_layers<D>(sub);
     bind_training<D>(sub);

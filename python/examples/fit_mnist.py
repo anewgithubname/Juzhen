@@ -4,7 +4,7 @@ import sys
 
 import juzhen as jz
 
-device = sys.argv[1] if len(sys.argv) > 1 else "cpu"
+device = sys.argv[1] if len(sys.argv) > 1 else ("gpu" if jz.has_gpu() else "cpu")
 jz.manual_seed(1)
 
 X, Y, X_test, Y_test = jz.datasets.mnist()

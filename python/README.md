@@ -20,9 +20,23 @@ print(model.evaluate(X_test, Y_test))
   GPU backend of the build. Converting to or from numpy copies.
 - Reading values (`.numpy()`, `.item()`, `print`) waits for the GPU.
 
-See `examples/` for the C++ demos rewritten in Python, `examples/fit_sin.py`
-for a hand-written training loop, and
-`misc/python_interface_plan.md` for the design.
+## Examples
+
+The scripts in `examples/` run on the GPU when the build has one; `--device cpu`
+(or `cpu` as the first argument of the `fit_` ones) runs them on the CPU.
+
+| file | what it shows | C++ original |
+|---|---|---|
+| `helloworld.py` | matrix arithmetic on both devices | `helloworld.cu` |
+| `fit_mnist.py` | `fit()` and `evaluate()` | |
+| `fit_sin.py` | a hand-written training loop | |
+| `demo_mnist.py` | an MLP on MNIST, step by step | `demo_mnist.cu` |
+| `cnn_mnist.py` | convolutions on MNIST | `demo_cnn_mnist.cu` |
+| `rectified_flow.py` | a generative flow; `hstack`, Euler sampling | `demo_rectified.cu` |
+| `transformer_charlm.py` | a character transformer LM; `one_hot` on the device, `state_dict()` into a batch-1 network | `demo_transformer.cu` |
+| `knn.py` | k nearest neighbours with `topk` | `knn.cu` |
+
+See `misc/python_interface_plan.md` for the design.
 
 ## Building
 

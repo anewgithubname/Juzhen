@@ -144,6 +144,21 @@ class TestLayers:
         net(jz.ones(4, 3, device=device))  # overwrites the layer's own output
         close(y, saved)
 
+    def test_input_layout_does_not_matter(self, device, rng):
+        # vstack gives the other storage order than a numpy import; layers
+        # that read storage directly (LayerNorm, Transformer) must not care
+        net = nn.Sequential(nn.Linear(4, 4), nn.LayerNorm(batch_size=6),
+                            nn.Transformer(4, 4, 8, seq_len=3, batch_size=2), device=device)
+        randomize(net, rng, 0.3)
+        x = rng.standard_normal((6, 4)).astype(np.float32)
+        r = rng.standard_normal((6, 4)).astype(np.float32)
+        results = []
+        for X in (jz.array(x, device=device), jz.vstack([jz.array(x, device=device)])):
+            out = net(X).numpy()
+            results.append((out, net.backward(jz.vstack([jz.array(r, device=device)])).numpy()))
+        close(results[1][0], results[0][0])
+        close(results[1][1], results[0][1])
+
 
 class TestLosses:
     def test_softmax_cross_entropy(self, device, rng):
@@ -165,10 +180,25 @@ class TestLosses:
         scores = jz.array(np.eye(3)[[0, 1, 1, 2, 1]], device=device)
         assert nn.error_rate(scores, labels).item() == pytest.approx(0.4)
 
-    def test_one_hot(self):
-        close(nn.one_hot(np.array([2, 0]), 3), [[0, 0, 1], [1, 0, 0]])
+    def test_masked_softmax_cross_entropy(self, device, rng):
+        logits = rng.standard_normal((5, 4)).astype(np.float32)
+        y = np.eye(4, dtype=np.float32)[[0, 3, 1, 1, 2]]
+        w = np.array([0.5, 0, 1, 0.25, 0], dtype=np.float32)
+        loss = nn.masked_softmax_cross_entropy(jz.array(logits, device=device), jz.array(y, device=device), w)
+        p = np.exp(logits) / np.exp(logits).sum(1, keepdims=True)
+        assert loss.item() == pytest.approx(-np.sum(w * np.sum(y * np.log(p), 1)), rel=1e-5)
+        close(loss.grad, (p - y) * w[:, None])
+        with pytest.raises(ValueError, match="weights must have shape"):
+            nn.masked_softmax_cross_entropy(jz.array(logits, device=device), jz.array(y, device=device), [1, 2])
+
+    def test_one_hot(self, device):
+        close(nn.one_hot(np.array([2, 0]), 3, device=device), [[0, 0, 1], [1, 0, 0]])
+        labels = np.random.default_rng(1).integers(0, 50, 300)
+        close(nn.one_hot(labels, 50, device=device), np.eye(50)[labels])
         with pytest.raises(ValueError):
             nn.one_hot([3], 3)
+        with pytest.raises(ValueError):
+            nn.one_hot([-1], 3)
 
 
 class TestAdamW:
@@ -232,6 +262,24 @@ class TestCheckpoint:
         jz.save_checkpoint(net, tmp_path / "a.ckpt")
         with pytest.raises(RuntimeError, match="cannot load"):
             jz.load_checkpoint(nn.Sequential(nn.Linear(4, 2), device=device), tmp_path / "a.ckpt")
+
+    def test_state_dict_to_another_batch_size(self, device, rng):
+        def make(batch):
+            return nn.Sequential(nn.Linear(5, 4), nn.Transformer(4, 4, 8, seq_len=3, batch_size=batch),
+                                 nn.Linear(2), device=device)
+
+        big = make(2)
+        randomize(big, rng, 0.3)
+        x = rng.standard_normal((6, 5)).astype(np.float32)  # two sequences of 3 tokens
+        expected = big.predict(jz.array(x, device=device)).numpy()
+
+        small = make(1)
+        state = big.state_dict()
+        assert all(isinstance(v, np.ndarray) for v in state.values())
+        small.load_state_dict(state)
+        close(small.predict(jz.array(x[3:], device=device)), expected[3:], tol=1e-4)
+        with pytest.raises(ValueError, match="does not match"):
+            nn.Sequential(nn.Linear(5, 2), device=device).load_state_dict(state)
 
 
 class TestFit:

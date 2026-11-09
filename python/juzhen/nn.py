@@ -24,7 +24,8 @@ import juzhen as jz
 
 __all__ = [
     "Layer", "Dense", "Linear", "LayerNorm", "Conv2d", "ConvTranspose2d", "Transformer",
-    "Sequential", "Loss", "softmax_cross_entropy", "mse", "error_rate", "one_hot",
+    "Sequential", "Loss", "softmax_cross_entropy", "masked_softmax_cross_entropy", "mse",
+    "error_rate", "one_hot",
     "save_checkpoint", "load_checkpoint",
 ]
 
@@ -248,6 +249,25 @@ class Sequential:
                                "call build(in_features) or call the network once")
         return self._net.parameters()
 
+    def state_dict(self):
+        """The parameters as numpy arrays (copies), by name.
+
+        load_state_dict() puts them back, into this network or another one
+        with the same layers: one built for a different batch size or
+        device, for example.
+        """
+        return {p.name: p.value.numpy() for p in self.parameters()}
+
+    def load_state_dict(self, state):
+        """Set the parameters from a state_dict() of a network with the same layers."""
+        params = self.parameters()
+        missing = [p.name for p in params if p.name not in state]
+        if missing or len(state) != len(params):
+            raise ValueError(f"the state does not match this network: it has {sorted(state)}, "
+                             f"the network needs {[p.name for p in params]}")
+        for p in params:
+            p.assign(jz.array(state[p.name], device=self.device))
+
     def __repr__(self):
         inner = ",\n".join(f"    {layer!r}" for layer in self.layers)
         return f"Sequential(\n{inner},\n    device={self.device!r})"
@@ -331,6 +351,18 @@ def mse(prediction, target):
     return Loss(*_core_of(prediction).mse(prediction, target))
 
 
+def masked_softmax_cross_entropy(logits, labels, weights):
+    """Softmax cross-entropy weighted per sample, without batch averaging.
+
+    weights (length N) must be finite and nonnegative and already include any
+    scaling; a zero weight drops its sample from the loss and the gradient.
+    """
+    core = _core_of(logits)
+    if not isinstance(weights, jz.Matrix):
+        weights = jz.array(np.asarray(weights, dtype=np.float32).reshape(-1, 1), device=logits.device)
+    return Loss(*core.masked_softmax_cross_entropy(logits, labels, weights))
+
+
 def error_rate(scores, labels):
     """Fraction of rows whose largest score is not the labelled class (1 x 1)."""
     return _core_of(scores).error_rate(scores, labels)
@@ -344,13 +376,17 @@ def _loss_function(name):
 
 
 def one_hot(labels, num_classes, device="cpu"):
-    """Integer class labels (length N) as an N x num_classes one-hot matrix."""
+    """Integer class labels (length N) as an N x num_classes one-hot matrix.
+
+    The matrix is built on the device: only the N labels are copied there.
+    """
     labels = np.asarray(labels.numpy() if isinstance(labels, jz.Matrix) else labels).astype(np.int64).ravel()
-    if labels.size and (labels.min() < 0 or labels.max() >= num_classes):
+    if labels.size == 0:
+        raise ValueError("one_hot needs at least one label")
+    if labels.min() < 0 or labels.max() >= num_classes:
         raise ValueError(f"labels must be in [0, {num_classes})")
-    out = np.zeros((labels.size, num_classes), dtype=np.float32)
-    out[np.arange(labels.size), labels] = 1
-    return jz.array(out, device=device)
+    column = jz.array(labels.astype(np.float32).reshape(-1, 1), device=device)
+    return jz._device(device).one_hot(column, int(num_classes))
 
 
 # ----------------------------------------------------------------------

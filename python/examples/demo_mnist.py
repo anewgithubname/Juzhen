@@ -1,7 +1,7 @@
 """examples/demo_mnist.cu in Python: the same network, optimizer and loop.
 
-Run with --device gpu on a GPU build. Prints the test misclassification
-rate every 1000 steps, like the C++ demo.
+Runs on the GPU when the build has one (--device cpu to override) and
+prints the test misclassification rate every 1000 steps, like the C++ demo.
 """
 
 import argparse
@@ -11,7 +11,7 @@ import juzhen as jz
 from juzhen import nn, optim
 
 parser = argparse.ArgumentParser()
-parser.add_argument("--device", default="cpu")
+parser.add_argument("--device", default="gpu" if jz.has_gpu() else "cpu")
 parser.add_argument("--steps", type=int, default=10000)
 parser.add_argument("--seed", type=int, default=1)
 args = parser.parse_args()

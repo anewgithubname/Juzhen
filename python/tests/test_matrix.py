@@ -161,10 +161,57 @@ class TestFunctions:
 
     def test_stack_and_likes(self, device, rng):
         a, A = pair(rng, device)
+        b, B = pair(rng, device, (3, 4))
         close(jz.hstack([A, A]), np.hstack([a, a]))
         close(jz.vstack([A, A.T.T]), np.vstack([a, a]))
+        # mixed layouts: B.T has the other storage order
+        close(jz.hstack([A, B.T, A @ B[:, :1]]), np.hstack([a, b.T, a @ b[:, :1]]))
+        close(jz.vstack([A, B.T]), np.vstack([a, b.T]))
+        with pytest.raises(ValueError, match="row count"):
+            jz.hstack([A, B])
+        with pytest.raises(ValueError, match="at least one"):
+            jz.vstack([])
         close(jz.zeros_like(A), np.zeros_like(a))
         close(jz.ones_like(A), np.ones_like(a))
+
+    def test_max_min_abs_argmax(self, device, rng):
+        a, A = pair(rng, device, (5, 7))
+        for M, m in ((A, a), (A.T, a.T)):
+            close(jz.max(M, 0), m.max(0, keepdims=True))
+            close(jz.max(M, 1), m.max(1, keepdims=True))
+            close(jz.min(M, 0), m.min(0, keepdims=True))
+            close(jz.min(M, 1), m.min(1, keepdims=True))
+            close(jz.argmax(M), m.argmax(1)[:, None])
+            close(jz.argmax(M, 0), m.argmax(0)[None, :])
+        assert jz.max(A).item() == pytest.approx(a.max())
+        assert jz.min(A).item() == pytest.approx(a.min())
+        close(jz.abs(A), np.abs(a))
+
+    @pytest.mark.parametrize("largest", [True, False])
+    def test_topk(self, device, rng, largest):
+        a, A = pair(rng, device, (6, 9))
+        order = np.argsort(-a if largest else a, axis=1, kind="stable")[:, :4]
+        values, positions = jz.topk(A, 4, largest=largest)
+        close(positions, order)
+        close(values, np.take_along_axis(a, order, 1))
+        values, positions = jz.topk(A.T, 4, axis=0, largest=largest)
+        close(positions, order.T)
+        close(values, np.take_along_axis(a, order, 1).T)
+        assert A.numpy() == pytest.approx(a)  # the input is left alone
+        with pytest.raises(ValueError, match="k must be"):
+            jz.topk(A, 10)
+
+    def test_softmax_logsumexp(self, device, rng):
+        a, A = pair(rng, device, (4, 6))
+        a = a * 30  # large enough that a naive exp() would overflow
+        A = jz.array(a, device=device)
+        def lse(x, axis):
+            top = x.max(axis, keepdims=True)
+            return np.log(np.exp(x - top).sum(axis, keepdims=True)) + top
+        for axis in (0, 1):
+            close(jz.logsumexp(A, axis), lse(a.astype(np.float64), axis), tol=1e-4)
+            close(jz.softmax(A, axis), np.exp(a - lse(a.astype(np.float64), axis)), tol=1e-5)
+        close(jz.sum(jz.softmax(A.T), 1), np.ones((6, 1)))
 
 
 def keep_dims(key):

@@ -384,3 +384,19 @@ for epoch in range(5):
 - nanobind 默认给扩展加 `/Os`（按体积优化），CPU 后端的逐元素循环因此慢了约 20%，已用 `NOMINSIZE` 关掉。
 - Windows 上 Python 不在 PATH 里找扩展依赖的 DLL，构建时把 GPU 运行库目录写进 `juzhen/_build_config.py`，导入时用 `os.add_dll_directory` 加上。
 - Windows 上的 ROCm：进程退出时如果 GPU 上还有没做完的活，HIP 运行库会卡死。`juzhen` 在 `atexit` 里先 `synchronize()`。
+
+## 14. 补齐 demo 需要的功能（2026-11-09）
+
+对照 `examples/` 里的 C++ demo，Python 接口缺这些，已补上：
+- `jz.max`、`jz.min`、`jz.abs`、`jz.argmax`、`jz.topk`、`jz.softmax`、`jz.logsumexp`，按 axis 计算，在设备上算（Metal 上 `reduce`/`elemwise` 仍经过主机）。
+- `nn.masked_softmax_cross_entropy`（离散扩散 demo 要用）。
+- `nn.one_hot` 改成在设备上生成：只把 N 个标签拷过去，C++ demo 里各自手写的 one-hot kernel 就不需要了。
+- `jz.hstack` / `jz.vstack` 改用库里的实现，不再经过 numpy 和主机。
+- `Sequential.state_dict()` / `load_state_dict()`：参数按名字存成 numpy 数组，可以放进层相同、批大小不同的网络（Transformer 训练用批 64，生成用批 1）。
+- 网络的输入如果带转置标记（比如 `hstack` 或矩阵乘积的结果），先整理成普通列主序再交给层。Conv、LayerNorm、Transformer 直接读存储，以前这种输入会算错。
+
+已改写的 demo：`cnn_mnist.py`、`rectified_flow.py`、`transformer_charlm.py`、`knn.py`（另有 `fit_sin.py`）。终端界面（FTXUI）换成打印。还没改写：两个离散扩散、TinyStories、word2vec、tsfm、arithmetic、CIFAR rectified flow，以及 6 个网页版。
+
+发现的问题：
+- 默认初始化（权重 N(0, 0.001²)，和 C++ 一样）对深的 ReLU 网络太小：rectified flow 的 4 层网络输出几乎恒为零，能不能训练起来看运气（4090 上卡住，ROCm 上碰巧能训练）。`rectified_flow.py` 改用 He 初始化。C++ 的 `demo_rectified` 用同样的默认初始化，也有这个风险。
+- C++ 的 `demo_transformer.cu` 和 `demo_rectified.cu` 只为 CUDA 和 Metal 选 GPU 类型，ROCm 构建下其实跑在 CPU 上。Python 版没有这个问题。

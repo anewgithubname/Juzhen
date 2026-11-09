@@ -34,12 +34,13 @@ if os.name == "nt":
             os.add_dll_directory(_dir)
 
 from . import _core
-from ._core import cos, exp, log, relu, sin, sqrt, square, tanh
+from ._core import abs, cos, exp, log, relu, sin, sqrt, square, tanh
 
 __all__ = [
     "Matrix", "array", "zeros", "ones", "randn", "rand", "zeros_like", "ones_like",
-    "exp", "log", "tanh", "sin", "cos", "sqrt", "square", "relu", "sigmoid",
-    "sum", "mean", "hstack", "vstack", "backend", "has_gpu", "manual_seed",
+    "exp", "log", "tanh", "sin", "cos", "sqrt", "square", "abs", "relu", "sigmoid",
+    "sum", "mean", "max", "min", "argmax", "topk", "softmax", "logsumexp",
+    "hstack", "vstack", "backend", "has_gpu", "manual_seed",
     "synchronize", "empty_cache", "save_checkpoint", "load_checkpoint",
     "nn", "optim", "data", "datasets", "matrixio", "Sequential", "Dense", "Linear",
 ]
@@ -163,14 +164,71 @@ def mean(m, axis=None):
     return sum(m, axis) / count
 
 
+def max(m, axis=None):
+    """Largest value over axis 0 (1 x cols), axis 1 (rows x 1) or all (1 x 1)."""
+    if axis is None:
+        return _core.max(_core.max(m, 0), 1)
+    return _core.max(m, axis)
+
+
+def min(m, axis=None):
+    """Smallest value over axis 0 (1 x cols), axis 1 (rows x 1) or all (1 x 1)."""
+    if axis is None:
+        return _core.min(_core.min(m, 0), 1)
+    return _core.min(m, axis)
+
+
+def argmax(m, axis=1):
+    """Position of the largest value in each row (axis=1, rows x 1) or column (axis=0).
+
+    Positions are stored as floats, like every juzhen matrix; take
+    ``.numpy().astype(int)`` for integers.
+    """
+    return _core.argmax(m, axis)
+
+
+def topk(m, k, axis=1, largest=True):
+    """The k largest (or smallest) values of each row (axis=1) or column (axis=0).
+
+    Returns (values, positions), both rows x k for axis=1 (k x cols for
+    axis=0), sorted from the best. Positions are floats, as in argmax().
+    """
+    return _core.topk(m, int(k), axis, bool(largest))
+
+
+def softmax(m, axis=1):
+    """exp(m) normalized to sum to one along each row (axis=1) or column (axis=0)."""
+    return _core.softmax(m, axis)
+
+
+def logsumexp(m, axis=1):
+    """log(sum(exp(m))) of each row (axis=1, rows x 1) or column (axis=0), computed stably."""
+    return _core.logsumexp(m, axis)
+
+
+def _same_device(matrices, what):
+    matrices = list(matrices)
+    if not matrices:
+        raise ValueError(f"{what} needs at least one matrix")
+    for m in matrices:
+        if not isinstance(m, Matrix):
+            raise TypeError(f"{what} takes juzhen matrices, got {type(m).__name__}")
+    devices = {m.device for m in matrices}
+    if len(devices) > 1:
+        raise ValueError(f"{what}: the matrices are on different devices {sorted(devices)}")
+    return matrices, _device(matrices[0].device)
+
+
 def hstack(matrices):
-    """Matrices side by side (copied through the host)."""
-    return array(np.hstack([m.numpy() for m in matrices]), device=matrices[0].device)
+    """Matrices side by side (same number of rows), like numpy.hstack."""
+    matrices, core = _same_device(matrices, "hstack")
+    return core.stack(matrices, True)
 
 
 def vstack(matrices):
-    """Matrices one above the other (copied through the host)."""
-    return array(np.vstack([m.numpy() for m in matrices]), device=matrices[0].device)
+    """Matrices one above the other (same number of columns), like numpy.vstack."""
+    matrices, core = _same_device(matrices, "vstack")
+    return core.stack(matrices, False)
 
 
 # Shuffling in juzhen.data uses this generator, so manual_seed() covers it too.

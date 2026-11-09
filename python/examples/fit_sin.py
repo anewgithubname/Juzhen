@@ -10,7 +10,7 @@ import numpy as np
 
 import juzhen as jz
 
-device = sys.argv[1] if len(sys.argv) > 1 else "cpu"
+device = sys.argv[1] if len(sys.argv) > 1 else ("gpu" if jz.has_gpu() else "cpu")
 jz.manual_seed(0)
 
 x = np.linspace(-3, 3, 1024, dtype=np.float32).reshape(-1, 1)
