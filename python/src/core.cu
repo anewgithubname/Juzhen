@@ -507,17 +507,25 @@ Matrix<D> one_hot_of(const Matrix<D> &labels, size_t classes) {
                                std::move(diff)));
 }
 
-// numpy's hstack (side by side) or vstack (one above the other)
+// numpy's hstack (side by side) or vstack (one above the other). It stacks
+// the transposes the other way and transposes back, which gives the same
+// matrix stored the way layers want their inputs (features x batch), so
+// hstack([x, features]) can go into a layer without another copy.
 template <class D>
 Matrix<D> stack_of(nb::list items, bool horizontal) {
     if (items.size() == 0)
         throw std::invalid_argument("nothing to stack");
-    std::vector<MatrixView<D>> views;
+    std::vector<Matrix<D>> transposes;  // views of the inputs, no copies
     for (nb::handle item : items)
-        views.emplace_back(nb::cast<const Matrix<D> &>(item));
-    if (horizontal)
-        return hstack(views);
-    return vstack(views);
+        transposes.push_back(transposed(nb::cast<const Matrix<D> &>(item)));
+    std::vector<MatrixView<D>> views(transposes.begin(), transposes.end());
+    try {
+        Matrix<D> stacked = horizontal ? Matrix<D>(vstack(views)) : Matrix<D>(hstack(views));
+        return transposed(stacked);
+    } catch (const std::invalid_argument &) {
+        throw std::invalid_argument(horizontal ? "hstack: all matrices must have the same number of rows"
+                                               : "vstack: all matrices must have the same number of columns");
+    }
 }
 
 // ---------------------------------------------------------------------------
@@ -940,6 +948,11 @@ using namespace jzpy;
 NB_MODULE(_core, m) {
     m.doc() = "C++ half of the juzhen package; see python/juzhen/__init__.py";
     nb::set_leak_warnings(false);
+#ifndef LOGGING_OFF
+    // The library's info messages ("GPU sampler is initialized ...") are
+    // for C++ programs; Python users see only warnings and errors.
+    spdlog::set_level(spdlog::level::warn);
+#endif
 
     Juzhen::init();
 #ifdef CUDA
