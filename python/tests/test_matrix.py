@@ -167,7 +167,7 @@ class TestFunctions:
         # mixed layouts: B.T has the other storage order
         close(jz.hstack([A, B.T, A @ B[:, :1]]), np.hstack([a, b.T, a @ b[:, :1]]))
         close(jz.vstack([A, B.T]), np.vstack([a, b.T]))
-        with pytest.raises(ValueError, match="row count"):
+        with pytest.raises(ValueError, match="same number of rows"):
             jz.hstack([A, B])
         with pytest.raises(ValueError, match="at least one"):
             jz.vstack([])

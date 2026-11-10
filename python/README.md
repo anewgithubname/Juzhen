@@ -53,6 +53,7 @@ The scripts in `examples/` run on the GPU when the build has one; `--device cpu`
 | file | what it shows | C++ original |
 |---|---|---|
 | `tutorial.ipynb` | a guided tour of the whole library, step by step | |
+| `cifar_rectified_flow.ipynb` | an image generator on CIFAR-10: a UNet built from `Sequential` pieces, with a speed comparison against C++ | `demo_cnn_rectified.cu` |
 | `helloworld.py` | matrix arithmetic on both devices | `helloworld.cu` |
 | `fit_mnist.py` | `fit()` and `evaluate()` | |
 | `fit_sin.py` | a hand-written training loop | |
