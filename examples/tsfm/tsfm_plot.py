@@ -1,10 +1,10 @@
 """
-Plot forecasts of examples/demo_tsfm.cu next to what actually happened: one
+Plot forecasts of examples/tsfm/demo_tsfm.cu next to what actually happened: one
 panel per dataset, each with a series drawn at random. The panel shows the
 end of the context, the true continuation, the median forecast and the 10-90%
 quantile band.
 
-Usage: python examples/tsfm_plot.py DATA_DIR FORECAST_DIR [--split eval_zs]
+Usage: python examples/tsfm/tsfm_plot.py DATA_DIR FORECAST_DIR [--split eval_zs]
            [--datasets ETTh nn5 ...] [--seed 0] [--out tsfm_forecasts.png]
 """
 

@@ -22,7 +22,7 @@
  * scale is floored at TSFM_SIGMA_FLOOR times the context's standard deviation
  * so that flat first patches do not blow up the rest of the window.
  *
- * Data. examples/tsfm_prepare_data.py writes the Chronos training corpus (and
+ * Data. examples/tsfm/tsfm_prepare_data.py writes the Chronos training corpus (and
  * the backtests) as flat binaries. Training windows come from those series
  * (datasets weighted by the square root of their size, points uniformly
  * within a dataset) and, with probability TSFM_SYNTH, from a synthetic
@@ -34,7 +34,7 @@
  * Modes (TSFM_MODE):
  *   train     train, checkpointing to TSFM_CKPT; then forecast the backtests
  *   forecast  load TSFM_CKPT and forecast the backtests only
- * Forecasts go to TSFM_OUT/<split>/<dataset>.bin; examples/tsfm_evaluate.py
+ * Forecasts go to TSFM_OUT/<split>/<dataset>.bin; examples/tsfm/tsfm_evaluate.py
  * scores them (MASE, WQL, relative to seasonal naive).
  *
  * Environment variables:
@@ -62,10 +62,10 @@
  *   NVIDIA_TF32   1 = TF32 tensor-core GEMMs (read by the Juzhen launcher)
  */
 
-#include "../cpp/juzhen.hpp"
-#include "../ml/checkpoint.hpp"
-#include "../ml/layer.hpp"
-#include "../ml/optimizer.hpp"
+#include "../../cpp/juzhen.hpp"
+#include "../../ml/checkpoint.hpp"
+#include "../../ml/layer.hpp"
+#include "../../ml/optimizer.hpp"
 
 #include <algorithm>
 #include <chrono>
