@@ -1,5 +1,5 @@
 """
-Score the backtest forecasts of examples/demo_tsfm.cu as in the Chronos paper
+Score the backtest forecasts of examples/tsfm/demo_tsfm.cu as in the Chronos paper
 (Ansari et al., 2024): per dataset, MASE of the median forecast and the mean
 weighted quantile loss (WQL) over quantiles 0.1..0.9, each divided by the
 same metric of seasonal naive; datasets are aggregated by geometric mean.
@@ -10,7 +10,7 @@ NaN targets are ignored. Seasonal naive repeats the last season of the
 context (missing values filled with the last observed one) and serves as
 its own quantile forecast.
 
-Usage: python examples/tsfm_evaluate.py DATA_DIR FORECAST_DIR [--split eval_zs]
+Usage: python examples/tsfm/tsfm_evaluate.py DATA_DIR FORECAST_DIR [--split eval_zs]
 """
 
 import argparse

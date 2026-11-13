@@ -1,5 +1,5 @@
 """
-Download the time-series corpus for examples/demo_tsfm.cu and convert it to
+Download the time-series corpus for examples/tsfm/demo_tsfm.cu and convert it to
 flat binary files the C++ trainer can memory-load.
 
 Sources are the public Chronos collections on Hugging Face
@@ -26,7 +26,7 @@ is GluonTS' default seasonality for the frequency (used by MASE and seasonal
 naive).
 
 Requires numpy and pyarrow.
-Usage: python examples/tsfm_prepare_data.py OUT_DIR [--only NAME ...]
+Usage: python examples/tsfm/tsfm_prepare_data.py OUT_DIR [--only NAME ...]
 """
 
 import argparse

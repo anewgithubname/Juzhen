@@ -1,6 +1,6 @@
 # A small time-series foundation model
 
-[`examples/demo_tsfm.cu`](../examples/demo_tsfm.cu) trains a decoder-only
+[`demo_tsfm.cu`](demo_tsfm.cu) trains a decoder-only
 forecasting model in the style of TimesFM (Das, Kong, Sen and Zhou, ICML 2024)
 on public time series plus synthetic data. It then forecasts the Chronos
 benchmarks (Ansari et al., 2024) zero-shot. The demo needs the CUDA backend.
@@ -47,7 +47,7 @@ series rose.
 
 ## Data
 
-[`examples/tsfm_prepare_data.py`](../examples/tsfm_prepare_data.py) downloads
+[`tsfm_prepare_data.py`](tsfm_prepare_data.py) downloads
 the data and converts it to flat binaries. Most series come from the Chronos
 collection on Hugging Face (`autogluon/chronos_datasets`). ETTh and ETTm come
 from the ETDataset CSVs. The split follows the Chronos paper:
@@ -73,7 +73,7 @@ within that dataset.
 
 ```bash
 pip install numpy pyarrow
-python examples/tsfm_prepare_data.py datasets/tsfm
+python examples/tsfm/tsfm_prepare_data.py datasets/tsfm
 
 cmake -S . -B build_cuda -DNVIDIA_CUDA=ON -DROCM_HIP=OFF -DAPPLE_SILICON=OFF -DCMAKE_BUILD_TYPE=Release
 cmake --build build_cuda --target demo_tsfm -j
@@ -83,11 +83,11 @@ NVIDIA_TF32=1 ./build_cuda/demo_tsfm
 # the large model
 NVIDIA_TF32=1 TSFM_DMODEL=512 TSFM_LAYERS=12 TSFM_HEADS=8 TSFM_LR=3e-4 ./build_cuda/demo_tsfm
 
-python examples/tsfm_evaluate.py datasets/tsfm res/tsfm/forecasts --split eval_zs
-python examples/tsfm_evaluate.py datasets/tsfm res/tsfm/forecasts --split eval_id
+python examples/tsfm/tsfm_evaluate.py datasets/tsfm res/tsfm/forecasts --split eval_zs
+python examples/tsfm/tsfm_evaluate.py datasets/tsfm res/tsfm/forecasts --split eval_id
 
 # plot one random series per dataset (needs matplotlib)
-python examples/tsfm_plot.py datasets/tsfm res/tsfm/forecasts --out tsfm_forecasts.png
+python examples/tsfm/tsfm_plot.py datasets/tsfm res/tsfm/forecasts --out tsfm_forecasts.png
 ```
 
 `TSFM_MODE=forecast` loads `TSFM_CKPT` and only forecasts, and `TSFM_RESUME=1`
@@ -108,7 +108,7 @@ differs from FP32 by -0.001 (standard deviation 0.007).
 
 ## Evaluation
 
-[`examples/tsfm_evaluate.py`](../examples/tsfm_evaluate.py) follows the
+[`tsfm_evaluate.py`](tsfm_evaluate.py) follows the
 Chronos paper:
 
 - **MASE** of the median forecast, and the mean weighted quantile loss
