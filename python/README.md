@@ -23,6 +23,14 @@ print(model.evaluate(X_test, Y_test))
   `(A > 0) * A`, `jz.mean(A == B)`. A numpy array has to be made a matrix
   first (`jz.array(y)`); for the accuracy of a classifier use
   `1 - jz.nn.error_rate(scores, labels)`.
+- A 1 x 1 matrix can be used as its number: `f"{jz.mean(A):.3f}"`, `float()`,
+  `round()`, `if jz.max(A) > 1:`.
+- Every function of one matrix is also a method: `A.sum(0)` is `jz.sum(A, 0)`,
+  `A.exp()` is `jz.exp(A)`. Results keep two dimensions (`A.sum(1)` is n x 1).
+- Whole numbers are numpy arrays of integers: class numbers, token ids, and
+  the positions from `jz.argmax` and `jz.topk`. `jz.argmax(scores)` can index
+  (`names[p[0]]`, `X[p]`) and be compared with labels
+  (`np.mean(jz.argmax(scores) == y)`).
 - Numbers are juzhen matrices. Whole numbers that name things are numpy integer
   arrays or lists: class numbers for a loss (`model.fit(X, y)` with `y` holding
   0..9 works; one-hot rows still do too) and token ids for a network that starts
@@ -65,7 +73,7 @@ print(f"loss {loss:.3f}")
 # time. The copy does not follow later training of `model`.
 generator = model.copy(batch_size=1)
 prompt = np.arange(3, 3 + seq_len)[None, :] % vocab
-print("next token:", int(jz.argmax(generator.predict(prompt))[-1, 0]))   # 11
+print("next token:", jz.argmax(generator.predict(prompt))[-1])   # 11
 ```
 
 New to the library? Start with the notebook `examples/tutorial.ipynb`.

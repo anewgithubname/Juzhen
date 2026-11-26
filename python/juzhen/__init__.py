@@ -18,6 +18,12 @@ Comparisons work element by element and give a matrix of 1s and 0s:
 ``(A > 0) * A``, ``jz.mean(A == B)``. ``if A == B:`` is an error unless the
 matrices are 1 x 1; write ``(A == B).numpy().all()``.
 
+A 1 x 1 matrix can be used where its number is wanted: ``f"{jz.mean(A):.3f}"``,
+``float()``, ``int()``, ``round()``, ``if jz.max(A) > 1:``. Functions of one
+matrix can also be written as methods: ``A.sum(0)`` is ``jz.sum(A, 0)``.
+Whole numbers (class numbers, token ids, the positions from ``argmax`` and
+``topk``) are numpy arrays of integers.
+
 Each function here is a thin layer over the C++ code in cpp/ and ml/; see
 python/src/core.cu for how a Python call reaches it.
 """
@@ -238,22 +244,39 @@ def min(m, axis=None):
     return _core.min(m, axis)
 
 
-def argmax(m, axis=1):
-    """Position of the largest value in each row (axis=1, rows x 1) or column (axis=0).
+def _positions(m):
+    """A matrix of positions as a numpy array of integers (waits for the GPU)."""
+    return m.numpy().astype(np.int64)
 
-    Positions are stored as floats, like every juzhen matrix; take
-    ``.numpy().astype(int)`` for integers.
+
+def argmax(m, axis=1):
+    """Position of the largest value in each row (axis=1, the default) or column (axis=0).
+
+    Positions are whole numbers, and whole numbers are numpy arrays in juzhen
+    (as class numbers and token ids are): the result is a 1-D array of
+    integers, one per row. It can index a matrix or an array (``X[p]``,
+    ``names[p[0]]``), be compared with labels (``np.mean(p == y)``) and be
+    given to the losses. Reading it waits for the GPU. For a matrix of 1s and
+    0s that marks the largest values on the device, write
+    ``A == jz.max(A, 1)``.
     """
-    return _core.argmax(m, axis)
+    if axis is None:
+        raise ValueError("argmax works along axis 1 (each row, the default) or axis 0 (each column); for the "
+                         "position in the whole matrix read as one row, as numpy counts it, use "
+                         "np.argmax(A.numpy())")
+    return _positions(_core.argmax(m, axis)).ravel()
 
 
 def topk(m, k, axis=1, largest=True):
     """The k largest (or smallest) values of each row (axis=1) or column (axis=0).
 
     Returns (values, positions), both rows x k for axis=1 (k x cols for
-    axis=0), sorted from the best. Positions are floats, as in argmax().
+    axis=0), sorted from the best. The values are a matrix; the positions are
+    a numpy array of integers, as in argmax(). A row with fewer than k numbers
+    (NaN is skipped) is filled with NaN and position -1.
     """
-    return _core.topk(m, int(k), axis, bool(largest))
+    values, positions = _core.topk(m, int(k), axis, bool(largest))
+    return values, _positions(positions)
 
 
 def softmax(m, axis=1):
@@ -289,6 +312,54 @@ def vstack(matrices):
     """Matrices one above the other (same number of columns), like numpy.vstack."""
     matrices, core = _same_device(matrices, "vstack")
     return core.stack(matrices, False)
+
+
+def _number(m, what):
+    """The value of a 1 x 1 matrix, wanted by what (waits for the GPU)."""
+    if m.shape != (1, 1):
+        rows, cols = m.shape
+        raise TypeError(f"{what} needs one number, and this matrix is {rows} x {cols}; take one value "
+                        "(A[0, 0]) or reduce it first (jz.sum(A), jz.mean(A), jz.max(A))")
+    return m.item()
+
+
+def _format(m, spec):
+    # f"{A}" prints the matrix; f"{s:.3f}" formats the number of a 1 x 1 matrix
+    return format(_number(m, f"the format '{spec}'"), spec) if spec else str(m)
+
+
+def _round(m, digits=None):
+    return round(_number(m, "round()"), digits)
+
+
+def _method(name, function):
+    """jz.name(A, ...) as the method A.name(...)."""
+    def method(self, *args, **kwargs):
+        if "out" in kwargs:
+            # numpy's functions look for a method of their name: np.sum(A)
+            # calls A.sum(axis=None, out=None). They keep doing what they did
+            # before the methods existed, computing in numpy on a copy.
+            return getattr(np, name)(self.numpy(), *args, **kwargs)
+        return function(self, *args, **kwargs)
+
+    method.__name__ = method.__qualname__ = name
+    method.__doc__ = f"A.{name}(...) is jz.{name}(A, ...)."
+    return method
+
+
+# Every function of one matrix can also be written as a method, and a 1 x 1
+# matrix can stand where its number is wanted, as a Loss can.
+_METHODS = {"sum": sum, "mean": mean, "max": max, "min": min, "argmax": argmax, "topk": topk,
+            "softmax": softmax, "logsumexp": logsumexp, "exp": exp, "log": log, "tanh": tanh, "sin": sin,
+            "cos": cos, "sqrt": sqrt, "square": square, "abs": abs, "relu": relu, "sigmoid": sigmoid}
+for _class in [_core.cpu.Matrix] + ([_core.gpu.Matrix] if _core.has_gpu else []):
+    for _name, _function in _METHODS.items():
+        setattr(_class, _name, _method(_name, _function))
+    _class.__abs__ = _method("abs", abs)
+    _class.__float__ = lambda m: _number(m, "float()")
+    _class.__int__ = lambda m: int(_number(m, "int()"))
+    _class.__round__ = _round
+    _class.__format__ = _format
 
 
 # Shuffling in juzhen.data uses this generator, so manual_seed() covers it too.

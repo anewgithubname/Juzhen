@@ -422,3 +422,8 @@ for epoch in range(5):
 - **`fit()` 和 `evaluate()` 先看数据。** X、Y 里有 nan 或 inf 就报错并指出位置（ReLU 会把 nan 变成 0，以前训练能照常结束）。交叉熵下的浮点 Y 必须每行是 one-hot 或概率，否则报错并提示 `loss="mse"`。手写的训练循环没有这层检查。
 - **`backward()` 只认最后一次调用。** 损失函数记下梯度出自网络的哪一次调用（弱引用，不占内存）；网络之后又被调用过，再拿这个梯度反向就报错。用户自己算的梯度不跟踪。
 - `jz.zeros` 等拒绝空矩阵；`Embedding`、`PositionEmbedding` 的 `init` 只能按名字传（`PositionEmbedding(seq_len, dim)` 以前把 `dim` 当成标准差）；`AdamW` 的参数接受 numpy 数字；`ignore_index` 必须是整数。
+
+同一次检查之后补上的三处写法（都在 `python/juzhen/__init__.py`，没有动 C++）：
+- **1×1 矩阵可以当数用。** `f"{jz.mean(A):.3f}"`、`float()`、`int()`、`round()`、比较都可以，和 `Loss` 一致；多于一个元素的矩阵这样用会报错并说明先取一个元素或先求和。不带格式的 `f"{A}"` 仍然打印整个矩阵。1×1 矩阵不能直接当下标（没有 `__index__`），要写 `int(s)`。
+- **单个矩阵的函数都有方法写法。** `A.sum(0)` 就是 `jz.sum(A, 0)`，还有 `mean`、`max`、`min`、`argmax`、`topk`、`softmax`、`logsumexp` 和逐元素函数。结果仍然是二维的，没有 `keepdims`。numpy 的 `np.sum(A)` 会去找 `A.sum` 并带上 `out=`，这种调用仍然在 numpy 里算（和加方法之前一样）。
+- **位置是整数，整数是 numpy 数组。** `jz.argmax` 返回一维整数数组（每行一个），`jz.topk` 的位置是二维整数数组，值仍然是矩阵。这样 `np.mean(jz.argmax(scores) == y)`、`names[p[0]]`、`X[p]` 都直接成立。代价是每次调用要等 GPU 并把 N 个数取回主机；要留在设备上的写法是 `A == jz.max(A, 1)`（0/1 矩阵）。没有让矩阵本身当下标，因为比较的结果也是 0/1 矩阵，`X[y == 2]` 会被悄悄当成行号 0 和 1。

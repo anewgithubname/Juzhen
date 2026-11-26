@@ -25,7 +25,7 @@ device = args.device
 print("K-Nearest Neighbour Prediction for MNIST Dataset:")
 start = time.perf_counter()
 X, Y, X_test, Y_test = jz.datasets.mnist()
-labels, test_labels = Y.numpy().argmax(1), Y_test.numpy().argmax(1)
+labels, test_labels = jz.argmax(Y), jz.argmax(Y_test)      # class numbers from one-hot rows
 X = X.to(device)
 print(f"X: {X.shape}, X_test: {X_test.shape}  (loaded in {time.perf_counter() - start:.1f} s)")
 
@@ -37,7 +37,7 @@ for first in range(0, X_test.shape[0], args.chunk):
     # one column per test image: topk then reads each column in place
     distances = train_norms + jz.sum(jz.square(A), 1).T - 2 * (X @ A.T)   # 60000 x chunk
     _, nearest = jz.topk(distances, args.k, axis=0, largest=False)       # k x chunk positions
-    votes = labels[nearest.numpy().astype(int).T]                         # chunk x k labels
+    votes = labels[nearest.T]                                             # chunk x k labels
     counts = np.zeros((len(votes), 10), dtype=int)
     np.add.at(counts, (np.arange(len(votes))[:, None], votes), 1)
     predicted.append(counts.argmax(1))                  # ties go to the smaller label

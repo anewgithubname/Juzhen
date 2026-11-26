@@ -181,8 +181,8 @@ class TestFunctions:
             close(jz.max(M, 1), m.max(1, keepdims=True))
             close(jz.min(M, 0), m.min(0, keepdims=True))
             close(jz.min(M, 1), m.min(1, keepdims=True))
-            close(jz.argmax(M), m.argmax(1)[:, None])
-            close(jz.argmax(M, 0), m.argmax(0)[None, :])
+            assert jz.argmax(M).tolist() == m.argmax(1).tolist()
+            assert jz.argmax(M, 0).tolist() == m.argmax(0).tolist()
         assert jz.max(A).item() == pytest.approx(a.max())
         assert jz.min(A).item() == pytest.approx(a.min())
         close(jz.abs(A), np.abs(a))
@@ -192,10 +192,10 @@ class TestFunctions:
         a, A = pair(rng, device, (6, 9))
         order = np.argsort(-a if largest else a, axis=1, kind="stable")[:, :4]
         values, positions = jz.topk(A, 4, largest=largest)
-        close(positions, order)
+        assert positions.tolist() == order.tolist()
         close(values, np.take_along_axis(a, order, 1))
         values, positions = jz.topk(A.T, 4, axis=0, largest=largest)
-        close(positions, order.T)
+        assert positions.tolist() == order.T.tolist()
         close(values, np.take_along_axis(a, order, 1).T)
         assert A.numpy() == pytest.approx(a)  # the input is left alone
         with pytest.raises(ValueError, match="k must be"):
@@ -281,3 +281,80 @@ class TestDevices:
         jz.empty_cache()
         jz.synchronize()
         close(A + A, 2 * a)
+
+
+class TestNumbersMethodsPositions:
+    def test_one_by_one_matrix_is_a_number(self, device, rng):
+        a, A = pair(rng, device, (4, 5))
+        s, total = jz.sum(A), float(a.sum())
+        assert f"{s:.2f}" == f"{total:.2f}" and "{:9.3e}".format(s) == f"{total:9.3e}"
+        assert f"{s}" == str(s) == repr(s)  # without a format it prints as a matrix
+        assert round(s, 2) == pytest.approx(round(total, 2)) and isinstance(round(s, 2), float)
+        assert round(s) == round(total) and isinstance(round(s), int)
+        assert int(s) == int(total) and float(s) == pytest.approx(total, abs=1e-5)
+        assert (s > total - 1) and not (s > total + 1) and max(s, total + 1) == total + 1
+        assert int(jz.sum(A > 0)) == int((a > 0).sum())
+        assert f"{jz.mean(A):.4f}" == f"{a.mean():.4f}"
+
+    def test_a_larger_matrix_is_not_a_number(self, device, rng):
+        _, A = pair(rng, device, (4, 5))
+        for use, what in ((lambda: f"{A:.2f}", r"the format '\.2f'"), (lambda: round(A), r"round\(\)"),
+                          (lambda: round(A, 1), r"round\(\)"), (lambda: int(A), r"int\(\)"),
+                          (lambda: float(A), r"float\(\)")):
+            with pytest.raises(TypeError, match=what + r" needs one number, and this matrix is 4 x 5.*jz\.sum\(A\)"):
+                use()
+        assert f"{A}" == repr(A)
+
+    def test_methods_are_the_functions(self, device, rng):
+        a, A = pair(rng, device, (4, 5))
+        for name in ("sum", "mean", "max", "min"):
+            function, method = getattr(jz, name), getattr(A, name)
+            close(method(), function(A))
+            close(method(0), function(A, 0))
+            close(method(axis=1), function(A, 1))
+        for name in ("exp", "tanh", "sin", "cos", "square", "abs", "relu", "sigmoid", "softmax", "logsumexp"):
+            close(getattr(A, name)(), getattr(jz, name)(A))
+        close(A.abs().sqrt(), np.sqrt(np.abs(a)))
+        close(A.abs().log(), np.log(np.abs(a)))
+        close(A.softmax(axis=0), jz.softmax(A, 0))
+        close(abs(A), np.abs(a))
+        close(A - A.mean(axis=0), a - a.mean(0))  # the numpy habit
+        assert A.sum(1).shape == (4, 1) and A.sum(1).device == device
+        assert A.argmax().tolist() == a.argmax(1).tolist() and A.argmax(0).tolist() == a.argmax(0).tolist()
+        values, positions = A.topk(2)
+        close(values, jz.topk(A, 2)[0])
+        assert positions.tolist() == jz.topk(A, 2)[1].tolist()
+        assert "jz.sum(A, ...)" in A.sum.__doc__
+
+    def test_numpy_functions_still_compute_in_numpy(self, device, rng):
+        # np.sum(A) looks for A.sum and calls it with out=None: the answer stays numpy's
+        a, A = pair(rng, device, (4, 5))
+        for f in (np.sum, np.mean, np.max, np.min, np.argmax):
+            for axis in (None, 0, 1):
+                got, want = f(A, axis=axis), f(a, axis=axis)
+                assert not isinstance(got, jz.Matrix) and np.shape(got) == np.shape(want)
+                np.testing.assert_allclose(got, want, rtol=1e-5, atol=1e-5)
+        np.testing.assert_allclose(np.exp(A), np.exp(a), rtol=1e-5)
+        np.testing.assert_allclose(np.std(A), np.std(a), rtol=1e-5)
+
+    def test_positions_are_numpy_integers(self, device, rng):
+        scores = jz.array(rng.standard_normal((6, 3)), device=device)
+        s = scores.numpy()
+        y = s.argmax(1)
+        y[0] = (y[0] + 1) % 3  # 5 of 6 right
+        p = jz.argmax(scores)
+        assert isinstance(p, np.ndarray) and p.dtype == np.int64 and p.shape == (6,)
+        assert jz.argmax(scores, 0).shape == (3,)
+        assert np.mean(p == y) == pytest.approx(5 / 6)          # accuracy, written the numpy way
+        assert ["cat", "dog", "bird"][p[0]] == ["cat", "dog", "bird"][s[0].argmax()]
+        close(scores[p], s[p])                                   # rows of a matrix
+        close(jz.nn.softmax_cross_entropy(scores, p).value, jz.nn.softmax_cross_entropy(scores, s.argmax(1)).value)
+        assert (jz.argmax(jz.nn.one_hot(y, 3, device=device)) == y).all()   # one-hot back to class numbers
+        assert ((scores == jz.max(scores, 1)).numpy().argmax(1) == p).all()  # the same on the device
+        values, positions = jz.topk(scores, 2, axis=0, largest=False)
+        assert isinstance(values, jz.Matrix) and positions.dtype == np.int64 and positions.shape == (2, 3)
+        assert y[positions].shape == (2, 3)                      # labels of the nearest, as in knn.py
+        with pytest.raises(ValueError, match=r"axis 1 \(each row.*np\.argmax\(A\.numpy\(\)\)"):
+            jz.argmax(scores, None)
+        values, positions = jz.topk(jz.array([[np.nan, np.nan, 1.0]], device=device), 2)
+        assert positions.tolist() == [[2, -1]] and np.isnan(values.numpy()[0, 1])

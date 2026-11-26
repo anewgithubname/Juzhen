@@ -60,16 +60,17 @@ class TestComparisons:
         assert jz.sum(A) == 4 and not jz.sum(A) == 5  # a 1 x 1 matrix is one True or False
         assert (A == B).numpy().all()
 
-    def test_accuracy_the_numpy_way_is_refused(self, device):
-        # np.mean(jz.argmax(scores, 1) == y) used to compare n x 1 with (n,) as an n x n table
+    def test_a_matrix_against_a_numpy_array_is_refused(self, device):
+        # an n x 1 matrix of class numbers against (n,) labels used to be compared as an n x n table
         scores = jz.array(np.eye(3, dtype=np.float32)[[0, 1, 2, 0, 1, 2]], device=device)
         y = np.array([0, 1, 2, 0, 1, 0])  # 5 of 6 right
-        for compare in (lambda: jz.argmax(scores, 1) == y, lambda: y == jz.argmax(scores, 1),
-                        lambda: jz.argmax(scores, 1) != y, lambda: y < jz.argmax(scores, 1),
-                        lambda: jz.argmax(scores, 1) == list(y)):
+        predicted = jz.array(scores.numpy().argmax(1), device=device)  # n x 1
+        for compare in (lambda: predicted == y, lambda: y == predicted, lambda: predicted != y,
+                        lambda: y < predicted, lambda: predicted == list(y)):
             with pytest.raises(TypeError, match=r"jz\.array\(a, device=.*nn\.error_rate"):
                 compare()
-        assert np.mean(jz.argmax(scores, 1) == jz.array(y, device=device)) == pytest.approx(5 / 6)
+        assert jz.mean(predicted == jz.array(y, device=device)) == pytest.approx(5 / 6)
+        assert np.mean(jz.argmax(scores) == y) == pytest.approx(5 / 6)  # positions are numpy integers
         assert 1 - nn.error_rate(scores, y).item() == pytest.approx(5 / 6)
 
     def test_no_masks(self, device):
