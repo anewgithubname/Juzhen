@@ -4,6 +4,7 @@
 #include "../cpp/matrix.hpp"
 #include "./util.cuh"
 #include "./ids.hpp"
+#include <algorithm>
 #include <cmath>
 #include <limits>
 #include <stdexcept>
@@ -258,30 +259,74 @@ LossResult<D> class_cross_entropy(const Matrix<D>& logits, const std::vector<int
 #endif
     }
     if constexpr (std::is_same_v<D, float>) {
+        // One column at a time, straight on the storage (a column of a plain
+        // matrix is contiguous). Each exponential is computed once: it is kept
+        // in the gradient column and scaled afterwards.
         Matrix<D> grad("dlogits", classes, n);
+        float* const g_all = const_cast<float*>(grad.data());
+        const bool plain = !logits.get_transpose();
+        std::vector<float> copied(plain ? 0 : classes);  // a column of logits stored with the transpose flag
         double total = 0;
         for (size_t j = 0; j < n; ++j) {
+            float* const g = g_all + j * classes;
             if (y[j] < 0 || w[j] == 0) {
-                for (size_t c = 0; c < classes; ++c) grad.elem(c, j) = 0;
+                std::fill(g, g + classes, 0.f);
                 continue;
             }
-            float maximum = -std::numeric_limits<float>::infinity();
-            for (size_t c = 0; c < classes; ++c) maximum = std::max(maximum, logits.elem(c, j));
+            const float* z = logits.data() + j * classes;
+            if (!plain) {
+                for (size_t c = 0; c < classes; ++c) copied[c] = logits.elem(c, j);
+                z = copied.data();
+            }
+            float maximum = z[0];
+            for (size_t c = 1; c < classes; ++c) maximum = std::max(maximum, z[c]);
+            for (size_t c = 0; c < classes; ++c) g[c] = std::exp(z[c] - maximum);
             double sum = 0;
-            for (size_t c = 0; c < classes; ++c) sum += std::exp(double(logits.elem(c, j)) - maximum);
-            const float log_sum = float(std::log(sum));
+            for (size_t c = 0; c < classes; ++c) sum += g[c];
+            const size_t label = size_t(y[j]);
             // the target is taken from the shifted logits: exact for huge logits
-            total += double(w[j]) * ((maximum - logits.elem(size_t(y[j]), j)) + log_sum);
-            for (size_t c = 0; c < classes; ++c)
-                grad.elem(c, j) = w[j] * (std::exp((logits.elem(c, j) - maximum) - log_sum) -
-                                          (c == size_t(y[j]) ? 1.f : 0.f));
+            total += double(w[j]) * (double(maximum - z[label]) + std::log(sum));
+            const float scale = float(double(w[j]) / sum);
+            for (size_t c = 0; c < classes; ++c) g[c] *= scale;
+            g[label] -= w[j];
         }
         Matrix<D> value("loss", 1, 1);
         value.elem(0, 0) = float(total);
         return {std::move(value), std::move(grad)};
     } else {
-        // Composition from existing device operations (the first Metal path;
-        // CUDA and ROCm get kernels): a host-built one-hot and the weights.
+#ifdef APPLE_SILICON
+        if constexpr (std::is_same_v<D, MPSfloat>) {
+            // Metal: the dense part stays on the device and no one-hot matrix
+            // is built. After one synchronization the host reads the N target
+            // scores for the value and subtracts the N target weights from
+            // the gradient; device memory is shared with the host.
+            Matrix<float> host_w("weights", 1, n);
+            for (size_t j = 0; j < n; ++j) host_w.elem(0, j) = y[j] < 0 ? 0.f : w[j];
+            const Matrix<D> weights(host_w);
+            const auto ones = Matrix<D>::ones(classes, 1);
+            auto maximum = column_max(logits);                             // (1, N)
+            auto exponents = exp(logits - ones * maximum);                 // (classes, N)
+            auto totals = sum(exponents, 0);                               // (1, N)
+            auto coefficient = hadmd(weights, 1.0 / totals);               // (1, N): w_j / total_j
+            auto grad = hadmd(std::move(exponents), ones * coefficient);   // (classes, N): w_j softmax
+            Matrix<D> value("loss", 1, 1);
+            mpsSynchronize();  // the host may now read maximum, totals and logits, and write grad and value
+            double total = 0;
+            for (size_t j = 0; j < n; ++j) {
+                if (y[j] < 0 || host_w.elem(0, j) == 0) continue;
+                const size_t label = size_t(y[j]);
+                const double max_j = double(float(maximum.elem(0, j))), z_y = double(float(logits.elem(label, j)));
+                total += double(host_w.elem(0, j)) * ((max_j - z_y) + std::log(double(float(totals.elem(0, j)))));
+                MPSfloat& cell = grad.elem(label, j);
+                cell = float(cell) - host_w.elem(0, j);
+            }
+            value.elem(0, 0) = float(total);
+            return {std::move(value), std::move(grad)};
+        }
+#endif
+        // No kernels in this translation unit (a ROCm source that is not
+        // compiled as HIP): composition from existing device operations with
+        // a host-built one-hot and the weights.
         Matrix<float> one_hot = Matrix<float>::zeros(classes, n), weights("weights", 1, n);
         for (size_t j = 0; j < n; ++j) {
             weights.elem(0, j) = y[j] < 0 ? 0.f : w[j];
