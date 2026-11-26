@@ -285,7 +285,9 @@ RF_EPOCHS=200 RF_BATCH_SIZE=128 ./build_cuda/demo_cnn_rectified
 RF_EPOCHS=10 RF_BATCH_SIZE=128 ./build/demo_cnn_rectified
 ```
 
-FID-10k of a trained checkpoint (100 Euler steps; training time on an RTX 4090):
+FID-10k of a trained checkpoint (100 Euler steps; training time on an RTX 4090). These were
+measured with the earlier default weight initialisation, N(0, 0.001^2); the default has since
+changed (see docs/training-api.md), so a new run will not reproduce them exactly:
 
 | Width | 200 epochs | 1000 epochs |
 |---|---|---|

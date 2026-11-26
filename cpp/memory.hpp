@@ -67,7 +67,7 @@ class Memory {
         try {
             ptr = _alloc(size);
         } catch (std::bad_alloc &e) {
-            LOG_ERROR("Failed to allocate memory: {}", e.what());
+            LOG_ERROR("out of memory: could not allocate {} bytes of {} storage", size * sizeof(D), datatype(D));
             ERROR_OUT;
         }
         LOG_DEBUG("No {} space available, allocate new space: {}, address: {}",

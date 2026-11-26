@@ -28,6 +28,7 @@
 
 #include "../../cpp/juzhen.hpp"
 #include "../../ml/checkpoint.hpp"
+#include "../../ml/embedding.hpp"
 #include "../../ml/layer.hpp"
 #include "../../ml/loss.hpp"
 #include "../../ml/optimizer.hpp"
@@ -142,6 +143,32 @@ std::string shape_str(const Matrix<D> &m) {
 
 using InArray = nb::ndarray<const float, nb::ndim<2>, nb::c_contig, nb::device::cpu>;
 using OutArray = nb::ndarray<nb::numpy, float, nb::ndim<2>>;
+
+// Token ids and class numbers arrive as a flat int32 array that nn.py has
+// already checked and converted; noconvert() below keeps nanobind from
+// casting anything else silently. They are copied into a host Matrix<int>
+// (Juzhen's own pool): `rows` x (size / rows), read column after column, so a
+// C-order (batch, seq_len) numpy array is the seq_len x batch matrix the
+// layers call "one sequence per column".
+using IdArray = nb::ndarray<const int32_t, nb::ndim<1>, nb::c_contig, nb::device::cpu>;
+
+Matrix<int> ids_matrix(IdArray a, size_t rows = 1) {
+    const size_t n = a.shape(0);
+    if (n == 0)
+        throw std::invalid_argument("no ids were given");
+    if (rows == 0 || n % rows)
+        throw std::invalid_argument("the ids do not fill whole sequences");
+    Matrix<int> m("ids", rows, n / rows);
+    std::memcpy(const_cast<int *>(m.data()), a.data(), n * sizeof(int32_t));
+    return m;
+}
+
+// "auto" (the layer's own rule) or a standard deviation (rule "normal")
+Init make_init(const std::string &rule, float std) {
+    if (rule == "auto") return Init();
+    if (rule == "normal") return Init::normal(std);
+    throw std::invalid_argument("unknown init rule '" + rule + "'");
+}
 
 // A C-order (rows, cols) array, copied into a new matrix on device D.
 template <class D>
@@ -301,6 +328,12 @@ struct Index {
 
 // an int (or numpy integer) index into a dimension of size n
 size_t position(nb::handle item, size_t n) {
+    // True and False would pass as 1 and 0: X[y == 2] and X[[True, False]] must not
+    if (PyBool_Check(item.ptr()) || std::string(Py_TYPE(item.ptr())->tp_name) == "numpy.bool" ||
+        std::string(Py_TYPE(item.ptr())->tp_name) == "numpy.bool_")
+        throw nb::type_error("a matrix cannot be indexed with True or False (comparing two matrices with == "
+                             "gives one bool, not a mask); use row numbers, for example "
+                             "X[np.flatnonzero(labels == 2)] with numpy labels");
     nb::object index = nb::steal(PyNumber_Index(item.ptr()));
     if (!index.is_valid()) throw nb::python_error();
     Py_ssize_t i = PyLong_AsSsize_t(index.ptr());
@@ -538,6 +571,7 @@ template <class D>
 class Network {
     std::list<Layer<D> *> layers_;
     std::unique_ptr<Matrix<D>> input_;  // features x batch input of the last forward
+    std::unique_ptr<Matrix<int>> ids_;  // or the ids of the last forward, for a network that takes ids
 
     // x is batch x features; the layers want features x batch, stored
     // without the transpose flag (a numpy array already is; the result of
@@ -557,12 +591,33 @@ class Network {
                     throw std::invalid_argument("a layer can appear in a network only once");
             layers_.push_front(layer);
         }
+        require_valid_structure(layers_);
     }
 
     const std::list<Layer<D> *> &layers() const { return layers_; }
+    bool takes_ids() const { return layers_.back()->takes_ids(); }
+
+    // The same for a network whose first layer is an Embedding. `rows` is the
+    // sequence length when the ids came as (batch, seq_len), otherwise 1.
+    Matrix<D> forward_ids(IdArray ids, size_t rows) {
+        input_.reset();
+        ids_.reset();
+        auto kept = std::make_unique<Matrix<int>>(ids_matrix(ids, rows));
+        const Matrix<D> &out = Juzhen::forward(layers_, *kept);
+        ids_ = std::move(kept);
+        return transposed(copy_of(out));
+    }
+
+    Matrix<D> predict_ids(IdArray ids, size_t rows) {
+        input_.reset();
+        ids_.reset();
+        const Matrix<int> kept = ids_matrix(ids, rows);
+        return transposed(copy_of(Juzhen::forward(layers_, kept)));
+    }
 
     // Runs the layers on x and keeps a copy of x for backward().
     Matrix<D> forward(const Matrix<D> &x) {
+        ids_.reset();
         input_.reset();
         auto input = std::make_unique<Matrix<D>>(native_copy(x));
         const Matrix<D> &out = Juzhen::forward(layers_, *input);
@@ -573,6 +628,7 @@ class Network {
 
     // forward() without keeping the input; backward() is not possible after it
     Matrix<D> predict(const Matrix<D> &x) {
+        ids_.reset();
         input_.reset();
         const Matrix<D> input = native(x);
         return transposed(copy_of(Juzhen::forward(layers_, input)));
@@ -580,16 +636,21 @@ class Network {
 
     // grad is the gradient of the loss with respect to the last output
     // (batch x outputs); returns the gradient with respect to the input.
+    // For a network that takes ids there is no input gradient: this returns
+    // the gradient with respect to the embedded tokens (tokens x dim).
     Matrix<D> backward(const Matrix<D> &grad) {
-        if (!input_)
+        if (!input_ && !ids_)
             throw std::logic_error("call the network on a batch before backward()");
         // backward() may write into its argument, so it gets a copy
         Matrix<D> upstream = native_copy(grad);
+        if (ids_)
+            return transposed(Juzhen::backward(layers_, *ids_, std::move(upstream)));
         return transposed(Juzhen::backward(layers_, *input_, std::move(upstream)));
     }
 
     // J(x) * tangent, the change of the output when x moves along tangent
     Matrix<D> jvp(const Matrix<D> &x, const Matrix<D> &tangent) {
+        ids_.reset();
         input_.reset();
         const Matrix<D> xn = native(x), tn = native(tangent);
         return transposed(Juzhen::jvp(layers_, xn, tn));
@@ -734,28 +795,49 @@ nb::object move_to(nb::handle self, const Matrix<D> &m, const std::string &devic
 template <class D>
 void bind_layers(nb::module_ &sub) {
     nb::class_<Layer<D>>(sub, "Dense", "Fully connected layer with tanh: tanh(W x + b) (C++ Layer<D>).")
-        .def(nb::init<size_t, size_t, size_t>(), "out_features"_a, "in_features"_a, "batch_size"_a = 1)
+        .def("__init__", [](Layer<D> *self, size_t out, size_t in, const std::string &rule, float std) {
+            new (self) Layer<D>(out, in, 1, make_init(rule, std));
+        }, "out_features"_a, "in_features"_a, "init"_a = "auto", "std"_a = 0.f)
         .def_prop_ro("weight", [](Layer<D> &l) { return copy_of(l.W()); }, "A copy of W (out x in).")
         .def_prop_ro("bias", [](Layer<D> &l) { return copy_of(l.b()); }, "A copy of b (out x 1).");
     nb::class_<LinearLayer<D>, Layer<D>>(sub, "Linear", "Fully connected layer: W x + b (C++ LinearLayer<D>).")
-        .def(nb::init<size_t, size_t, size_t>(), "out_features"_a, "in_features"_a, "batch_size"_a = 1);
+        .def("__init__", [](LinearLayer<D> *self, size_t out, size_t in, const std::string &rule, float std) {
+            new (self) LinearLayer<D>(out, in, 1, make_init(rule, std));
+        }, "out_features"_a, "in_features"_a, "init"_a = "auto", "std"_a = 0.f);
     nb::class_<ReluLayer<D>, Layer<D>>(sub, "ReLUDense", "Fully connected layer with ReLU (C++ ReluLayer<D>).")
-        .def(nb::init<size_t, size_t, size_t>(), "out_features"_a, "in_features"_a, "batch_size"_a = 1);
+        .def("__init__", [](ReluLayer<D> *self, size_t out, size_t in, const std::string &rule, float std) {
+            new (self) ReluLayer<D>(out, in, 1, make_init(rule, std));
+        }, "out_features"_a, "in_features"_a, "init"_a = "auto", "std"_a = 0.f);
     nb::class_<LayerNormLayer<D>, Layer<D>>(sub, "LayerNorm", "Layer normalization over the features (C++ LayerNormLayer<D>).")
-        .def(nb::init<int, int>(), "features"_a, "batch_size"_a);
+        .def(nb::init<int>(), "features"_a);
+    nb::class_<EmbeddingLayer<D>, Layer<D>>(sub, "Embedding", "Token ids to vectors (C++ EmbeddingLayer<D>).")
+        .def("__init__", [](EmbeddingLayer<D> *self, size_t vocab, size_t dim, const std::string &rule, float std) {
+            new (self) EmbeddingLayer<D>(vocab, dim, make_init(rule, std));
+        }, "vocab"_a, "dim"_a, "init"_a = "auto", "std"_a = 0.f);
+    nb::class_<PositionEmbeddingLayer<D>, Layer<D>>(sub, "PositionEmbedding", "Adds a learned vector per position (C++ PositionEmbeddingLayer<D>).")
+        .def("__init__", [](PositionEmbeddingLayer<D> *self, size_t seq_len, size_t dim, const std::string &rule, float std) {
+            new (self) PositionEmbeddingLayer<D>(seq_len, dim, make_init(rule, std));
+        }, "seq_len"_a, "dim"_a, "init"_a = "auto", "std"_a = 0.f);
+    // the tied output keeps its Embedding alive
+    nb::class_<TiedLinearLayer<D>, Layer<D>>(sub, "TiedLinear", "Output layer that uses an Embedding's table (C++ TiedLinearLayer<D>).")
+        .def(nb::init<EmbeddingLayer<D> &>(), "embedding"_a, nb::keep_alive<1, 2>());
     nb::class_<TransformerLayer<D>, Layer<D>>(sub, "Transformer", "Pre-norm transformer block (C++ TransformerLayer<D>).")
         .def(nb::init<int, int, int, int, int, int, bool>(), "d_model"_a, "d_k"_a, "d_ff"_a, "seq_len"_a,
              "batch_size"_a, "heads"_a = 1, "causal"_a = true);
 #ifdef JZ_HAS_CONV
     if constexpr (std::is_same_v<D, ConvType>) {
         nb::class_<ConvLayer, Layer<D>>(sub, "Conv2d", "2-D convolution, optionally with ReLU (C++ ConvLayer).")
-            .def(nb::init<int, int, int, int, int, int, int, int, int, bool>(), "batch_size"_a, "in_channels"_a,
-                 "height"_a, "width"_a, "out_channels"_a, "kernel_height"_a, "kernel_width"_a, "padding"_a = 0,
-                 "stride"_a = 1, "relu"_a = true);
+            .def("__init__", [](ConvLayer *self, int n, int c_in, int h, int w, int c_out, int kh, int kw, int pad,
+                                int stride, bool relu, const std::string &rule, float std) {
+                new (self) ConvLayer(n, c_in, h, w, c_out, kh, kw, pad, stride, relu, false, make_init(rule, std));
+            }, "batch_size"_a, "in_channels"_a, "height"_a, "width"_a, "out_channels"_a, "kernel_height"_a,
+                 "kernel_width"_a, "padding"_a = 0, "stride"_a = 1, "relu"_a = true, "init"_a = "auto", "std"_a = 0.f);
         nb::class_<convtransLayer, Layer<D>>(sub, "ConvTranspose2d", "Transposed 2-D convolution (C++ convtransLayer).")
-            .def(nb::init<int, int, int, int, int, int, int, int, int, bool>(), "batch_size"_a, "in_channels"_a,
-                 "height"_a, "width"_a, "out_channels"_a, "kernel_height"_a, "kernel_width"_a, "padding"_a = 0,
-                 "stride"_a = 1, "relu"_a = true);
+            .def("__init__", [](convtransLayer *self, int n, int c_in, int h, int w, int c_out, int kh, int kw, int pad,
+                                int stride, bool relu, const std::string &rule, float std) {
+                new (self) convtransLayer(n, c_in, h, w, c_out, kh, kw, pad, stride, relu, false, make_init(rule, std));
+            }, "batch_size"_a, "in_channels"_a, "height"_a, "width"_a, "out_channels"_a, "kernel_height"_a,
+                 "kernel_width"_a, "padding"_a = 0, "stride"_a = 1, "relu"_a = true, "init"_a = "auto", "std"_a = 0.f);
     }
 #endif
 }
@@ -775,6 +857,15 @@ void bind_training(nb::module_ &sub) {
                                             p.name + "' of shape " + shape_str(*p.value));
             *p.value = plain_copy(value);
         }, "value"_a, "Set the parameter to a copy of value (same shape, e.g. for a custom initialization).")
+        .def("assign", [](const ParameterRef<D> &p, nb::handle value) {
+            const std::string type = Py_TYPE(value.ptr())->tp_name;
+            const std::string mine = device_name<D>();
+            if (type == "juzhen._core.cpu.Matrix" || type == "juzhen._core.gpu.Matrix")
+                throw std::invalid_argument("parameter '" + p.name + "' is on '" + mine +
+                                            "' but the value is on the other device; use value.to('" + mine + "')");
+            throw nb::type_error(("assign() takes a juzhen matrix, got " + type + "; use jz.array(value, device='" +
+                                  mine + "')").c_str());
+        }, "value"_a)
         .def("__repr__", [](const ParameterRef<D> &p) {
             return "Parameter('" + p.name + "', shape=" + shape_str(*p.value) + ")";
         });
@@ -791,6 +882,9 @@ void bind_training(nb::module_ &sub) {
         .def(nb::init<const std::vector<Layer<D> *> &>(), "layers"_a, nb::keep_alive<1, 2>())
         .def("forward", &Network<D>::forward, "x"_a)
         .def("predict", &Network<D>::predict, "x"_a)
+        .def("forward_ids", &Network<D>::forward_ids, "ids"_a.noconvert(), "rows"_a)
+        .def("predict_ids", &Network<D>::predict_ids, "ids"_a.noconvert(), "rows"_a)
+        .def_prop_ro("takes_ids", &Network<D>::takes_ids)
         .def("backward", &Network<D>::backward, "grad"_a)
         .def("jvp", &Network<D>::jvp, "x"_a, "tangent"_a)
         .def("parameters", [](const Network<D> &n) { return ParameterList<D>{n.parameters()}; }, nb::keep_alive<0, 1>());
@@ -833,6 +927,22 @@ void bind_training(nb::module_ &sub) {
         return Juzhen::error_rate(transposed(scores), transposed(labels));
     }, "scores"_a, "labels"_a);
 
+    // The same three with class numbers (one int per row of logits).
+    sub.def("softmax_cross_entropy_labels", [](const Matrix<D> &logits, IdArray labels, int ignore_index) {
+        const Matrix<D> z = transposed(logits);
+        auto r = Juzhen::softmax_cross_entropy(z, ids_matrix(labels), ignore_index);
+        return std::make_tuple(std::move(r.value), transposed(r.grad));
+    }, "logits"_a, "labels"_a.noconvert(), "ignore_index"_a);
+    sub.def("masked_softmax_cross_entropy_labels", [](const Matrix<D> &logits, IdArray labels,
+                                                      const Matrix<D> &weights, int ignore_index) {
+        const Matrix<D> z = transposed(logits);
+        auto r = Juzhen::masked_softmax_cross_entropy(z, ids_matrix(labels), transposed(weights), ignore_index);
+        return std::make_tuple(std::move(r.value), transposed(r.grad));
+    }, "logits"_a, "labels"_a.noconvert(), "weights"_a, "ignore_index"_a);
+    sub.def("error_rate_labels", [](const Matrix<D> &scores, IdArray labels, int ignore_index) {
+        return Juzhen::error_rate(transposed(scores), ids_matrix(labels), ignore_index);
+    }, "scores"_a, "labels"_a.noconvert(), "ignore_index"_a);
+
     sub.def("save_checkpoint", [](const Network<D> &net, const std::string &path, uint64_t epoch, uint64_t step,
                                   uint64_t data_position) {
         TrainingProgress progress{epoch, step, data_position};
@@ -843,8 +953,22 @@ void bind_training(nb::module_ &sub) {
     sub.def("load_checkpoint", [](const Network<D> &net, const std::string &path) {
         TrainingProgress progress;
         std::string error;
-        if (!Juzhen::load_checkpoint(net.layers(), path, progress, &error))
+        if (!Juzhen::load_checkpoint(net.layers(), path, progress, &error)) {
+            // The stored type names carry the device ("LinearLayer<float>" against
+            // "LinearLayer<ROCMfloat>"): say that in the package's words.
+            const size_t in_file = error.find("' in the file but a '");
+            if (in_file != std::string::npos) {
+                const std::string file_type = error.substr(0, in_file);
+                const bool file_gpu = file_type.find("CUDAfloat") != std::string::npos ||
+                                      file_type.find("ROCMfloat") != std::string::npos ||
+                                      file_type.find("MPSfloat") != std::string::npos;
+                if (file_gpu == std::is_same_v<D, float>)
+                    error = std::string("the file was saved from a network on '") + (file_gpu ? "gpu" : "cpu") +
+                            "' but this network is on '" + device_name<D>() +
+                            "'; to move weights between devices use other.load_state_dict(net.state_dict())";
+            }
             throw std::runtime_error("cannot load checkpoint " + path + ": " + error);
+        }
         return std::make_tuple(progress.epoch, progress.step, progress.data_position);
     }, "network"_a, "path"_a);
 }
@@ -896,6 +1020,18 @@ void bind(nb::module_ &top, nb::module_ &sub) {
         .def("__isub__", [](Mat &a, double s) -> Mat & { a.add((float)-s, 1.0f); return a; }, nb::rv_policy::none)
         .def("__imul__", [](Mat &a, double s) -> Mat & { a.scale((float)s); return a; }, nb::rv_policy::none)
         .def("__itruediv__", [](Mat &a, double s) -> Mat & { a.scale((float)(1.0 / s)); return a; }, nb::rv_policy::none);
+
+    // A numpy array (or a list) next to a matrix: say how to convert it.
+    for (const char *op : {"__add__", "__radd__", "__sub__", "__rsub__", "__mul__", "__rmul__", "__truediv__",
+                           "__rtruediv__", "__matmul__", "__rmatmul__", "__iadd__", "__isub__"})
+        cls.def(op, [](const Mat &, nb::handle other) -> Mat {
+            const std::string type = Py_TYPE(other.ptr())->tp_name;
+            if (type == "numpy.ndarray" || type == "list" || type == "tuple")
+                throw nb::type_error(("a juzhen matrix cannot be combined with a " + type +
+                                      "; make it a matrix first: jz.array(a, device='" + device_name<D>() + "')")
+                                         .c_str());
+            throw nb::next_overload();
+        });
 
 #ifdef JZ_HAS_GPU
     // A matrix of the other device: say so, instead of nanobind's list of

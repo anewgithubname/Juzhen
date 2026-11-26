@@ -70,14 +70,7 @@ model = nn.Sequential(
     nn.Dense(128, activation="relu"),
     nn.Linear(2),
     device=device)
-# He initialization. The default (weights from N(0, 0.001^2), as in C++)
-# makes this deep ReLU network output almost exactly zero, and whether
-# training ever leaves that point depends on luck.
-for p in model.parameters():
-    fan_in = p.shape[1]
-    scale = np.sqrt(2 / fan_in) if p.name.endswith("weight") else 0.0
-    p.assign(jz.array(scale * rng.standard_normal(p.shape), device=device))
-opt =optim.AdamW(model.parameters(), lr=args.lr, weight_decay=0)
+opt = optim.AdamW(model.parameters(), lr=args.lr, weight_decay=0)
 
 start = time.perf_counter()
 ema = None

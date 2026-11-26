@@ -399,9 +399,9 @@ int compute() {
         cout << "Training: mini-batch=" << batch << " x seq_len=" << seq_len
              << ", steps=" << steps << "\n\n";
 
-        LinearLayer<FLOAT> embed(cfg.d_model, in_dim, N);
+        LinearLayer<FLOAT> embed(cfg.d_model, in_dim, N, Init::normal(0.001f));
         auto blocks = make_blocks(batch);
-        LinearLayer<FLOAT> proj(V, cfg.d_model, N);
+        LinearLayer<FLOAT> proj(V, cfg.d_model, N, Init::normal(0.001f));
 
         // batch=1: the snapshot only ever stores weights (never runs a pass), so
         // skip the large per-batch activation caches a layer allocates.

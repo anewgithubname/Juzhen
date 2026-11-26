@@ -144,13 +144,8 @@ bool stream_zero_flow(const string& src, const string& tgt, int iters,
                      L2(128, 128, batchsize);
     LinearLayer<FLOAT> L3(d, 128, batchsize);
     list<Layer<FLOAT>*> net({&L3, &L2, &L1, &L0});
-    // He initialization. With the default (randn * 0.001) about 1 run in 5
-    // kills every ReLU, leaving v = 0 everywhere: a false zero flow.
-    for (auto* L : net) {
-        const size_t m = L->W().num_row(), n = L->W().num_col();
-        L->W() = Matrix<FLOAT>::randn(m, n) * sqrtf(2.0f / n);
-        L->b() = Matrix<FLOAT>::zeros(m, 1);
-    }
+    // The default initialisation (N(0, 2/fan_in) for ReLU layers, zero biases) keeps the
+    // ReLUs alive; the old N(0, 0.001^2) killed all of them in about 1 run in 5.
     Sequential<FLOAT> network(net);
     AdamWOptions options;
     options.lr = lr;

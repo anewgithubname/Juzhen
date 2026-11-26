@@ -1,8 +1,13 @@
-"""examples/demo_transformer.cu in Python: a character-level transformer LM.
+"""A character-level transformer language model on token ids.
 
-Each token is a character and its position, both one-hot (built on the
-device with nn.one_hot), embedded by a linear layer, passed through causal
-transformer blocks and projected to next-character scores. Training samples
+Each character is a whole number. The network looks its vector up
+(nn.Embedding), adds a vector for its position in the window
+(nn.PositionEmbedding), runs causal transformer blocks and scores the next
+character with the embedding table itself (nn.Linear(V, tied=True)). The
+inputs and the targets are plain numpy integer arrays of shape
+(batch, seq_len): no one-hot matrices. examples/demo_transformer.cu is the
+one-hot version of the same model in C++, examples/demo_llm_tokens.cu a small
+token model. Training samples
 random windows from the first 90% of the corpus, evaluates on the last 10%
 every 1000 steps, keeps the best weights and stops early when the
 validation loss stalls. Then it shows predictions and generates text.
@@ -89,7 +94,6 @@ val_lo, val_hi = split, len(ids) - seq_len
 if train_hi <= train_lo or val_hi <= val_lo:
     raise SystemExit(f"the corpus is too small for seq_len={seq_len}")
 batch = min(64, train_hi - train_lo, val_hi - val_lo)
-positions = np.tile(np.arange(seq_len), batch)   # token b * seq_len + s is at position s
 
 
 def lr_at(step):
@@ -100,43 +104,35 @@ def lr_at(step):
     return min_lr + 0.5 * (peak_lr - min_lr) * (1 + math.cos(math.pi * t))
 
 
-def tokens(chars, pos):
-    """One-hot character and position side by side: one row per token."""
-    return jz.hstack([nn.one_hot(chars, V, device=device), nn.one_hot(pos, seq_len, device=device)])
-
-
 def make_batch(starts):
+    """Inputs and next-character targets: two (len(starts), seq_len) integer arrays."""
     window = starts[:, None] + np.arange(seq_len)
-    inputs, targets = ids[window].ravel(), ids[window + 1].ravel()
-    return tokens(inputs, positions), nn.one_hot(targets, V, device=device), targets
-
-
-def make_model(n_sequences):
-    return nn.Sequential(
-        nn.Linear(V + seq_len, d_model),
-        *[nn.Transformer(d_model, d_k, d_ff, seq_len, n_sequences, heads=heads) for _ in range(blocks)],
-        nn.Linear(V),
-        device=device)
+    return ids[window], ids[window + 1]
 
 
 def evaluate(fixed):
-    X, Y, targets = fixed
-    logits = model.predict(X)
+    X, Y = fixed
+    logits = model.predict(X)                    # one row of V scores per token
     loss = nn.softmax_cross_entropy(logits, Y).item()
-    accuracy = np.mean(jz.argmax(logits).numpy()[:, 0] == targets)
-    return loss, 100 * accuracy
+    return loss, 100 * (1 - nn.error_rate(logits, Y).item())
 
 
 print("=== Transformer Char-LM Demo ===")
 print(f"Corpus: {source}, {len(ids)} characters, split at {split} (90/10)")
 print(f"Preview: \"{readable(corpus[:80])}...\"")
 print(f"Vocabulary: {V} symbols")
-print(f"Network: embed({V + seq_len}->{d_model}) -> Transformer({d_model},{d_k},{d_ff},{heads}h) "
-      f"x{blocks} -> proj({d_model}->{V})")
+print(f"Network: Embedding({V}, {d_model}) + positions -> Transformer({d_model},{d_k},{d_ff},{heads}h) "
+      f"x{blocks} -> LayerNorm -> tied output ({V} scores)")
 print(f"Training: {batch} sequences x {seq_len} tokens per step, up to {args.steps} steps, "
       f"device {device}\n")
 
-model = make_model(batch)
+model = nn.Sequential(
+    nn.Embedding(V, d_model),                    # token ids -> vectors
+    nn.PositionEmbedding(seq_len),               # + a learned vector per position
+    *[nn.Transformer(d_model, d_k, d_ff, seq_len, batch, heads=heads) for _ in range(blocks)],
+    nn.LayerNorm(),
+    nn.Linear(V, tied=True),                     # next-character scores from the embedding table
+    device=device)
 opt = optim.AdamW(model.parameters(), lr=lr_at(0), weight_decay=0)
 
 # fixed, evenly spaced windows for comparable train and validation numbers
@@ -148,9 +144,10 @@ best, best_loss, best_step, stale = model.state_dict(), math.inf, 0, 0
 start = time.perf_counter()
 for step in range(args.steps):
     opt.lr = lr_at(step)
-    X, Y, _ = make_batch(rng.integers(train_lo, train_hi, batch))
+    X, Y = make_batch(rng.integers(train_lo, train_hi, batch))
     opt.zero_grad()
-    model.backward(nn.softmax_cross_entropy(model(X), Y).grad)
+    loss = nn.softmax_cross_entropy(model(X), Y)   # Y: the class number of each next character
+    model.backward(loss.grad)
     opt.step()
 
     if step % log_every == 0 or step == args.steps - 1:
@@ -168,14 +165,14 @@ for step in range(args.steps):
             print(f"Early stopping at step {step}: best val_loss = {best_loss:.4f} at step {best_step}.")
             break
 
-# one sequence at a time for inference: the same weights in a batch-1 network
-generator = make_model(1)
-generator.load_state_dict(best)
-one_position = np.arange(seq_len)
+# one sequence at a time for inference: the best weights in a batch-1 copy of the network
+model.load_state_dict(best)
+generator = model.copy(batch_size=1)
 
 
 def next_scores(window):
-    return generator.predict(tokens(window, one_position)).numpy()
+    """The scores after each of the seq_len characters of one window (seq_len x V)."""
+    return generator.predict(np.asarray(window)).numpy()
 
 
 print("\n--- Sample predictions (held-out text) ---")

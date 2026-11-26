@@ -70,6 +70,34 @@ Matrix.register(_core.cpu.Matrix)
 if _core.has_gpu:
     Matrix.register(_core.gpu.Matrix)
 
+def _array_ufunc(self, ufunc, method, *inputs, **kwargs):
+    """What numpy does when a matrix meets a numpy operator or function.
+
+    number * A, number + A, ... with a numpy number give a matrix, as with a
+    Python number (numpy used to make an array behind the user's back). A
+    numpy array combined with a matrix is refused: one of them has to be
+    converted on purpose. Anything else (np.exp(A), np.sum(A)) computes in
+    numpy on a copy of the values, as before.
+    """
+    if method == "__call__" and len(inputs) == 2 and not kwargs and ufunc in _ARITHMETIC:
+        left, right = inputs
+        other = right if left is self else left
+        if isinstance(other, np.ndarray) and other.ndim > 0:
+            raise TypeError("cannot combine a juzhen matrix with a numpy array; make it a matrix first: "
+                            f"jz.array(a, device='{self.device}')")
+        if isinstance(other, (np.number, np.ndarray, int, float)) and not isinstance(other, bool):
+            number = float(other)
+            return _ARITHMETIC[ufunc](number if left is other else left, number if right is other else right)
+    converted = [x.numpy() if isinstance(x, Matrix) else x for x in inputs]
+    return getattr(ufunc, method)(*converted, **kwargs)
+
+
+_ARITHMETIC = {np.add: lambda a, b: a + b, np.subtract: lambda a, b: a - b,
+               np.multiply: lambda a, b: a * b, np.true_divide: lambda a, b: a / b}
+_core.cpu.Matrix.__array_ufunc__ = _array_ufunc
+if _core.has_gpu:
+    _core.gpu.Matrix.__array_ufunc__ = _array_ufunc
+
 
 def backend():
     """The GPU backend of this build: "cuda", "rocm", "metal", or "cpu" if none."""

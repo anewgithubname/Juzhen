@@ -235,7 +235,7 @@ static void convolution_checks(const Shape& s,bool trans) {
 
 static void normalization_checks() {
     const auto rng_before=global_rand_gen;
-    constexpr int features=5,batch=3;LayerNormLayer<D> layer(features,batch);
+    constexpr int features=5,batch=3;LayerNormLayer<D> layer(features);
     require(global_rand_gen==rng_before,"normalization construction does not consume host RNG");
     require_empty_storage(layer.W(),"normalization inherited W");require_empty_storage(layer.b(),"normalization inherited b");
     require_empty_storage(layer.adamWstate().m,"normalization inherited W first moment");
@@ -257,7 +257,7 @@ static void normalization_checks() {
 #endif
 #if defined(CUDA) || defined(APPLE_SILICON)
     reset_rng();auto expected_random=host(Matrix<D>::randn(16,16));reset_rng();
-    LayerNormLayer<D> no_random(features,batch);
+    LayerNormLayer<D> no_random(features);
     close(host(Matrix<D>::randn(16,16)),expected_random,"normalization construction does not consume device RNG",0);
 #endif
     auto x=values(features,batch,.3f,.8f),gamma=values(features,1,.7f,.4f),beta=values(features,1,.2f),
@@ -304,7 +304,7 @@ static void normalization_checks() {
 
     // The standalone and network entry points operate on the same class and
     // expose the same real parameters and Adam state.
-    LayerNormLayer<D> standalone(features,batch),network_layer(features,batch);
+    LayerNormLayer<D> standalone(features),network_layer(features);
     for(auto* n:{&standalone,&network_layer}) {n->gamma=Matrix<D>(gamma);n->beta=Matrix<D>(beta);}
     Sequential<D> normalized_network{&network_layer};AdamWOptions same_options;same_options.weight_decay=0;
     AdamW<D> standalone_optimizer(standalone.parameters(),same_options),network_optimizer(normalized_network.parameters(),same_options);
@@ -317,7 +317,7 @@ static void normalization_checks() {
     close(host(standalone.gamma),host(network_layer.gamma),"standalone/Sequential normalization updated gamma",0);
     close(host(standalone.beta),host(network_layer.beta),"standalone/Sequential normalization updated beta",0);
 
-    LayerNormLayer<D> frozen_direct(features,batch);frozen_direct.gamma=Matrix<D>(gamma);frozen_direct.beta=Matrix<D>(beta);
+    LayerNormLayer<D> frozen_direct(features);frozen_direct.gamma=Matrix<D>(gamma);frozen_direct.beta=Matrix<D>(beta);
     auto frozen_refs=frozen_direct.parameters();std::list<Layer<D>*> frozen_net{&frozen_direct};
     const auto frozen_gm=host(frozen_direct.adam_g.m),frozen_gv=host(frozen_direct.adam_g.v),
                frozen_bm=host(frozen_direct.adam_b.m),frozen_bv=host(frozen_direct.adam_b.v);
@@ -336,7 +336,7 @@ static void normalization_checks() {
     }
     rejects([&]{layer.jvp(input,Matrix<D>::zeros(features+1,batch));},"normalization JVP shape");
     rejects([&]{layer.backward(input,Matrix<D>::zeros(features,batch+1));},"normalization backward shape");
-    LayerNormLayer<D> fresh(features,batch);
+    LayerNormLayer<D> fresh(features);
     rejects([&]{fresh.backward(input,Matrix<D>(dy));},"normalization backward requires eval");
     rejects([&]{fresh.jvp(input,Matrix<D>(dy));},"normalization JVP requires eval");
     fresh.eval(input);
@@ -345,7 +345,7 @@ static void normalization_checks() {
     rejects([&]{fresh.backward(input,Matrix<D>(dy));},"normalization failed eval invalidates backward");
     rejects([&]{fresh.jvp(input,Matrix<D>(dy));},"normalization failed eval invalidates JVP");
     fresh.forward(input);
-    rejects([&]{fresh.forward(Matrix<D>::zeros(features,batch+1));},"normalization invalid direct forward input");
+    rejects([&]{fresh.forward(Matrix<D>::zeros(features+1,batch));},"normalization invalid direct forward input");
     require(!fresh.has_forward,"normalization invalid direct forward discards old context");
     rejects([&]{fresh.backward(Matrix<D>(dy));},"normalization failed direct forward invalidates backward");
     rejects([&]{fresh.jvp(Matrix<D>(dy));},"normalization failed direct forward invalidates JVP");
@@ -353,7 +353,7 @@ static void normalization_checks() {
     // Public normalization tensors must be validated before raw GPU kernels
     // consume them; a failed eval also discards its old activation context.
     for(int mutation=0;mutation<7;++mutation) {
-        LayerNormLayer<D> malformed(features,batch);malformed.eval(input);
+        LayerNormLayer<D> malformed(features);malformed.eval(input);
         AdamW<D> malformed_optimizer(malformed.parameters());malformed_optimizer.zero_grad();
         const auto saved_gm=host(malformed.adam_g.m),saved_gv=host(malformed.adam_g.v),
                    saved_bm=host(malformed.adam_b.m),saved_bv=host(malformed.adam_b.v);
@@ -434,7 +434,7 @@ static void restart(const std::string& phase,const std::filesystem::path& output
     global_rand_gen.seed(phase=="prepare"?57:901);
     Shape shape{2,1,4,4,2,3,3,1,1,true};auto conv=convolution(shape,false);
     shape.ci=2;shape.co=1;shape.relu=false;auto trans=convolution(shape,true);
-    Layer<D> tanh_layer(5,16,2);ReluLayer<D> relu_layer(3,5,2);LayerNormLayer<D> norm(3,2);
+    Layer<D> tanh_layer(5,16,2);ReluLayer<D> relu_layer(3,5,2);LayerNormLayer<D> norm(3);
     auto labels=Matrix<float>::zeros(3,2);labels.elem(0,0)=1;labels.elem(2,1)=1;Matrix<D> target(labels);
     std::list<Layer<D>*> net{&norm,&relu_layer,&tanh_layer,trans.get(),conv.get()};
     Sequential<D> model(net);AdamWOptions options;options.lr=.003f;options.weight_decay=.03f;

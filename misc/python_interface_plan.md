@@ -400,3 +400,19 @@ for epoch in range(5):
 发现的问题：
 - 默认初始化（权重 N(0, 0.001²)，和 C++ 一样）对深的 ReLU 网络太小：rectified flow 的 4 层网络输出几乎恒为零，能不能训练起来看运气（4090 上卡住，ROCm 上碰巧能训练）。`rectified_flow.py` 改用 He 初始化。C++ 的 `demo_rectified` 用同样的默认初始化，也有这个风险。
 - C++ 的 `demo_transformer.cu` 和 `demo_rectified.cu` 只为 CUDA 和 Metal 选 GPU 类型，ROCm 构建下其实跑在 CPU 上。Python 版没有这个问题。
+
+## 15. 整数 token 与初学者默认值（2026-11-26）
+
+接口先给所有者看过并确认，再实现。四个设计方案、三位评审，选中的方案先做成原型，在 CPU 和 ROCm 上跑通后才进仓库。
+
+已定：
+- **整数不是矩阵。** 数值是 juzhen 矩阵（float32）；token 编号、类别编号是 numpy 整数数组或列表，每次调用时在主机上检查并拷贝。没有新的“编号”类型，C++ 里用已有的 `Matrix<int>`。浮点数组、布尔数组、juzhen 矩阵都不会被当成编号。
+- **嵌入层是网络的第一层。** `nn.Embedding(vocab, dim)` 之后网络的输入就是编号，形状 `(batch, seq_len)`；`parameters()`、优化器、`state_dict`、checkpoint 都不需要额外登记。位置向量是单独一层 `nn.PositionEmbedding(seq_len)`（也能接在非 token 的输入后面；忘写时构造网络会给一个警告）。`nn.Linear(V, tied=True)` 复用嵌入表做输出层，没有自己的参数。嵌入表在 Python 和 C++ 里都是 `(vocab, dim)`。
+- **损失不加新名字。** `softmax_cross_entropy`、`masked_softmax_cross_entropy`、`error_rate`、`fit`、`evaluate` 同时接受类别编号和 one-hot 矩阵；`ignore_index=-100`。整数数组永远是类别编号。
+- **默认初始化改在 C++ 构造函数里**（§14 记录的问题）：带 ReLU 的层 N(0, 2/fan_in)，其余 N(0, 1/fan_in)，偏置为 0，嵌入表 0.02，Transformer 和 LayerNorm 不变。`init=` 取 `"auto"` 或一个标准差。带种子的结果因此都变了一次；README 的 FID 表、TinyStories 基准和 notebook 输出是旧默认值下得到的。
+- **`LayerNorm` 不再有 batch 参数**（C++ 里按输入的列数调整缓存），`batch_size` 只剩“每批的样本数”一个意思。`evaluate()` 在固定 batch 的网络上把最后一批补齐、只统计真实样本。`net.copy(batch_size=1)` 给出生成用的单序列网络。
+- **`Loss` 是一个小类**，可以直接当数字用（`f"{loss:.4f}"`、`loss < 0.1`），仍可写 `value, grad = loss`；拿它做算术或调 `loss.backward()` 会说明该怎么写。
+- **报错在知道 Python 形状的地方生成**（`nn.py` 在进 C++ 之前检查）；C++ 的 `ERROR_OUT` 带上紧挨着的 `LOG_ERROR` 的原因；`load_checkpoint` 说明第一处不匹配。
+- GPU 上嵌入表的梯度累加用“按编号分组、每格一个写入者”的做法，不用 `atomicAdd`，同一个种子结果可重复。Metal 先用现有运算（设备 gather、主机累加、one-hot 组合的损失），不写新着色器。
+
+这次没做：矩阵之间的 `==` 和布尔掩码、`Sequential` 嵌套、跨设备加载 checkpoint、把 batch 大小放到 `Sequential` 上只说一次、采样器和学习率调度、4090 分支上的 text8/BPE/TinyStories/grokking 实验程序、把现有 one-hot 的 C++ 语言模型示例改成 token 层。

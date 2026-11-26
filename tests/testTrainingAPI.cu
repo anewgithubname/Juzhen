@@ -157,9 +157,9 @@ template<class D> void freezing_and_errors() {
     TransformerLayer<D> uninitialized(2,2,4,4,1,1,true);
     rejects([&]{uninitialized.backward(x,Matrix<D>(x));},"Transformer needs eval");
     rejects([&]{uninitialized.eval(Matrix<D>("bad",2,3));},"Transformer forward shape");
-    LayerNormLayer<D> norm(2,4);
+    LayerNormLayer<D> norm(2);
     rejects([&]{norm.backward(Matrix<D>(x));},"LayerNorm needs eval");
-    rejects([&]{norm.forward(Matrix<D>("bad",2,3));},"LayerNorm forward shape");
+    rejects([&]{norm.forward(Matrix<D>("bad",3,4));},"LayerNorm forward shape");
     auto norm_refs=norm.parameters();AdamW<D> norm_opt(norm_refs,settings);
     norm.forward(x);auto saved=host(norm.gamma);norm.backward(Matrix<D>(x));close(host(norm.gamma),saved,"layernorm deferred update",0);
     require(norm_opt.step()==2,"standalone LayerNorm gradients");
@@ -331,7 +331,7 @@ template<class D> void normalization_checks() {
         }
         for(int i=0;i<d;++i){db.elem(i,0)=float(bd[i]);}
         for(bool transposed:{false,true}){
-            LayerNormLayer<D> layer(d,n);layer.gamma=Matrix<D>(g);layer.beta=Matrix<D>(b);auto refs=layer.parameters();AdamW<D> opt(refs);
+            LayerNormLayer<D> layer(d);layer.gamma=Matrix<D>(g);layer.beta=Matrix<D>(b);auto refs=layer.parameters();AdamW<D> opt(refs);
             Matrix<D> input=transposed?Matrix<D>(transpose_storage(x)).T():Matrix<D>(x);
             Matrix<D> upstream=transposed?Matrix<D>(transpose_storage(up)).T():Matrix<D>(up);
             const std::string label="LayerNorm dim="+std::to_string(d)+" pattern="+std::to_string(pattern)+" transposed="+std::to_string(transposed);

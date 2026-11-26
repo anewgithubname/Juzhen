@@ -19,6 +19,28 @@ print(model.evaluate(X_test, Y_test))
 - Matrices live in Juzhen's memory pool, on the CPU or with `device="gpu"` on the
   GPU backend of the build. Converting to or from numpy copies.
 - Reading values (`.numpy()`, `.item()`, `print`) waits for the GPU.
+- Numbers are juzhen matrices. Whole numbers that name things are numpy integer
+  arrays or lists: class numbers for a loss (`model.fit(X, y)` with `y` holding
+  0..9 works; one-hot rows still do too) and token ids for a network that starts
+  with `nn.Embedding`.
+- Weights start at a scale that trains: N(0, 2/fan_in) in front of a ReLU,
+  N(0, 1/fan_in) otherwise, zero biases. `init=` on a layer overrides it with a
+  standard deviation.
+
+A language model on token ids is an ordinary `Sequential`:
+
+```python
+model = nn.Sequential(
+    nn.Embedding(vocab, 128),            # token ids -> vectors
+    nn.PositionEmbedding(seq_len),       # + a learned vector per position
+    nn.Transformer(128, 128, 512, seq_len, batch, heads=4),
+    nn.LayerNorm(),
+    nn.Linear(vocab, tied=True),         # scores from the embedding table
+    device="gpu")
+out = model(ids)                         # ids: integers, shape (batch, seq_len)
+loss = nn.softmax_cross_entropy(out, targets)   # targets: the next ids
+generator = model.copy(batch_size=1)     # the same weights, one sequence at a time
+```
 
 New to the library? Start with the notebook `examples/tutorial.ipynb`.
 
@@ -60,7 +82,7 @@ The scripts in `examples/` run on the GPU when the build has one; `--device cpu`
 | `demo_mnist.py` | an MLP on MNIST, step by step | `demo_mnist.cu` |
 | `cnn_mnist.py` | convolutions on MNIST | `demo_cnn_mnist.cu` |
 | `rectified_flow.py` | a generative flow; `hstack`, Euler sampling | `demo_rectified.cu` |
-| `transformer_charlm.py` | a character transformer LM; `one_hot` on the device, `state_dict()` into a batch-1 network | `demo_transformer.cu` |
+| `transformer_charlm.py` | a character transformer LM on token ids: `Embedding`, `PositionEmbedding`, a tied output, `copy(batch_size=1)` for generation | `demo_transformer.cu` (one-hot), `demo_llm_tokens.cu` |
 | `knn.py` | k nearest neighbours with `topk` | `knn.cu` |
 
 See `misc/python_interface_plan.md` for the design.

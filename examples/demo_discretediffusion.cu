@@ -254,9 +254,9 @@ int compute() {
         return v;
     };
 
-    LinearLayer<FLOAT> embed(d_model, in_dim, N);
+    LinearLayer<FLOAT> embed(d_model, in_dim, N, Init::normal(0.001f));
     auto blocks = make_blocks(batch);
-    LinearLayer<FLOAT> proj(V, d_model, N);
+    LinearLayer<FLOAT> proj(V, d_model, N, Init::normal(0.001f));
 
     // Best-model snapshot for early stopping. It only ever stores weights (via
     // copy_*_weights below) and never runs a forward/backward pass, so we build

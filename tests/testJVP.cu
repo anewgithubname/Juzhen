@@ -58,7 +58,7 @@ int check_network(list<Layer<D>*> nn, int d_in, int nb, const string& name,
     // artifact disappears once eps drops below the kink distance, whereas a
     // genuine JVP bug stays at every step size.
     float fd_err = FLT_MAX;
-    for (float e : { eps, eps * 0.25f, eps * 0.0625f }) {
+    for (float e : { eps, eps * 0.25f, eps * 0.0625f, eps / 64, eps / 256 }) {
         Matrix<D> fp = forward(nn, x + e * u);
         Matrix<D> fm = forward(nn, x - e * u);
         auto fd = (fp - fm) * (0.5f / e);
@@ -80,7 +80,7 @@ int check_network(list<Layer<D>*> nn, int d_in, int nb, const string& name,
 }
 
 // ── MLP: tanh -> relu -> linear ─────────────────────────────────────────
-// Rescale weights: the default 1e-3 init makes outputs vanishingly small.
+// Rescale weights and give the biases values, so every term of the JVP is exercised.
 template <class D>
 int run_mlp(const string& tag) {
     const int nb = 4;
@@ -236,7 +236,7 @@ int run_parity() {
 template <class D>
 int check_layernorm_jvp_dimensions(const char* backend) {
     constexpr int dim = 6, tokens = 3;
-    LayerNormLayer<D> layer(dim, tokens);
+    LayerNormLayer<D> layer(dim);
     layer.forward(Matrix<D>::ones(dim, tokens));
     for (const auto shape : {std::pair{5, 3}, std::pair{7, 3},
                              std::pair{6, 2}, std::pair{6, 4}}) {
@@ -279,7 +279,7 @@ int check_device_layernorm_jvp(const char* backend) {
                     u.elem(r, c) = std::cos(0.13f * r - 0.29f * c);
                 }
             }
-            LayerNormLayer<Dev> layer(dim, tokens);
+            LayerNormLayer<Dev> layer(dim);
             layer.set_gamma(Matrix<Dev>(gamma));
             layer.set_beta(Matrix<Dev>(beta));
             layer.forward(Matrix<Dev>(x));
