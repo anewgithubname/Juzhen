@@ -23,6 +23,7 @@ its device once the input size is known.
 import copy
 import math
 import warnings
+import weakref
 
 import numpy as np
 
@@ -164,7 +165,10 @@ class Embedding(Layer):
 
     takes_ids = True
 
-    def __init__(self, vocab, dim, init=0.02):
+    def __init__(self, vocab, dim, *extra, init=0.02):
+        if extra:
+            raise TypeError(f"Embedding(vocab, dim) takes two numbers, got a third ({extra[0]!r}); the "
+                            f"standard deviation of the starting values is given by name: init={extra[0]!r}")
         self.vocab, self.dim = _size(vocab, "Embedding: vocab"), _size(dim, "Embedding: dim")
         self.init = init
         self._init = _init_args(init, "Embedding")
@@ -188,7 +192,11 @@ class PositionEmbedding(Layer):
     are not an Embedding.
     """
 
-    def __init__(self, seq_len, init=0.02):
+    def __init__(self, seq_len, *extra, init=0.02):
+        if extra:
+            raise TypeError(f"PositionEmbedding(seq_len) takes one number, got a second ({extra[0]!r}): the "
+                            "width of the vectors comes from the layer before it. The standard deviation "
+                            f"of the starting values is given by name: init={extra[0]!r}")
         self.seq_len = _size(seq_len, "PositionEmbedding: seq_len")
         self.init = init
         self._init = _init_args(init, "PositionEmbedding")
@@ -286,6 +294,12 @@ class ConvTranspose2d(Conv2d):
 
     _core_name = "ConvTranspose2d"
 
+    def __init__(self, in_channels, out_channels, kernel_size, image_size, batch_size,
+                 padding=0, stride=1, relu=True, init="auto"):
+        # its own constructor, so that a wrong argument is reported under this name
+        super().__init__(in_channels, out_channels, kernel_size, image_size, batch_size,
+                         padding=padding, stride=stride, relu=relu, init=init)
+
     def output_size(self):
         return ((self.h - 1) * self.stride - 2 * self.padding + self.kh,
                 (self.w - 1) * self.stride - 2 * self.padding + self.kw)
@@ -364,6 +378,8 @@ class Sequential:
         self._impls = None
         self._net = None
         self._out_shape = None
+        self._last_call = None   # "predict" or "jvp" when that ran after the last forward
+        self._calls = 0          # how many times the network has been called (see backward())
 
         self.takes_ids = self.layers[0].takes_ids
         for k, layer in enumerate(self.layers[1:], 1):
@@ -494,7 +510,9 @@ class Sequential:
         """
         ids = self._check(x)
         out = self._net.forward(x) if ids is None else self._net.forward_ids(*ids)
-        self._out_shape = out.shape
+        self._out_shape, self._last_call = out.shape, None
+        self._calls += 1
+        _note(_outputs, out, self, self._calls)
         return out
 
     forward = __call__
@@ -502,8 +520,14 @@ class Sequential:
     def predict(self, x):
         """The output without keeping x (no backward() afterwards)."""
         ids = self._check(x)
-        self._out_shape = None
+        self._forget("predict")
         return self._net.predict(x) if ids is None else self._net.predict_ids(*ids)
+
+    def _forget(self, call):
+        """predict() and jvp() overwrite what the layers kept for backward()."""
+        if self._out_shape is not None:
+            self._last_call = call
+        self._out_shape = None
 
     def backward(self, grad):
         """Back-propagate grad, the loss gradient for the last output.
@@ -518,8 +542,20 @@ class Sequential:
         if not isinstance(grad, jz.Matrix):
             raise TypeError(f"backward() takes a juzhen matrix (loss.grad), got {type(grad).__name__}")
         if self._out_shape is None:
+            if self._last_call:
+                raise RuntimeError(f"backward() must follow the net(x) call its loss came from, but "
+                                   f"{self._last_call}() ran in between and replaced what that call kept. "
+                                   f"Call {self._last_call}() before net(x) or after backward()")
             raise RuntimeError("call the network on a batch before backward(): out = net(x) "
                                "(predict() does not keep what backward needs)")
+        call = _find(_gradients, grad)
+        if call is not None and call[0] is self and call[1] != self._calls:
+            raise RuntimeError("backward(): this gradient belongs to an earlier output of the network, but "
+                               "the network has been called again since, and backward() works on what the "
+                               "last call kept, so the result would be wrong. Call backward() before the "
+                               "next net(x). For an output that needs no backward (validation, sampling) "
+                               "use net.predict(x); to train on two batches in one step, stack them with "
+                               "jz.vstack and call the network once")
         if grad.device != self.device:
             raise ValueError(f"the gradient is on '{grad.device}' but the network is on '{self.device}'; "
                              f"use grad.to('{self.device}')")
@@ -542,7 +578,7 @@ class Sequential:
         if tangent.shape != x.shape:
             raise ValueError(f"the tangent has shape {tangent.shape} but x has shape {x.shape}; "
                              "they must be the same")
-        self._out_shape = None
+        self._forget("jvp")
         return self._net.jvp(x, tangent)
 
     def parameters(self):
@@ -620,27 +656,38 @@ class Sequential:
                 raise ValueError(f"{what}: X must have shape (sequences, {self.seq_len}), one row of token "
                                  f"ids per sequence; got {X.shape}")
         else:
-            X = jz.data._host(X)
-        if not isinstance(Y, jz.Matrix):
-            Y = np.asarray(Y)
-            if Y.dtype.kind in "USO":
-                raise TypeError(f"{what}: Y holds text or objects ({Y.dtype}); labels must be class numbers, "
-                                "for example np.unique(Y, return_inverse=True)[1]")
-            if loss == "cross_entropy":
-                per_row = Y.ndim == 1 or (Y.ndim == 2 and Y.shape[1] == 1)
-                if Y.dtype.kind in "iu":
-                    if not self.takes_ids and not per_row:
-                        raise ValueError(f"{what}: Y is an integer array of shape {Y.shape}. Whole numbers "
-                                         "are class numbers, one per sample; for one-hot rows pass "
-                                         "Y.astype('float32'), or pass the class numbers Y.argmax(1)")
-                    if len(Y) != len(X):
-                        raise ValueError(f"X has {len(X)} rows but Y has {len(Y)}")
-                    return X, Y  # class numbers, one per row (or per token)
-                if per_row:
-                    raise TypeError(f"{what}: Y holds {Y.dtype} values, one per sample, but cross_entropy "
-                                    "needs class numbers (whole numbers) or one-hot rows; for class "
-                                    "numbers use Y.astype(int)")
-        return X, jz.data._host(Y)
+            X = _finite(jz.data._host(X), "X", what)
+        Y = np.asarray(Y.numpy() if isinstance(Y, jz.Matrix) else Y)
+        if Y.dtype.kind in "USO":
+            raise TypeError(f"{what}: Y holds text or objects ({Y.dtype}); labels must be class numbers, "
+                            "for example np.unique(Y, return_inverse=True)[1]")
+        if loss == "cross_entropy":
+            per_row = Y.ndim == 1 or (Y.ndim == 2 and Y.shape[1] == 1)
+            if Y.dtype.kind in "iu":
+                if not self.takes_ids and not per_row:
+                    raise ValueError(f"{what}: Y is an integer array of shape {Y.shape}. Whole numbers "
+                                     "are class numbers, one per sample; for one-hot rows pass "
+                                     "Y.astype('float32'), or pass the class numbers Y.argmax(1)")
+                if len(Y) != len(X):
+                    raise ValueError(f"X has {len(X)} rows but Y has {len(Y)}")
+                return X, Y  # class numbers, one per row (or per token)
+            if per_row:
+                raise TypeError(f"{what}: Y holds {Y.dtype} values, one per sample, but loss='cross_entropy' "
+                                "needs class numbers (whole numbers) or one-hot rows. If they are class "
+                                f"numbers use Y.astype(int); for a regression pass loss='mse' to {what}()")
+        Y = _finite(jz.data._host(Y), "Y", what)
+        if loss == "cross_entropy":
+            # the rows must be one-hot rows or probabilities (an all-zero row counts for nothing)
+            totals = Y.sum(axis=1, dtype=np.float64)
+            wrong = (Y.min(axis=1) < 0) | ((np.abs(totals - 1) > 1e-3) & (np.abs(Y).max(axis=1) > 0))
+            if wrong.any():
+                row = int(np.argmax(wrong))
+                shown = ", ".join(f"{v:.4g}" for v in Y[row, :4]) + (", ..." if Y.shape[1] > 4 else "")
+                raise ValueError(f"{what}: with loss='cross_entropy' each row of a float Y must be a one-hot "
+                                 f"row or probabilities (not negative, summing to 1), but row {row} is "
+                                 f"[{shown}]. For a regression pass loss='mse' to {what}(); for class "
+                                 "numbers pass whole numbers, one per sample")
+        return X, Y
 
     def _batch(self, X, batch_size, default, what):
         """Samples per batch and rows per sample, respecting layers with a fixed batch."""
@@ -732,16 +779,65 @@ class Sequential:
         return result
 
 
+def _finite(a, name, what):
+    """a (host float data for fit or evaluate), refused if it holds nan or inf.
+
+    A ReLU layer turns nan into 0, so such data would train without an error
+    and leave nan in the weights.
+    """
+    # one pass without a temporary: float32 values cannot overflow a float64 sum,
+    # so the sum is nan or inf exactly when one of the values is
+    if not math.isfinite(float(a.sum(dtype=np.float64))):
+        bad = ~np.isfinite(a)
+        row, col = (int(i) for i in np.argwhere(bad)[0])
+        count = int(bad.sum())
+        others = "" if count == 1 else f" ({count} such values in all)"
+        raise ValueError(f"{what}: {name} holds {a[row, col]} at row {row}, column {col}{others}. A network "
+                         "cannot learn from nan or inf: drop those rows or fill the values in first, "
+                         f"for example {name}[np.isfinite({name}).all(axis=1)]")
+    return a
+
+
 # ----------------------------------------------------------------------
 # Losses (ml/loss.hpp). Each returns the value (1 x 1, averaged over the
 # batch) and its gradient with respect to the prediction.
+
+# Which call of which network made each recent output, and which of those
+# calls each recent loss gradient belongs to. Sequential.backward() uses it
+# to refuse a gradient whose output the network has since replaced: the
+# layers keep only what the last call needs. Weak references, so nothing is
+# kept alive; a gradient the user computed is not listed and is not checked.
+_outputs = []    # (weak reference to an output, weak reference to its network, number of the call)
+_gradients = []  # (weak reference to a loss gradient, the same two)
+
+
+def _note(table, matrix, net, call):
+    table[:] = [entry for entry in table[-7:] if entry[0]() is not None]
+    table.append((weakref.ref(matrix), net if isinstance(net, weakref.ref) else weakref.ref(net), call))
+
+
+def _find(table, matrix):
+    """(network, number of the call) noted for matrix, or None."""
+    for noted, net, call in table:
+        if noted() is matrix:
+            return net(), call
+    return None
+
+
+def _made(prediction, value, grad):
+    """The Loss of a loss function; notes which network call grad belongs to."""
+    for noted, net, call in _outputs:
+        if noted() is prediction:
+            _note(_gradients, grad, net, call)
+            break
+    return Loss(value, grad)
 
 
 class Loss:
     """What a loss function returns: value (1 x 1) and grad (shaped like the prediction).
 
     It can be used where its number is wanted: ``f"{loss:.4f}"``,
-    ``float(loss)``, ``loss < 0.1``; each of them waits for the GPU, as
+    ``float(loss)``, ``loss < 0.1``, ``loss == 0``; each of them waits for the GPU, as
     loss.item() does. ``value, grad = loss`` unpacks it. To keep a history,
     store loss.item(): a stored Loss keeps its whole gradient alive.
     """
@@ -772,6 +868,19 @@ class Loss:
     def __repr__(self):
         rows, cols = self.grad.shape
         return f"Loss({self.value.item():.6g}, grad: {rows} x {cols} on '{self.grad.device}')"
+
+    def __eq__(self, other):
+        if isinstance(other, Loss):
+            return self.value.item() == other.value.item()
+        if isinstance(other, (int, float, np.number)):
+            return self.value.item() == float(other)
+        return NotImplemented
+
+    def __ne__(self, other):
+        equal = self.__eq__(other)
+        return equal if equal is NotImplemented else not equal
+
+    __hash__ = object.__hash__
 
     def __lt__(self, other):
         return self.value.item() < float(other)
@@ -871,7 +980,19 @@ def _class_numbers(labels, scores, ignore_index, what):
 def _one_per_class(logits, what):
     if logits.shape[1] == 1:
         raise ValueError(f"{what} needs one output per class, but the logits have 1 column. For two "
-                         "classes end the network with Linear(2) and use the labels 0 and 1")
+                         "classes end the network with Linear(2) and use the labels 0 and 1; for a "
+                         "regression use nn.mse (loss='mse' in fit and evaluate)")
+
+
+def _ignore(ignore_index, labels, what):
+    """ignore_index as an int: the class number that marks rows to skip."""
+    if isinstance(ignore_index, bool) or not isinstance(ignore_index, (int, np.integer)):
+        raise TypeError(f"{what}: ignore_index must be a whole number (the label that marks the rows to "
+                        f"skip), got {ignore_index!r}")
+    if ignore_index != -100 and isinstance(labels, jz.Matrix):
+        raise ValueError(f"{what}: ignore_index={ignore_index} has no effect on a matrix of one-hot rows; "
+                         "it marks rows to skip among class numbers (a numpy integer array or a list)")
+    return int(ignore_index)
 
 
 def softmax_cross_entropy(logits, labels, ignore_index=-100):
@@ -884,19 +1005,20 @@ def softmax_cross_entropy(logits, labels, ignore_index=-100):
     """
     what = "softmax_cross_entropy"
     _one_per_class(_prediction(logits, what), what)
+    ignore_index = _ignore(ignore_index, labels, what)
     core = _core_of(logits)
     if isinstance(labels, jz.Matrix):
         _same(logits, labels, what, "logits", "labels", _labels_remedy(logits, labels))
-        return Loss(*core.softmax_cross_entropy(logits, labels))
+        return _made(logits, *core.softmax_cross_entropy(logits, labels))
     numbers = _class_numbers(labels, logits, ignore_index, what)
-    return Loss(*core.softmax_cross_entropy_labels(logits, numbers, int(ignore_index)))
+    return _made(logits, *core.softmax_cross_entropy_labels(logits, numbers, ignore_index))
 
 
 def mse(prediction, target):
     """Squared error summed over outputs, averaged over the batch."""
     _same(_prediction(prediction, "mse", "prediction"), target, "mse", "prediction", "target",
           ". The target needs one row per sample and one column per output")
-    return Loss(*_core_of(prediction).mse(prediction, target))
+    return _made(prediction, *_core_of(prediction).mse(prediction, target))
 
 
 def masked_softmax_cross_entropy(logits, labels, weights, ignore_index=-100):
@@ -908,6 +1030,7 @@ def masked_softmax_cross_entropy(logits, labels, weights, ignore_index=-100):
     """
     what = "masked_softmax_cross_entropy"
     _one_per_class(_prediction(logits, what), what)
+    ignore_index = _ignore(ignore_index, labels, what)
     core = _core_of(logits)
     if isinstance(weights, jz.Matrix):
         if weights.device != logits.device:
@@ -921,11 +1044,11 @@ def masked_softmax_cross_entropy(logits, labels, weights, ignore_index=-100):
         weights = jz.array(weights, device=logits.device)
     if isinstance(labels, jz.Matrix):
         _same(logits, labels, what, "logits", "labels", _labels_remedy(logits, labels))
-        return Loss(*core.masked_softmax_cross_entropy(logits, labels, weights))
+        return _made(logits, *core.masked_softmax_cross_entropy(logits, labels, weights))
     numbers = _class_numbers(labels, logits, ignore_index, what)
     if weights.shape != (logits.shape[0], 1):
         raise ValueError(f"{what}: weights must have shape ({logits.shape[0]}, 1), got {weights.shape}")
-    return Loss(*core.masked_softmax_cross_entropy_labels(logits, numbers, weights, int(ignore_index)))
+    return _made(logits, *core.masked_softmax_cross_entropy_labels(logits, numbers, weights, ignore_index))
 
 
 def error_rate(scores, labels, ignore_index=-100):
@@ -935,11 +1058,12 @@ def error_rate(scores, labels, ignore_index=-100):
     """
     what = "error_rate"
     _prediction(scores, what, "scores")
+    ignore_index = _ignore(ignore_index, labels, what)
     if isinstance(labels, jz.Matrix):
         _same(scores, labels, what, "scores", "labels", _labels_remedy(scores, labels))
         return _core_of(scores).error_rate(scores, labels)
     numbers = _class_numbers(labels, scores, ignore_index, what)
-    return _core_of(scores).error_rate_labels(scores, numbers, int(ignore_index))
+    return _core_of(scores).error_rate_labels(scores, numbers, ignore_index)
 
 
 def _loss_function(name):

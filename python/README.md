@@ -19,6 +19,10 @@ print(model.evaluate(X_test, Y_test))
 - Matrices live in Juzhen's memory pool, on the CPU or with `device="gpu"` on the
   GPU backend of the build. Converting to or from numpy copies.
 - Reading values (`.numpy()`, `.item()`, `print`) waits for the GPU.
+- Comparisons work element by element and give a matrix of 1s and 0s:
+  `(A > 0) * A`, `jz.mean(A == B)`. A numpy array has to be made a matrix
+  first (`jz.array(y)`); for the accuracy of a classifier use
+  `1 - jz.nn.error_rate(scores, labels)`.
 - Numbers are juzhen matrices. Whole numbers that name things are numpy integer
   arrays or lists: class numbers for a loss (`model.fit(X, y)` with `y` holding
   0..9 works; one-hot rows still do too) and token ids for a network that starts
@@ -27,19 +31,41 @@ print(model.evaluate(X_test, Y_test))
   N(0, 1/fan_in) otherwise, zero biases. `init=` on a layer overrides it with a
   standard deviation.
 
-A language model on token ids is an ordinary `Sequential`:
+A language model on token ids is an ordinary `Sequential`. This one learns
+to continue a repeating sequence, with the training step written out:
 
 ```python
+import numpy as np
+import juzhen as jz
+from juzhen import nn, optim
+
+vocab, seq_len, batch = 16, 8, 32
+device = "gpu" if jz.has_gpu() else "cpu"
 model = nn.Sequential(
-    nn.Embedding(vocab, 128),            # token ids -> vectors
+    nn.Embedding(vocab, 64),             # token ids -> vectors
     nn.PositionEmbedding(seq_len),       # + a learned vector per position
-    nn.Transformer(128, 128, 512, seq_len, batch, heads=4),
+    nn.Transformer(64, 64, 256, seq_len, batch, heads=4),
     nn.LayerNorm(),
     nn.Linear(vocab, tied=True),         # scores from the embedding table
-    device="gpu")
-out = model(ids)                         # ids: integers, shape (batch, seq_len)
-loss = nn.softmax_cross_entropy(out, targets)   # targets: the next ids
-generator = model.copy(batch_size=1)     # the same weights, one sequence at a time
+    device=device)
+opt = optim.AdamW(model.parameters(), lr=3e-3)
+
+rng = np.random.default_rng(0)
+for step in range(200):
+    start = rng.integers(0, vocab, (batch, 1))
+    ids = (start + np.arange(seq_len + 1)) % vocab     # integers, shape (batch, seq_len + 1)
+    out = model(ids[:, :-1])                           # one row of scores per token
+    loss = nn.softmax_cross_entropy(out, ids[:, 1:])   # the targets are the next ids
+    opt.zero_grad()
+    model.backward(loss.grad)                          # no autograd: the loss hands over its gradient
+    opt.step()
+print(f"loss {loss:.3f}")
+
+# After training: a copy of the weights as they are now, for one sequence at a
+# time. The copy does not follow later training of `model`.
+generator = model.copy(batch_size=1)
+prompt = np.arange(3, 3 + seq_len)[None, :] % vocab
+print("next token:", int(jz.argmax(generator.predict(prompt))[-1, 0]))   # 11
 ```
 
 New to the library? Start with the notebook `examples/tutorial.ipynb`.
@@ -52,6 +78,9 @@ case; Python cannot tell that `A @ B` is a temporary. On large matrices,
 scale or accumulate in place instead:
 
 ```python
+n = 2000
+A1, A2, A3 = jz.randn(n, n), jz.randn(n, n), jz.zeros(n, n)
+
 A3 += A1 @ A2 / n        # one extra matrix and pass over memory for "/ n"
 
 C = A1 @ A2              # the same result without it

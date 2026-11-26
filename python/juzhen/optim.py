@@ -1,8 +1,17 @@
 """Optimizers. The update itself runs in C++ (ml/optimizer.hpp), one call per step."""
 
+import math
+
+import numpy as np
+
 import juzhen as jz
 
 __all__ = ["AdamW"]
+
+
+def _is_number(value):
+    """A Python or numpy number (np.float32(0.01) is not a float, but is as good)."""
+    return isinstance(value, (int, float, np.integer, np.floating)) and not isinstance(value, (bool, np.bool_))
 
 
 class AdamW:
@@ -17,11 +26,14 @@ class AdamW:
             raise TypeError("AdamW takes the network's parameters: optim.AdamW(net.parameters(), lr=...)")
         if not hasattr(params, "device"):
             raise TypeError(f"AdamW takes net.parameters(), got {type(params).__name__}")
-        for name, value, low in (("lr", lr, 0), ("weight_decay", weight_decay, 0), ("eps", eps, None)):
-            if not isinstance(value, (int, float)) or value != value or value in (float("inf"),) \
-                    or (low is not None and value < low) or (low is None and value <= 0):
-                rule = "0 or more" if low is not None else "more than 0"
+        for name, value, positive in (("lr", lr, False), ("weight_decay", weight_decay, False), ("eps", eps, True)):
+            rule = "more than 0" if positive else "0 or more"
+            if not _is_number(value):
+                raise TypeError(f"AdamW: {name} must be a number ({rule}), got {type(value).__name__}: {value!r}")
+            if not math.isfinite(value) or value < 0 or (positive and value == 0):
                 raise ValueError(f"AdamW: {name} must be {rule}, got {value}")
+        if not isinstance(betas, (tuple, list)) or len(betas) != 2 or not all(_is_number(b) for b in betas):
+            raise TypeError(f"AdamW: betas must be two numbers such as (0.9, 0.999), got {betas!r}")
         if not (0 <= betas[0] < 1 and 0 <= betas[1] < 1):
             raise ValueError(f"AdamW: both betas must be at least 0 and below 1, got {tuple(betas)}")
         core = jz._device(params.device)

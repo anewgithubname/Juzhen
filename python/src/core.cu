@@ -138,6 +138,11 @@ std::string shape_str(const Matrix<D> &m) {
     return shape_str(m.num_row(), m.num_col());
 }
 
+void sized(size_t rows, size_t cols) {
+    if (rows == 0 || cols == 0)
+        throw std::invalid_argument("juzhen matrices cannot be empty, got shape " + shape_str(rows, cols));
+}
+
 // ---------------------------------------------------------------------------
 // numpy
 
@@ -282,6 +287,51 @@ Matrix<D> matmul(const Matrix<D> &a, const Matrix<D> &b) {
 }
 
 // ---------------------------------------------------------------------------
+// Elementwise comparisons. The result is a matrix of 1s and 0s (floats, like
+// every juzhen matrix), so it can be used in arithmetic: (A > 0) * A.
+
+enum class Cmp { eq, ne, lt, le, gt, ge };
+
+// x compared with the number s, element by element
+template <class D>
+Matrix<D> compare(const Matrix<D> &a, float s, Cmp op) {
+    const int o = (int)op;
+    return elemwise([=] __GPU_CPU__(float x) {
+        const bool r = o == 0 ? x == s : o == 1 ? x != s : o == 2 ? x < s : o == 3 ? x <= s : o == 4 ? x > s : x >= s;
+        return r ? 1.0f : 0.0f;
+    }, a);
+}
+
+// Two matrices (broadcast like the arithmetic) are compared through their
+// difference, which every device computes. One consequence: where both hold
+// the same infinity the difference is nan, and they compare as different.
+template <class D>
+Matrix<D> compare(const Matrix<D> &a, const Matrix<D> &b, Cmp op) {
+    const size_t rows = std::max(a.num_row(), b.num_row());
+    const size_t cols = std::max(a.num_col(), b.num_col());
+    static const char *symbols[] = {"==", "!=", "<", "<=", ">", ">="};
+    if (!fits(a.num_row(), rows) || !fits(b.num_row(), rows) || !fits(a.num_col(), cols) ||
+        !fits(b.num_col(), cols))
+        throw std::invalid_argument("shapes " + shape_str(a) + " and " + shape_str(b) +
+                                    " cannot be broadcast together for " + symbols[(int)op]);
+    const int o = (int)op;
+    return elemwise([=] __GPU_CPU__(float d) {
+        const bool r = o == 0 ? d == 0 : o == 1 ? d != 0 : o == 2 ? d < 0 : o == 3 ? d <= 0 : o == 4 ? d > 0 : d >= 0;
+        return r ? 1.0f : 0.0f;
+    }, binary(a, b, Op::sub));
+}
+
+// if A == B: a matrix is true or false only when it holds one value
+template <class D>
+bool truth(const Matrix<D> &m) {
+    if (m.num_row() != 1 || m.num_col() != 1)
+        throw std::invalid_argument("a matrix of shape " + shape_str(m) + " is not one True or False. A comparison "
+                                    "such as A == B gives a matrix of 1s and 0s; to ask whether all (or any) of "
+                                    "them hold use (A == B).numpy().all() or .any()");
+    return host(m).elem(0, 0) != 0;
+}
+
+// ---------------------------------------------------------------------------
 // Elementwise functions and reductions
 
 template <class D>
@@ -331,9 +381,8 @@ size_t position(nb::handle item, size_t n) {
     // True and False would pass as 1 and 0: X[y == 2] and X[[True, False]] must not
     if (PyBool_Check(item.ptr()) || std::string(Py_TYPE(item.ptr())->tp_name) == "numpy.bool" ||
         std::string(Py_TYPE(item.ptr())->tp_name) == "numpy.bool_")
-        throw nb::type_error("a matrix cannot be indexed with True or False (comparing two matrices with == "
-                             "gives one bool, not a mask); use row numbers, for example "
-                             "X[np.flatnonzero(labels == 2)] with numpy labels");
+        throw nb::type_error("a matrix cannot be indexed with True or False (masks are not supported); use "
+                             "row numbers, for example X[np.flatnonzero(labels == 2)] with numpy labels");
     nb::object index = nb::steal(PyNumber_Index(item.ptr()));
     if (!index.is_valid()) throw nb::python_error();
     Py_ssize_t i = PyLong_AsSsize_t(index.ptr());
@@ -358,6 +407,10 @@ Index parse_index(nb::handle key, size_t n) {
                 index.list.push_back((size_t)(start + (Py_ssize_t)k * step));
         }
     } else if (PySequence_Check(key.ptr())) {  // a list or an array of ints
+        const std::string type = Py_TYPE(key.ptr())->tp_name;
+        if (type == "juzhen._core.cpu.Matrix" || type == "juzhen._core.gpu.Matrix")
+            throw nb::type_error("a matrix cannot be indexed with a matrix (masks are not supported); use row "
+                                 "numbers, for example X[np.flatnonzero((A > 0).numpy())] for an n x 1 mask");
         index.contiguous = false;
         for (nb::handle item : key)
             index.list.push_back(position(item, n));
@@ -976,7 +1029,10 @@ void bind_training(nb::module_ &sub) {
 template <class D>
 void bind(nb::module_ &top, nb::module_ &sub) {
     using Mat = Matrix<D>;
-    auto cls = nb::class_<Mat>(sub, "Matrix", "A float32 matrix in Juzhen's memory pool.")
+    // weak references let nn.py remember which output a loss came from
+    // without keeping the matrices alive
+    auto cls = nb::class_<Mat>(sub, "Matrix", nb::is_weak_referenceable(),
+                               "A float32 matrix in Juzhen's memory pool.")
         .def_prop_ro("shape", [](const Mat &m) { return std::make_tuple(m.num_row(), m.num_col()); })
         .def_prop_ro("device", [](const Mat &) { return device_name<D>(); })
         .def_prop_ro("T", [](const Mat &m) { return transposed(m); }, "The transpose; shares storage, no copy.")
@@ -994,6 +1050,7 @@ void bind(nb::module_ &top, nb::module_ &sub) {
         .def("__getitem__", &get_item<D>)
         .def("__repr__", &repr<D>)
         .def("__len__", [](const Mat &m) { return m.num_row(); })
+        .def("__bool__", &truth<D>)
         .def("__matmul__", &matmul<D>)
         .def("__add__", [](const Mat &a, const Mat &b) { return binary(a, b, Op::add); })
         .def("__sub__", [](const Mat &a, const Mat &b) { return binary(a, b, Op::sub); })
@@ -1021,6 +1078,43 @@ void bind(nb::module_ &top, nb::module_ &sub) {
         .def("__imul__", [](Mat &a, double s) -> Mat & { a.scale((float)s); return a; }, nb::rv_policy::none)
         .def("__itruediv__", [](Mat &a, double s) -> Mat & { a.scale((float)(1.0 / s)); return a; }, nb::rv_policy::none);
 
+    // Comparisons, element by element. Anything that is not a matrix or a
+    // number is "not equal" for == and != (as for any Python object) and a
+    // TypeError for the ordering operators; numpy arrays and lists get a
+    // message of their own.
+    {
+        const std::tuple<const char *, Cmp> comparisons[] = {
+            {"__eq__", Cmp::eq}, {"__ne__", Cmp::ne}, {"__lt__", Cmp::lt},
+            {"__le__", Cmp::le}, {"__gt__", Cmp::gt}, {"__ge__", Cmp::ge}};
+        for (const auto &[name, op] : comparisons) {
+            const Cmp c = op;
+            cls.def(name, [c](const Mat &a, const Mat &b) { return compare(a, b, c); });
+            cls.def(name, [c](const Mat &a, nb::handle other) -> nb::object {
+                const std::string type = Py_TYPE(other.ptr())->tp_name;
+                // a Python or numpy number (handled here, not by a `double`
+                // overload: this overload would win for an int and say
+                // "not comparable")
+                if (PyFloat_Check(other.ptr()) || PyLong_Check(other.ptr()) ||
+                    (type.rfind("numpy.", 0) == 0 && type != "numpy.ndarray" && PyNumber_Check(other.ptr()))) {
+                    const double s = PyFloat_AsDouble(other.ptr());
+                    if (s == -1.0 && PyErr_Occurred()) throw nb::python_error();
+                    return nb::cast(compare(a, (float)s, c));
+                }
+                if (type == "numpy.ndarray" || type == "list" || type == "tuple")
+                    throw nb::type_error(("a juzhen matrix cannot be compared with a " + type +
+                                          "; make it a matrix first: jz.array(a, device='" + device_name<D>() +
+                                          "'), which turns a 1-D array of n values into n x 1. For the accuracy "
+                                          "of a classifier use 1 - nn.error_rate(scores, labels)").c_str());
+#ifdef JZ_HAS_GPU
+                if (type == (std::is_same_v<D, float> ? "juzhen._core.gpu.Matrix" : "juzhen._core.cpu.Matrix"))
+                    throw std::invalid_argument(std::string("the matrices are on different devices; move one with "
+                                                            ".to('") + device_name<D>() + "')");
+#endif
+                return nb::borrow(Py_NotImplemented);
+            }, nb::arg("other").none());
+        }
+    }
+
     // A numpy array (or a list) next to a matrix: say how to convert it.
     for (const char *op : {"__add__", "__radd__", "__sub__", "__rsub__", "__mul__", "__rmul__", "__truediv__",
                            "__rtruediv__", "__matmul__", "__rmatmul__", "__iadd__", "__isub__"})
@@ -1047,10 +1141,11 @@ void bind(nb::module_ &top, nb::module_ &sub) {
 #endif
 
     sub.def("from_numpy", &from_numpy<D>, "array"_a);
-    sub.def("zeros", [](size_t r, size_t c) { return Mat::zeros(r, c); }, "rows"_a, "cols"_a);
-    sub.def("ones", [](size_t r, size_t c) { return Mat::ones(r, c); }, "rows"_a, "cols"_a);
-    sub.def("randn", [](size_t r, size_t c) { return Mat::randn(r, c); }, "rows"_a, "cols"_a);
-    sub.def("rand", [](size_t r, size_t c) { return Mat::rand(r, c); }, "rows"_a, "cols"_a);
+    // juzhen/__init__.py checks the sizes and says what to write; sized() is the backstop
+    sub.def("zeros", [](size_t r, size_t c) { sized(r, c); return Mat::zeros(r, c); }, "rows"_a, "cols"_a);
+    sub.def("ones", [](size_t r, size_t c) { sized(r, c); return Mat::ones(r, c); }, "rows"_a, "cols"_a);
+    sub.def("randn", [](size_t r, size_t c) { sized(r, c); return Mat::randn(r, c); }, "rows"_a, "cols"_a);
+    sub.def("rand", [](size_t r, size_t c) { sized(r, c); return Mat::rand(r, c); }, "rows"_a, "cols"_a);
 
     // The elementwise functions are overloaded on the device type, so
     // juzhen.exp(A) works for a matrix on either device.

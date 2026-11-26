@@ -14,12 +14,17 @@ Data is one sample per row (N x d), like numpy. Converting to or from numpy
 always copies. Reading values (``.numpy()``, ``.item()``, ``print``) waits for
 the GPU to finish, so do it every few steps rather than every step.
 
+Comparisons work element by element and give a matrix of 1s and 0s:
+``(A > 0) * A``, ``jz.mean(A == B)``. ``if A == B:`` is an error unless the
+matrices are 1 x 1; write ``(A == B).numpy().all()``.
+
 Each function here is a thin layer over the C++ code in cpp/ and ml/; see
 python/src/core.cu for how a Python call reaches it.
 """
 
 import abc
 import atexit
+import math
 import os
 
 import numpy as np
@@ -73,27 +78,36 @@ if _core.has_gpu:
 def _array_ufunc(self, ufunc, method, *inputs, **kwargs):
     """What numpy does when a matrix meets a numpy operator or function.
 
-    number * A, number + A, ... with a numpy number give a matrix, as with a
-    Python number (numpy used to make an array behind the user's back). A
-    numpy array combined with a matrix is refused: one of them has to be
-    converted on purpose. Anything else (np.exp(A), np.sum(A)) computes in
-    numpy on a copy of the values, as before.
+    number * A, number + A, number < A, ... with a numpy number give a matrix,
+    as with a Python number (numpy used to make an array behind the user's
+    back). A numpy array combined or compared with a matrix is refused: one
+    of them has to be converted on purpose. Anything else (np.exp(A),
+    np.sum(A)) computes in numpy on a copy of the values, as before.
     """
-    if method == "__call__" and len(inputs) == 2 and not kwargs and ufunc in _ARITHMETIC:
+    if method == "__call__" and len(inputs) == 2 and not kwargs and ufunc in _OPERATORS:
         left, right = inputs
         other = right if left is self else left
         if isinstance(other, np.ndarray) and other.ndim > 0:
+            if ufunc in _COMPARISONS:
+                # numpy would compare an n x 1 matrix with n labels as an n x n table
+                raise TypeError("cannot compare a numpy array with a juzhen matrix; make it a matrix first: "
+                                f"jz.array(a, device='{self.device}'), which turns a 1-D array of n values "
+                                "into n x 1. For the accuracy of a classifier use "
+                                "1 - nn.error_rate(scores, labels)")
             raise TypeError("cannot combine a juzhen matrix with a numpy array; make it a matrix first: "
                             f"jz.array(a, device='{self.device}')")
         if isinstance(other, (np.number, np.ndarray, int, float)) and not isinstance(other, bool):
             number = float(other)
-            return _ARITHMETIC[ufunc](number if left is other else left, number if right is other else right)
+            return _OPERATORS[ufunc](number if left is other else left, number if right is other else right)
     converted = [x.numpy() if isinstance(x, Matrix) else x for x in inputs]
     return getattr(ufunc, method)(*converted, **kwargs)
 
 
-_ARITHMETIC = {np.add: lambda a, b: a + b, np.subtract: lambda a, b: a - b,
-               np.multiply: lambda a, b: a * b, np.true_divide: lambda a, b: a / b}
+_COMPARISONS = {np.equal: lambda a, b: a == b, np.not_equal: lambda a, b: a != b,
+                np.less: lambda a, b: a < b, np.less_equal: lambda a, b: a <= b,
+                np.greater: lambda a, b: a > b, np.greater_equal: lambda a, b: a >= b}
+_OPERATORS = {np.add: lambda a, b: a + b, np.subtract: lambda a, b: a - b,
+              np.multiply: lambda a, b: a * b, np.true_divide: lambda a, b: a / b, **_COMPARISONS}
 _core.cpu.Matrix.__array_ufunc__ = _array_ufunc
 if _core.has_gpu:
     _core.gpu.Matrix.__array_ufunc__ = _array_ufunc
@@ -145,22 +159,40 @@ def array(data, device="cpu"):
     return _device(device).from_numpy(_as_2d(data))
 
 
-def zeros(rows, cols, device="cpu"):
-    return _device(device).zeros(rows, cols)
+def _shape(rows, cols, what):
+    """rows and cols of a new matrix as two positive ints."""
+    if isinstance(rows, (tuple, list)):
+        raise TypeError(f"jz.{what}(rows, cols) takes two numbers, not a shape: write "
+                        f"jz.{what}({', '.join(map(str, rows))})")
+    if cols is None:
+        raise TypeError(f"jz.{what}(rows, cols) takes two numbers: every juzhen matrix has rows and columns; "
+                        f"for a column of {rows} values write jz.{what}({rows}, 1)")
+    for name, value in (("rows", rows), ("cols", cols)):
+        if isinstance(value, bool) or not isinstance(value, (int, float, np.integer, np.floating)) \
+                or not math.isfinite(value) or value != int(value) or value < 1:
+            raise ValueError(f"jz.{what}: {name} must be a positive whole number, got {value!r} "
+                             "(a juzhen matrix cannot be empty)")
+    return int(rows), int(cols)
 
 
-def ones(rows, cols, device="cpu"):
-    return _device(device).ones(rows, cols)
+def zeros(rows, cols=None, device="cpu"):
+    """A rows x cols matrix of zeros."""
+    return _device(device).zeros(*_shape(rows, cols, "zeros"))
 
 
-def randn(rows, cols, device="cpu"):
+def ones(rows, cols=None, device="cpu"):
+    """A rows x cols matrix of ones."""
+    return _device(device).ones(*_shape(rows, cols, "ones"))
+
+
+def randn(rows, cols=None, device="cpu"):
     """Standard normal samples; jz.manual_seed() makes them repeatable."""
-    return _device(device).randn(rows, cols)
+    return _device(device).randn(*_shape(rows, cols, "randn"))
 
 
-def rand(rows, cols, device="cpu"):
+def rand(rows, cols=None, device="cpu"):
     """Uniform samples in [0, 1); jz.manual_seed() makes them repeatable."""
-    return _device(device).rand(rows, cols)
+    return _device(device).rand(*_shape(rows, cols, "rand"))
 
 
 def zeros_like(m):

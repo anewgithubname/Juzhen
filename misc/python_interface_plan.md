@@ -416,3 +416,9 @@ for epoch in range(5):
 - GPU 上嵌入表的梯度累加用“按编号分组、每格一个写入者”的做法，不用 `atomicAdd`，同一个种子结果可重复。Metal 先用现有运算（设备 gather、主机累加、one-hot 组合的损失），不写新着色器。
 
 这次没做：矩阵之间的 `==` 和布尔掩码、`Sequential` 嵌套、跨设备加载 checkpoint、把 batch 大小放到 `Sequential` 上只说一次、采样器和学习率调度、4090 分支上的 text8/BPE/TinyStories/grokking 实验程序、把现有 one-hot 的 C++ 语言模型示例改成 token 层。
+
+接口检查（2026-11-26）之后补上的，都是“结果错了但不报错”的情况：
+- **矩阵的比较是逐元素的。** `==`、`!=`、`<`、`<=`、`>`、`>=` 给出 0/1 矩阵，可以直接参加运算（`(A > 0) * A`、`jz.mean(A == B)`）。和 numpy 数组或列表比较会报错并说明先用 `jz.array` 转换；多于一个元素的矩阵不能当真假值用（`if A == B:` 报错）。两个矩阵的比较是用差算的，所以同一位置都是同号无穷大时算作不相等。布尔掩码取下标仍然没有。
+- **`fit()` 和 `evaluate()` 先看数据。** X、Y 里有 nan 或 inf 就报错并指出位置（ReLU 会把 nan 变成 0，以前训练能照常结束）。交叉熵下的浮点 Y 必须每行是 one-hot 或概率，否则报错并提示 `loss="mse"`。手写的训练循环没有这层检查。
+- **`backward()` 只认最后一次调用。** 损失函数记下梯度出自网络的哪一次调用（弱引用，不占内存）；网络之后又被调用过，再拿这个梯度反向就报错。用户自己算的梯度不跟踪。
+- `jz.zeros` 等拒绝空矩阵；`Embedding`、`PositionEmbedding` 的 `init` 只能按名字传（`PositionEmbedding(seq_len, dim)` 以前把 `dim` 当成标准差）；`AdamW` 的参数接受 numpy 数字；`ignore_index` 必须是整数。
