@@ -24,8 +24,11 @@ class AdamW:
     def __init__(self, params, lr=1e-4, betas=(0.9, 0.999), eps=1e-8, weight_decay=0.01):
         if isinstance(params, jz.nn.Sequential):
             raise TypeError("AdamW takes the network's parameters: optim.AdamW(net.parameters(), lr=...)")
-        if not hasattr(params, "device"):
-            raise TypeError(f"AdamW takes net.parameters(), got {type(params).__name__}")
+        if type(params).__name__ != "ParameterList":
+            kind = "a matrix" if isinstance(params, jz.Matrix) else type(params).__name__
+            raise TypeError(f"AdamW takes net.parameters(), got {kind}. It updates all the parameters of one "
+                            "network; a matrix of your own can be trained as the table of "
+                            "nn.Sequential(nn.Embedding(rows, cols))")
         for name, value, positive in (("lr", lr, False), ("weight_decay", weight_decay, False), ("eps", eps, True)):
             rule = "more than 0" if positive else "0 or more"
             if not _is_number(value):

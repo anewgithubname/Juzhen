@@ -1,7 +1,8 @@
 """Mistakes that used to give a wrong result without an error.
 
 Each test is one of them: what the user writes, and that it now either
-works or stops with a message that names the way out.
+works or stops with a message that names the way out. The last class is
+about calls that did stop, but with the binding's list of C++ signatures.
 """
 
 import pathlib
@@ -253,6 +254,229 @@ class TestArguments:
     def test_conv_transpose_is_named_in_its_errors(self):
         with pytest.raises(TypeError, match="ConvTranspose2d"):
             nn.ConvTranspose2d(3, 8, 3, 8, 2, output_padding=1)
+
+
+class TestSentencesNotSignatures:
+    """Calls that the binding refuses answer with a sentence, not with nanobind's list of C++ overloads."""
+
+    @staticmethod
+    def refused(call, error, match):
+        with pytest.raises(error, match=match) as info:
+            call()
+        assert "incompatible function arguments" not in str(info.value)
+
+    def test_functions_given_something_else(self, device, rng):
+        a = rng.standard_normal((2, 3)).astype(np.float32)
+        A = jz.array(a, device=device)
+        for name in ("exp", "log", "tanh", "sin", "cos", "sqrt", "square", "abs", "relu", "sigmoid", "sum", "mean",
+                     "max", "min", "argmax", "softmax", "logsumexp"):
+            f = getattr(jz, name)
+            self.refused(lambda: f(a), TypeError, rf"jz\.{name} takes a juzhen matrix, got a numpy array.*jz\.array\(a\)")
+            self.refused(lambda: f(2.0), TypeError, rf"jz\.{name} takes a juzhen matrix, got the number 2\.0")
+            self.refused(lambda: f(None), TypeError, rf"jz\.{name} takes a juzhen matrix, got None")
+        self.refused(lambda: jz.topk(a, 2), TypeError, r"jz\.topk takes a juzhen matrix, got a numpy array")
+        self.refused(lambda: jz.exp([1.0, 2.0]), TypeError, "got a list")
+        self.refused(lambda: jz.exp(nn.mse(A, A)), TypeError, r"got a Loss.*loss\.value")
+        close(jz.exp(m=A), np.exp(a))
+
+    def test_axis(self, device, rng):
+        _, A = rng, jz.randn(2, 3, device=device)
+        for name in ("sum", "mean", "max", "min"):
+            f = getattr(jz, name)
+            for axis in (1.0, (0, 1), "rows"):
+                self.refused(lambda: f(A, axis), ValueError, rf"jz\.{name}: axis must be 0 .*, 1 .* or None")
+            assert f(A, np.int64(1)).shape == (2, 1)
+        for name in ("argmax", "softmax", "logsumexp"):
+            self.refused(lambda: getattr(jz, name)(A, 1.5), ValueError, rf"jz\.{name}: axis must be 0 .* or 1 ")
+        self.refused(lambda: jz.softmax(A, None), ValueError, "got None")
+        self.refused(lambda: jz.max(A, 0 * A), ValueError, r"got a matrix.*B \+ jz\.relu\(A - B\)")  # np.maximum
+        self.refused(lambda: jz.min(A, 0.0), ValueError, r"got 0\.0.*B - jz\.relu\(B - A\)")
+        self.refused(lambda: jz.topk(A, "2"), ValueError, "k must be a whole number")
+        self.refused(lambda: jz.topk(A, 2, largest="no"), TypeError, "largest must be True or False")
+        self.refused(lambda: jz.topk(A, 2, axis=None), ValueError, r"jz\.topk: axis must be")
+        assert jz.topk(A, 2.0)[1].shape == (2, 2)
+
+    def test_manual_seed(self):
+        for seed in (2 ** 40, 1.5, "0", -1, True):
+            self.refused(lambda: jz.manual_seed(seed), ValueError, "whole number from 0 to 2147483647")
+        jz.manual_seed(np.int64(3))
+
+    def test_operators(self, device):
+        a = np.arange(6, dtype=np.float32).reshape(2, 3) + 1
+        A = jz.array(a, device=device)
+        for call in (lambda: A + None, lambda: None + A, lambda: A + "x", lambda: A - {}, lambda: A @ None,
+                     lambda: A ** "x", lambda: 2 ** A):
+            self.refused(call, TypeError, "unsupported operand")   # Python's own sentence
+        self.refused(lambda: A @ 2, TypeError, r"@ is the matrix product.*A \* 2")
+        self.refused(lambda: 2 @ A, TypeError, "@ is the matrix product")
+        self.refused(lambda: A ** A, TypeError, r"the power must be a number.*jz\.exp\(B \* jz\.log\(A\)\)")
+        self.refused(lambda: A ** 3, ValueError, r"only the powers 0\.5, 1 and 2.*jz\.exp\(p \* jz\.log\(A\)\)")
+        close(A ** 2, a ** 2)
+        close(A ** np.float32(0.5), a ** 0.5)
+        close(A + 2, a + 2)
+        close(2 + A, a + 2)
+        close(A * np.int64(3), a * 3)
+        close(np.float32(2) * A, a * 2)
+
+        def scaled(op, other):
+            B = A.copy()
+            if op == "*":
+                B *= other
+            else:
+                B /= other
+            return B
+
+        self.refused(lambda: scaled("*", A), TypeError, r"A \*= B changes A in place for a number only.*A = A \* B")
+        self.refused(lambda: scaled("/", A[0:1]), TypeError, r"A /= B changes A in place.*A = A / B")
+        self.refused(lambda: scaled("*", a), TypeError, r"jz\.array\(a, device=")
+        self.refused(lambda: scaled("*", None), TypeError, "unsupported operand")
+        close(scaled("*", 2), a * 2)
+        close(scaled("/", np.float32(2)), a / 2)
+        close(scaled("*", jz.sum(A)), a * a.sum())      # a 1 x 1 matrix counts as its number
+        loss = nn.mse(A, A)
+        self.refused(lambda: A * loss, TypeError, "a Loss is not a number in arithmetic")
+        other = "gpu" if device == "cpu" else "cpu"
+        if other in ("cpu",) or jz.has_gpu():
+            B = A.to(other)
+            for call in (lambda: A + B, lambda: A @ B.T, lambda: A ** B, lambda: scaled("*", B)):
+                self.refused(call, ValueError, "different devices")
+
+    def test_indexing(self, device):
+        a = np.arange(6, dtype=np.float32).reshape(2, 3)
+        A = jz.array(a, device=device)
+        allowed = r"indexed with whole numbers, slices or lists of whole numbers.*A\[\[0, 2\]\]; got "
+        self.refused(lambda: A[None], TypeError, allowed + r"None .*A\[:, j\]")
+        self.refused(lambda: A[...], TypeError, allowed + r"\.\.\. ")
+        self.refused(lambda: A[..., 0], TypeError, allowed)
+        self.refused(lambda: A["a"], TypeError, allowed + "a str")
+        self.refused(lambda: A[1.0], TypeError, allowed + r"a float \(use int\(i\)")
+        self.refused(lambda: A[np.array([0.0, 1.0])], TypeError, allowed + r"a float.*idx\.astype\(int\)")
+        self.refused(lambda: A[np.array([[0], [1]])], TypeError, allowed + r"an array with more than one dimension.*ravel")
+        self.refused(lambda: A[5], IndexError, "row index 5 is out of range for a matrix with 2 rows")
+        self.refused(lambda: A[0, 9], IndexError, "column index 9 is out of range for a matrix with 3 columns")
+        self.refused(lambda: A[-3], IndexError, "row index -3 is out of range")
+        self.refused(lambda: A[0, [0, -4]], IndexError, "column index -4 is out of range")
+        assert A[-1, -1] == 5.0
+        close(A[np.array([1, 0])], a[[1, 0]])
+
+    def test_parameters(self, device):
+        net = nn.Sequential(nn.Dense(3, 4), nn.Linear(2), device=device)
+        ps = net.parameters()
+        names = [p.name for p in ps]
+        assert names == ["layer0.weight", "layer0.bias", "layer1.weight", "layer1.bias"]
+        assert ps[-1].name == names[-1] and ps[np.int64(1)].name == names[1] and ps[-4].name == names[0]
+        assert ps["layer1.weight"].shape == (2, 4)
+        self.refused(lambda: ps[99], IndexError, "parameter index 99 is out of range: the network has 4 parameters")
+        self.refused(lambda: ps[-9], IndexError, "parameter index -9 is out of range")
+        self.refused(lambda: ps["nope"], KeyError, "no parameter is called 'nope'; the names are 'layer0.weight'")
+        for key in (slice(0, 2), None, 1.0, True):
+            self.refused(lambda: ps[key], TypeError, r"takes a position .* or a name.*for p in net\.parameters\(\)")
+        A = jz.randn(2, 2, device=device)
+        self.refused(lambda: optim.AdamW(A), TypeError, r"AdamW takes net\.parameters\(\), got a matrix.*nn\.Embedding")
+        self.refused(lambda: optim.AdamW([A]), TypeError, r"AdamW takes net\.parameters\(\), got list")
+
+    def test_checkpoint_and_build_arguments(self, device, tmp_path):
+        net = nn.Sequential(nn.Dense(3, 4), nn.Linear(2), device=device)
+        path = tmp_path / "c.jz"
+        for progress in (dict(epoch=-1), dict(epoch=2.5), dict(step="3"), dict(data_position=None)):
+            name = next(iter(progress))
+            self.refused(lambda: nn.save_checkpoint(net, path, **progress), ValueError,
+                         rf"save_checkpoint: {name} must be a whole number, 0 or more")
+        self.refused(lambda: nn.save_checkpoint(path, net), TypeError, "takes the network")
+        self.refused(lambda: nn.load_checkpoint(path, net), TypeError, "takes the network")
+        nn.save_checkpoint(net, path, epoch=2.0, step=np.int64(7))
+        assert nn.load_checkpoint(net, path) == {"epoch": 2, "step": 7, "data_position": 0}
+        self.refused(lambda: nn.Sequential(nn.Dense(4), device=device).build("a"), ValueError,
+                     "build: in_features must be a positive whole number")
+        assert nn.Sequential(nn.Dense(4), device=device).build(3.0).in_features == 3
+
+    def test_layers_written_in_python(self, device):
+        class NoCreate(nn.Layer):
+            def out_features(self, n):
+                return n
+
+        class ReturnsItself(NoCreate):
+            def create(self, core, n):
+                return self
+
+        class Preset(nn.Layer):  # a subclass that presets a C++ layer is fine
+            def out_features(self, n):
+                return 2 * n
+
+            def create(self, core, n):
+                return core.ReLUDense(2 * n, n, "auto", 0.0)
+
+        way_out = r"cannot be written in Python yet.*first\.backward\(second\.backward\(grad\) \* df\(h\)\)"
+        self.refused(lambda: nn.Sequential(nn.Dense(3, 4), NoCreate(), device=device), NotImplementedError,
+                     "NoCreate does not define create.*" + way_out)
+        self.refused(lambda: nn.Sequential(nn.Dense(3, 4), ReturnsItself(), device=device), TypeError,
+                     r"layer 1: ReturnsItself\.create\(\) returned a ReturnsItself.*" + way_out)
+        self.refused(lambda: nn.Sequential(nn.Dense(3, 4), nn.Layer(), device=device), NotImplementedError, way_out)
+        net = nn.Sequential(nn.Dense(3, 4), Preset(), nn.Linear(1), device=device)
+        assert net(jz.randn(5, 3, device=device)).shape == (5, 1)
+
+    @pytest.mark.parametrize("layer", [nn.Conv2d, nn.ConvTranspose2d])
+    def test_convolution_arguments(self, layer):
+        name = layer.__name__
+        size = "must be one positive whole number or a \\(height, width\\) pair"
+        whole = "must be a positive whole number"
+        for arguments, error, match in [
+            (dict(image_size=7.5), ValueError, f"{name}: image_size {size}, got 7.5"),
+            (dict(kernel_size="3"), ValueError, f"{name}: kernel_size {size}, got '3'"),
+            (dict(kernel_size=(3, 3, 3)), ValueError, f"{name}: kernel_size {size}"),
+            (dict(kernel_size=[3, "5"]), ValueError, f"{name}: kernel_size: the width {whole}, got '5'"),
+            (dict(kernel_size=0), ValueError, f"{name}: kernel_size {size}, got 0"),
+            (dict(kernel_size=-1), ValueError, f"{name}: kernel_size {size}, got -1"),
+            (dict(kernel_size=None), ValueError, f"{name}: kernel_size {size}, got None"),
+            (dict(in_channels=0), ValueError, f"{name}: in_channels {whole}, got 0"),
+            (dict(in_channels=-1), ValueError, f"{name}: in_channels {whole}, got -1"),
+            (dict(in_channels=2.5), ValueError, f"{name}: in_channels {whole}, got 2.5"),
+            (dict(out_channels="8"), ValueError, f"{name}: out_channels {whole}, got '8'"),
+            (dict(out_channels=0), ValueError, f"{name}: out_channels {whole}, got 0"),
+            (dict(padding=1.5), ValueError, f"{name}: padding must be a whole number, 0 or more, got 1.5"),
+            (dict(padding=-1), ValueError, f"{name}: padding must be a whole number, 0 or more, got -1"),
+            (dict(padding="same"), ValueError, f"{name}: padding .*got 'same'; it is one number.*kernel_size - 1"),
+            (dict(padding=(1, 1)), ValueError, f"{name}: padding .*one number for all four sides"),
+            (dict(relu="no"), TypeError, f"{name}: relu must be True or False, got 'no'"),
+            (dict(relu=0), TypeError, f"{name}: relu must be True or False, got 0"),
+            (dict(stride=(2, 2)), ValueError, f"{name}: stride {whole}"),
+            (dict(batch_size=0), ValueError, f"{name}: batch_size {whole}, got 0"),
+        ]:
+            given = dict(in_channels=1, out_channels=2, kernel_size=3, image_size=8, batch_size=4)
+            given.update(arguments)
+            self.refused(lambda: layer(**given), error, match)
+        # whole numbers in other clothes are taken: 28 / 2, numpy integers, pairs
+        made = layer(1.0, np.int64(2), 3.0, 28 / 2, np.int64(4), padding=np.int64(1), relu=np.bool_(False))
+        assert (made.c_in, made.c_out, made.kh, made.kw, made.h, made.w, made.rows, made.padding, made.relu) == \
+            (1, 2, 3, 3, 14, 14, 4, 1, False)
+        assert all(type(v) is int for v in (made.c_in, made.c_out, made.kh, made.h, made.rows, made.padding))
+        assert layer(1, 2, (3, 5), [8, 6], 4).in_features == 48
+
+    def test_convolutions_that_do_not_fit_together(self, device):
+        C = nn.Conv2d
+        try:
+            net = nn.Sequential(C(1, 2, 3.0, np.int64(8), 4, padding=1), C(2, 4, (3, 3), [8, 8], 4), nn.Linear(3),
+                                device=device)
+        except ValueError as e:  # no convolution for this device in this build
+            other = "gpu" if device == "cpu" else "cpu"
+            if jz.has_gpu():
+                assert f"this build has its convolutions on '{other}': use nn.Sequential(..., device='{other}')" in str(e)
+            pytest.skip(str(e))
+        assert net(jz.randn(4, 64, device=device)).shape == (4, 3)
+        gives = r"takes {} images \(channels x height x width, {} features\), but the layer before gives {} \({} features\)"
+        self.refused(lambda: nn.Sequential(C(1, 2, 3, 8, 4), C(3, 4, 3, 6, 4), device=device), ValueError,
+                     gives.format("3 x 6 x 6", 108, "2 x 6 x 6", 72))      # channels
+        self.refused(lambda: nn.Sequential(C(1, 2, 3, 8, 4), C(2, 4, 3, 8, 4), device=device), ValueError,
+                     gives.format("2 x 8 x 8", 128, "2 x 6 x 6", 72))      # image size
+        # the feature counts agree (8 x 14 x 14 = 2 x 28 x 28), the images do not: this used to be accepted
+        self.refused(lambda: nn.Sequential(C(1, 8, 3, 28, 4, padding=1, stride=2), C(2, 16, 3, 28, 4, padding=1),
+                                           device=device), ValueError,
+                     gives.format("2 x 28 x 28", 1568, "8 x 14 x 14", 1568))
+        self.refused(lambda: nn.Sequential(nn.Dense(10, 50), C(1, 2, 3, 8, 4), device=device), ValueError,
+                     r"takes 1 x 8 x 8 images \(channels x height x width, 64 features\), but gets 50 features")
+        up = nn.Sequential(C(1, 2, 3, 8, 4, stride=2, padding=1), nn.ConvTranspose2d(2, 1, 4, 4, 4, stride=2, padding=1),
+                           device=device)
+        assert up(jz.randn(4, 64, device=device)).shape == (4, 64)
 
 
 def readme_blocks():

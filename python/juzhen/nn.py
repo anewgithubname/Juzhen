@@ -61,11 +61,41 @@ def _size(value, what):
     return int(value)
 
 
+def _count(value, what, remedy=""):
+    """A whole number, 0 or more."""
+    if isinstance(value, bool) or not isinstance(value, (int, float, np.integer, np.floating)) \
+            or not math.isfinite(value) or value != int(value) or value < 0:
+        raise ValueError(f"{what} must be a whole number, 0 or more, got {value!r}{remedy}")
+    return int(value)
+
+
+def _pair(value, what):
+    """A size given as one whole number (for both directions) or as a (height, width) pair."""
+    if isinstance(value, (tuple, list, np.ndarray)):
+        if len(value) != 2:
+            raise ValueError(f"{what} must be one positive whole number or a (height, width) pair, got {value!r}")
+        return _size(value[0], f"{what}: the height"), _size(value[1], f"{what}: the width")
+    try:
+        return (_size(value, what),) * 2
+    except (ValueError, OverflowError):
+        raise ValueError(f"{what} must be one positive whole number or a (height, width) pair, "
+                         f"got {value!r}") from None
+
+
+_NO_PYTHON_LAYERS = ("A layer with its own forward and backward cannot be written in Python yet (juzhen has no "
+                     "automatic differentiation). To apply a function f of your own, split the network in two "
+                     "and apply it between them: h = first(x); out = second(f(h)); and on the way back "
+                     "first.backward(second.backward(grad) * df(h)), where df is the derivative of f")
+
+
 class Layer:
-    """Base class of the layer descriptions.
+    """Base class of juzhen's own layer descriptions.
 
     Subclasses define in_features (None if it comes from the previous layer),
-    out_features(n_in) and create(core, n_in), which makes the C++ layer.
+    out_features(n_in) and create(core, n_in). create must return one of the
+    C++ layers of core (core.Dense, core.ReLUDense, core.Linear, ...): a
+    subclass can preset an existing layer, but a layer with its own forward
+    and backward cannot be written in Python yet.
     """
 
     in_features = None
@@ -74,10 +104,11 @@ class Layer:
     seq_len = None     # the sequence length the layer was made for, if any
 
     def out_features(self, n_in):
-        raise NotImplementedError
+        raise NotImplementedError(f"{type(self).__name__} does not define out_features(n_in). " + _NO_PYTHON_LAYERS)
 
     def create(self, core, n_in):
-        raise NotImplementedError
+        raise NotImplementedError(f"{type(self).__name__} does not define create(core, n_in), which must return "
+                                  "one of juzhen's C++ layers. " + _NO_PYTHON_LAYERS)
 
     def _with_batch(self, batch_size):
         """A copy of this description for another batch size (see Sequential.copy)."""
@@ -246,13 +277,20 @@ class Conv2d(Layer):
 
     def __init__(self, in_channels, out_channels, kernel_size, image_size, batch_size,
                  padding=0, stride=1, relu=True, init="auto"):
-        self.c_in, self.c_out = in_channels, out_channels
-        self.kh, self.kw = _pair(kernel_size)
-        self.h, self.w = _pair(image_size)
-        self.batch_size, self.padding, self.relu = batch_size, padding, relu
-        self.stride = _size(stride, f"{type(self).__name__}: stride")
-        self.in_features = in_channels * self.h * self.w
-        self.rows = _size(batch_size, f"{type(self).__name__}: batch_size")
+        name = type(self).__name__
+        self.c_in = _size(in_channels, f"{name}: in_channels")
+        self.c_out = _size(out_channels, f"{name}: out_channels")
+        self.kh, self.kw = _pair(kernel_size, f"{name}: kernel_size")
+        self.h, self.w = _pair(image_size, f"{name}: image_size")
+        self.padding = _count(padding, f"{name}: padding",
+                              "; it is one number for all four sides, and (kernel_size - 1) // 2 keeps the "
+                              "image size when stride is 1")
+        if not isinstance(relu, (bool, np.bool_)):
+            raise TypeError(f"{name}: relu must be True or False, got {relu!r}")
+        self.relu = bool(relu)
+        self.stride = _size(stride, f"{name}: stride")
+        self.in_features = self.c_in * self.h * self.w
+        self.batch_size = self.rows = _size(batch_size, f"{name}: batch_size")
         self.init = init
         self._init = _init_args(init, type(self).__name__)
         h, w = self.output_size()
@@ -275,8 +313,12 @@ class Conv2d(Layer):
 
     def create(self, core, n_in):
         if not hasattr(core, self._core_name):
-            raise ValueError(f"{self._core_name} is not available on device "
-                             f"'{core.__name__.rsplit('.', 1)[-1]}' in this build")
+            device = core.__name__.rsplit('.', 1)[-1]
+            other = "gpu" if device == "cpu" else "cpu"
+            elsewhere = (other == "cpu" or jz._core.has_gpu) and hasattr(getattr(jz._core, other), self._core_name)
+            raise ValueError(f"{self._core_name} is not available on device '{device}' in this build"
+                             + (f"; this build has its convolutions on '{other}': use "
+                                f"nn.Sequential(..., device='{other}')" if elsewhere else ""))
         return getattr(core, self._core_name)(self.batch_size, self.c_in, self.h, self.w, self.c_out,
                                               self.kh, self.kw, self.padding, self.stride, self.relu,
                                               *self._init)
@@ -340,10 +382,6 @@ class Transformer(Layer):
         d_model, d_k, d_ff, seq_len, batch_size, heads, causal = self.args
         return (f"Transformer({d_model}, {d_k}, {d_ff}, seq_len={seq_len}, batch_size={batch_size}, "
                 f"heads={heads}, causal={causal})")
-
-
-def _pair(v):
-    return (v, v) if isinstance(v, int) else tuple(v)
 
 
 class Sequential:
@@ -420,13 +458,23 @@ class Sequential:
 
     def build(self, in_features):
         """Create the C++ layers for inputs of in_features features."""
+        if in_features is not None:
+            in_features = _size(in_features, "build: in_features")
         if self.built:
             if in_features != self.in_features:
                 raise ValueError(f"the network takes {self.in_features} features, got {in_features}")
             return self
         impls, n = [], in_features
-        for layer in self.layers:
-            if layer.in_features is not None and layer.in_features != n:
+        image = None  # channels, height and width of what the layer before gives, when it is a convolution
+        for k, layer in enumerate(self.layers):
+            if isinstance(layer, Conv2d):
+                want = (layer.c_in, layer.h, layer.w)
+                if layer.in_features != n or (image is not None and image != want):
+                    gets = (f"the layer before gives {image[0]} x {image[1]} x {image[2]} ({n} features)"
+                            if image is not None else f"gets {n} features")
+                    raise ValueError(f"{layer!r} takes {want[0]} x {want[1]} x {want[2]} images (channels x "
+                                     f"height x width, {layer.in_features} features), but {gets}")
+            elif layer.in_features is not None and layer.in_features != n:
                 raise ValueError(f"{layer!r} takes {layer.in_features} features, but gets {n}")
             if getattr(layer, "tied", False):
                 first = self.layers[0]
@@ -437,7 +485,11 @@ class Sequential:
                 impls.append(layer.create(self._core, n, embedding=impls[0]))
             else:
                 impls.append(layer.create(self._core, n))
+            if not isinstance(impls[-1], self._core.Dense):  # core.Dense is the base of every C++ layer
+                raise TypeError(f"layer {k}: {type(layer).__name__}.create() returned a "
+                                f"{type(impls[-1]).__name__}, not one of juzhen's C++ layers. " + _NO_PYTHON_LAYERS)
             n = layer.out_features(n)
+            image = (layer.c_out, *layer.output_size()) if isinstance(layer, Conv2d) else None
         self.in_features, self.out_features = in_features, n
         self._impls = impls  # the Python objects own the C++ layers
         self._net = self._core.Network(impls)
@@ -1103,13 +1155,21 @@ def one_hot(labels, num_classes, device="cpu"):
 
 def save_checkpoint(net, path, epoch=0, step=0, data_position=0):
     """Save net's parameters and optimizer states to path."""
+    if not isinstance(net, Sequential):
+        raise TypeError(f"save_checkpoint takes the network (an nn.Sequential) and a path, got "
+                        f"{type(net).__name__}")
     if not net.built:
         raise RuntimeError("build the network before saving it")
-    net._core.save_checkpoint(net._net, str(path), epoch, step, data_position)
+    progress = [_count(value, f"save_checkpoint: {name}")
+                for name, value in (("epoch", epoch), ("step", step), ("data_position", data_position))]
+    net._core.save_checkpoint(net._net, str(path), *progress)
 
 
 def load_checkpoint(net, path):
     """Load a checkpoint saved from the same architecture; returns its progress."""
+    if not isinstance(net, Sequential):
+        raise TypeError(f"load_checkpoint takes the network (an nn.Sequential) and a path, got "
+                        f"{type(net).__name__}")
     if not net.built:
         raise RuntimeError("build the network before loading into it")
     epoch, step, data_position = net._core.load_checkpoint(net._net, str(path))

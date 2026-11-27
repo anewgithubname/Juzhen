@@ -92,7 +92,7 @@ A1, A2, A3 = jz.randn(n, n), jz.randn(n, n), jz.zeros(n, n)
 A3 += A1 @ A2 / n        # one extra matrix and pass over memory for "/ n"
 
 C = A1 @ A2              # the same result without it
-C /= n                   # in place: *=, /=, += and -= do not allocate
+C /= n                   # in place: += and -= (a number or a matrix), *= and /= (a number)
 A3 += C
 ```
 

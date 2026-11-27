@@ -45,7 +45,6 @@ if os.name == "nt":
             os.add_dll_directory(_dir)
 
 from . import _core
-from ._core import abs, cos, exp, log, relu, sin, sqrt, square, tanh
 
 __all__ = [
     "Matrix", "array", "zeros", "ones", "randn", "rand", "zeros_like", "ones_like",
@@ -117,6 +116,88 @@ _OPERATORS = {np.add: lambda a, b: a + b, np.subtract: lambda a, b: a - b,
 _core.cpu.Matrix.__array_ufunc__ = _array_ufunc
 if _core.has_gpu:
     _core.gpu.Matrix.__array_ufunc__ = _array_ufunc
+
+_MATRIX_TYPES = (_core.cpu.Matrix, _core.gpu.Matrix) if _core.has_gpu else (_core.cpu.Matrix,)
+_NUMBERS = (int, float, np.integer, np.floating)
+
+
+def _not_a_matrix(name, x):
+    """The TypeError for jz.name(x) when x is not a matrix: what came, and what to write."""
+    text = f"jz.{name} takes a juzhen matrix, got "
+    if isinstance(x, (np.ndarray, list, tuple)):
+        kind = "numpy array" if isinstance(x, np.ndarray) else type(x).__name__
+        return TypeError(f"{text}a {kind}; make it a matrix first: jz.{name}(jz.array(a)), or "
+                         "jz.array(a, device='gpu') for the GPU")
+    if isinstance(x, _NUMBERS) and not isinstance(x, bool):
+        return TypeError(f"{text}the number {x}; use Python's math module for one number, or "
+                         f"jz.array({x}) for a 1 x 1 matrix")
+    if isinstance(x, nn.Loss):
+        return TypeError(f"{text}a Loss; its 1 x 1 matrix is loss.value")
+    return TypeError(f"{text}{'None' if x is None else 'a ' + type(x).__name__}")
+
+
+def _axis_error(name, axis, choices):
+    """The error for an axis that jz.name does not take (choices: the ones it does, in words)."""
+    hint = ""
+    if name in ("max", "min") and (type(axis) in _MATRIX_TYPES or isinstance(axis, (float, np.ndarray))):
+        hint = (f". jz.{name}(A, axis) is the {'largest' if name == 'max' else 'smallest'} value along an axis; "
+                "the larger of two matrices, element by element, is B + jz.relu(A - B) (the smaller: "
+                "B - jz.relu(B - A))")
+    shown = "a matrix" if type(axis) in _MATRIX_TYPES else repr(axis)
+    return ValueError(f"jz.{name}: axis must be {choices}, got {shown}{hint}")
+
+
+_ROW_OR_COLUMN = "0 (down each column) or 1 (along each row)"
+_ANY_AXIS = "0 (down each column), 1 (along each row) or None (everything)"
+
+
+def _call(function, m, axis, choices=_ROW_OR_COLUMN, name=None):
+    """_core.function(m, axis), with a sentence instead of the binding's list of overloads.
+
+    name is the juzhen function the user called, when it is not function.
+    """
+    try:
+        return getattr(_core, function)(m, axis)
+    except TypeError:
+        if type(m) not in _MATRIX_TYPES:
+            raise _not_a_matrix(name or function, m) from None
+        if isinstance(axis, bool) or not isinstance(axis, (int, np.integer)):
+            raise _axis_error(name or function, axis, choices) from None
+        raise
+
+
+def _reduce(function, m, axis, name=None):
+    """sum, max or min over an axis, or over everything for axis=None."""
+    if axis is None:
+        return _call(function, _call(function, m, 0, _ANY_AXIS, name), 1)
+    return _call(function, m, axis, _ANY_AXIS, name)
+
+
+def _elementwise(name, doc):
+    function = getattr(_core, name)
+
+    def f(m):
+        try:
+            return function(m)
+        except TypeError:
+            if type(m) in _MATRIX_TYPES:
+                raise
+            raise _not_a_matrix(name, m) from None
+
+    f.__name__ = f.__qualname__ = name
+    f.__doc__ = doc + " of every element: a new matrix on m's device."
+    return f
+
+
+exp = _elementwise("exp", "e to the power")
+log = _elementwise("log", "The natural logarithm")
+tanh = _elementwise("tanh", "The hyperbolic tangent")
+sin = _elementwise("sin", "The sine")
+cos = _elementwise("cos", "The cosine")
+sqrt = _elementwise("sqrt", "The square root")
+square = _elementwise("square", "The square")
+abs = _elementwise("abs", "The absolute value")
+relu = _elementwise("relu", "max(x, 0)")
 
 
 def backend():
@@ -210,6 +291,9 @@ def ones_like(m):
 
 
 def sigmoid(m):
+    """1 / (1 + exp(-x)) of every element."""
+    if type(m) not in _MATRIX_TYPES:
+        raise _not_a_matrix("sigmoid", m)
     return 1 / (1 + exp(-m))
 
 
@@ -218,30 +302,24 @@ def sum(m, axis=None):
 
     The result stays a matrix on m's device; use .item() for a number.
     """
-    if axis is None:
-        return _core.sum(_core.sum(m, 0), 1)
-    return _core.sum(m, axis)
+    return _reduce("sum", m, axis)
 
 
 def mean(m, axis=None):
     """Mean over axis 0, axis 1 or all; a matrix like sum()."""
+    total = _reduce("sum", m, axis, "mean")
     rows, cols = m.shape
-    count = rows * cols if axis is None else (rows if axis == 0 else cols)
-    return sum(m, axis) / count
+    return total / (rows * cols if axis is None else (rows if axis == 0 else cols))
 
 
 def max(m, axis=None):
     """Largest value over axis 0 (1 x cols), axis 1 (rows x 1) or all (1 x 1)."""
-    if axis is None:
-        return _core.max(_core.max(m, 0), 1)
-    return _core.max(m, axis)
+    return _reduce("max", m, axis)
 
 
 def min(m, axis=None):
     """Smallest value over axis 0 (1 x cols), axis 1 (rows x 1) or all (1 x 1)."""
-    if axis is None:
-        return _core.min(_core.min(m, 0), 1)
-    return _core.min(m, axis)
+    return _reduce("min", m, axis)
 
 
 def _positions(m):
@@ -264,7 +342,7 @@ def argmax(m, axis=1):
         raise ValueError("argmax works along axis 1 (each row, the default) or axis 0 (each column); for the "
                          "position in the whole matrix read as one row, as numpy counts it, use "
                          "np.argmax(A.numpy())")
-    return _positions(_core.argmax(m, axis)).ravel()
+    return _positions(_call("argmax", m, axis)).ravel()
 
 
 def topk(m, k, axis=1, largest=True):
@@ -275,18 +353,27 @@ def topk(m, k, axis=1, largest=True):
     a numpy array of integers, as in argmax(). A row with fewer than k numbers
     (NaN is skipped) is filled with NaN and position -1.
     """
-    values, positions = _core.topk(m, int(k), axis, bool(largest))
+    if isinstance(k, bool) or not isinstance(k, _NUMBERS) or k != int(k):
+        raise ValueError(f"jz.topk: k must be a whole number (how many values to keep), got {k!r}")
+    if not isinstance(largest, (bool, np.bool_)):
+        raise TypeError(f"jz.topk: largest must be True or False, got {largest!r}")
+    try:
+        values, positions = _core.topk(m, int(k), axis, bool(largest))
+    except TypeError:
+        if type(m) not in _MATRIX_TYPES:
+            raise _not_a_matrix("topk", m) from None
+        raise _axis_error("topk", axis, _ROW_OR_COLUMN) from None
     return values, _positions(positions)
 
 
 def softmax(m, axis=1):
     """exp(m) normalized to sum to one along each row (axis=1) or column (axis=0)."""
-    return _core.softmax(m, axis)
+    return _call("softmax", m, axis)
 
 
 def logsumexp(m, axis=1):
     """log(sum(exp(m))) of each row (axis=1, rows x 1) or column (axis=0), computed stably."""
-    return _core.logsumexp(m, axis)
+    return _call("logsumexp", m, axis)
 
 
 def _same_device(matrices, what):
@@ -369,6 +456,8 @@ _rng = np.random.default_rng()
 def manual_seed(seed):
     """Seed every random number generator juzhen uses (CPU, GPU, data shuffling)."""
     global _rng
+    if isinstance(seed, bool) or not isinstance(seed, (int, np.integer)) or not 0 <= seed < 2 ** 31:
+        raise ValueError(f"manual_seed takes a whole number from 0 to {2 ** 31 - 1}, got {seed!r}")
     _core.manual_seed(int(seed))
     _rng = np.random.default_rng(int(seed))
 

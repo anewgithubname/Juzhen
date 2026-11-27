@@ -376,24 +376,43 @@ struct Index {
     size_t size() const { return contiguous ? stop - start : list.size(); }
 };
 
-// an int (or numpy integer) index into a dimension of size n
-size_t position(nb::handle item, size_t n) {
+// what can index a matrix, and what was given instead
+std::string bad_index(nb::handle item) {
+    const std::string type = Py_TYPE(item.ptr())->tp_name;
+    std::string got = "a " + type;
+    if (item.is_none() || type == "ellipsis")
+        got = std::string(item.is_none() ? "None" : "...") +
+              " (a juzhen matrix always has two dimensions; write A[:, j] for a column)";
+    else if (PyFloat_Check(item.ptr()) || type.rfind("numpy.float", 0) == 0)
+        got = "a float (use int(i), or idx.astype(int) for an array)";
+    else if (type == "numpy.ndarray")
+        got = "an array with more than one dimension (use idx.ravel())";
+    return "a matrix is indexed with whole numbers, slices or lists of whole numbers, rows first: A[i], "
+           "A[i, j], A[1:3], A[[0, 2]]; got " + got;
+}
+
+// an int (or numpy integer) index into a dimension of size n; what is "row" or "column"
+size_t position(nb::handle item, size_t n, const char *what) {
     // True and False would pass as 1 and 0: X[y == 2] and X[[True, False]] must not
     if (PyBool_Check(item.ptr()) || std::string(Py_TYPE(item.ptr())->tp_name) == "numpy.bool" ||
         std::string(Py_TYPE(item.ptr())->tp_name) == "numpy.bool_")
         throw nb::type_error("a matrix cannot be indexed with True or False (masks are not supported); use "
                              "row numbers, for example X[np.flatnonzero(labels == 2)] with numpy labels");
     nb::object index = nb::steal(PyNumber_Index(item.ptr()));
-    if (!index.is_valid()) throw nb::python_error();
-    Py_ssize_t i = PyLong_AsSsize_t(index.ptr());
-    if (i == -1 && PyErr_Occurred()) throw nb::python_error();
-    if (i < 0) i += (Py_ssize_t)n;
+    if (!index.is_valid()) {
+        PyErr_Clear();
+        throw nb::type_error(bad_index(item).c_str());
+    }
+    const Py_ssize_t given = PyLong_AsSsize_t(index.ptr());
+    if (given == -1 && PyErr_Occurred()) throw nb::python_error();
+    const Py_ssize_t i = given < 0 ? given + (Py_ssize_t)n : given;
     if (i < 0 || i >= (Py_ssize_t)n)
-        throw nb::index_error(("index out of bounds for size " + std::to_string(n)).c_str());
+        throw nb::index_error((std::string(what) + " index " + std::to_string(given) + " is out of range for a "
+                               "matrix with " + std::to_string(n) + " " + what + (n == 1 ? "" : "s")).c_str());
     return (size_t)i;
 }
 
-Index parse_index(nb::handle key, size_t n) {
+Index parse_index(nb::handle key, size_t n, const char *what) {
     Index index;
     if (nb::isinstance<nb::slice>(key)) {
         auto [start, stop, step, length] = nb::borrow<nb::slice>(key).compute(n);
@@ -413,9 +432,9 @@ Index parse_index(nb::handle key, size_t n) {
                                  "numbers, for example X[np.flatnonzero((A > 0).numpy())] for an n x 1 mask");
         index.contiguous = false;
         for (nb::handle item : key)
-            index.list.push_back(position(item, n));
+            index.list.push_back(position(item, n, what));
     } else {
-        index.start = position(key, n);
+        index.start = position(key, n, what);
         index.stop = index.start + 1;
         index.scalar = true;
     }
@@ -448,8 +467,8 @@ nb::object get_item(const Matrix<D> &m, nb::handle key) {
     } else {
         col_key = all;
     }
-    const Index r = parse_index(row_key, m.num_row());
-    const Index c = parse_index(col_key, m.num_col());
+    const Index r = parse_index(row_key, m.num_row(), "row");
+    const Index c = parse_index(col_key, m.num_col(), "column");
 
     if (r.scalar && c.scalar) {
         // one element; reading it waits for the GPU
@@ -926,10 +945,29 @@ void bind_training(nb::module_ &sub) {
     nb::class_<ParameterList<D>>(sub, "ParameterList")
         .def_prop_ro("device", [](const ParameterList<D> &) { return device_name<D>(); })
         .def("__len__", [](const ParameterList<D> &l) { return l.refs.size(); })
-        .def("__getitem__", [](const ParameterList<D> &l, size_t i) {
-            if (i >= l.refs.size()) throw nb::index_error();
-            return l.refs[i];
-        }, nb::keep_alive<0, 1>());
+        .def("__getitem__", [](const ParameterList<D> &l, nb::handle key) {
+            const Py_ssize_t n = (Py_ssize_t)l.refs.size();
+            if (PyUnicode_Check(key.ptr())) {  // by name, as state_dict() and p.name show it
+                const std::string name = nb::cast<std::string>(key);
+                std::string names;
+                for (const auto &p : l.refs) {
+                    if (p.name == name) return p;
+                    names += (names.empty() ? "'" : ", '") + p.name + "'";
+                }
+                throw nb::key_error(("no parameter is called '" + name + "'; the names are " + names).c_str());
+            }
+            if (PyBool_Check(key.ptr()) || !PyIndex_Check(key.ptr()))
+                throw nb::type_error("parameters()[...] takes a position (0 is the first, -1 the last) or a name "
+                                     "such as 'layer0.weight'; to go through all of them write: "
+                                     "for p in net.parameters()");
+            const Py_ssize_t given = PyNumber_AsSsize_t(key.ptr(), PyExc_IndexError);
+            if (given == -1 && PyErr_Occurred()) throw nb::python_error();
+            const Py_ssize_t i = given < 0 ? given + n : given;
+            if (i < 0 || i >= n)
+                throw nb::index_error(("parameter index " + std::to_string(given) + " is out of range: the "
+                                       "network has " + std::to_string(n) + " parameters").c_str());
+            return l.refs[(size_t)i];
+        }, nb::arg("key").none(), nb::keep_alive<0, 1>());
 
     nb::class_<Network<D>>(sub, "Network")
         .def(nb::init<const std::vector<Layer<D> *> &>(), "layers"_a, nb::keep_alive<1, 2>())
@@ -1047,7 +1085,7 @@ void bind(nb::module_ &top, nb::module_ &sub) {
         .def("to", [](nb::handle self, const std::string &device) {
             return move_to(self, nb::cast<const Mat &>(self), device);
         }, "device"_a, "This matrix on another device (a copy), or itself.")
-        .def("__getitem__", &get_item<D>)
+        .def("__getitem__", &get_item<D>, nb::arg("key").none())
         .def("__repr__", &repr<D>)
         .def("__len__", [](const Mat &m) { return m.num_row(); })
         .def("__bool__", &truth<D>)
@@ -1069,7 +1107,8 @@ void bind(nb::module_ &top, nb::module_ &sub) {
             if (p == 2) return square(a);
             if (p == 0.5) return Mat(sqrt(a));
             if (p == 1) return copy_of(a);
-            throw std::invalid_argument("only the powers 0.5, 1 and 2 are supported");
+            throw std::invalid_argument("only the powers 0.5, 1 and 2 are supported; for positive entries "
+                                        "jz.exp(p * jz.log(A)) is A to the power p");
         })
         .def("__iadd__", [](Mat &a, const Mat &b) -> Mat & { inplace(a, b, Op::add); return a; }, nb::rv_policy::none)
         .def("__isub__", [](Mat &a, const Mat &b) -> Mat & { inplace(a, b, Op::sub); return a; }, nb::rv_policy::none)
@@ -1115,30 +1154,52 @@ void bind(nb::module_ &top, nb::module_ &sub) {
         }
     }
 
-    // A numpy array (or a list) next to a matrix: say how to convert it.
+    // Whatever the overloads above did not take, answered in a sentence
+    // instead of nanobind's list of C++ signatures. A numpy array or a list
+    // gets the way to convert it; a number goes on to the overloads above
+    // (they convert an int on the second pass); for any other type Python is
+    // told "not implemented", so the other operand can try and Python's own
+    // short message follows otherwise.
     for (const char *op : {"__add__", "__radd__", "__sub__", "__rsub__", "__mul__", "__rmul__", "__truediv__",
-                           "__rtruediv__", "__matmul__", "__rmatmul__", "__iadd__", "__isub__"})
-        cls.def(op, [](const Mat &, nb::handle other) -> Mat {
+                           "__rtruediv__", "__matmul__", "__rmatmul__", "__iadd__", "__isub__", "__imul__",
+                           "__itruediv__", "__pow__"}) {
+        const std::string name = op;
+        cls.def(op, [name](const Mat &, nb::handle other) -> nb::object {
             const std::string type = Py_TYPE(other.ptr())->tp_name;
+            const std::string mine = std::is_same_v<D, float> ? "cpu" : "gpu";
             if (type == "numpy.ndarray" || type == "list" || type == "tuple")
                 throw nb::type_error(("a juzhen matrix cannot be combined with a " + type +
                                       "; make it a matrix first: jz.array(a, device='" + device_name<D>() + "')")
                                          .c_str());
-            throw nb::next_overload();
-        });
-
-#ifdef JZ_HAS_GPU
-    // A matrix of the other device: say so, instead of nanobind's list of
-    // the overloads that did not match.
-    using Other = std::conditional_t<std::is_same_v<D, float>, GPU, float>;
-    for (const char *op : {"__add__", "__sub__", "__mul__", "__truediv__", "__matmul__", "__iadd__", "__isub__"})
-        cls.def(op, [](const Mat &, const Matrix<Other> &) -> Mat {
-            throw std::invalid_argument(std::string("the matrices are on different devices ('") +
-                                        device_name<D>() + "' and '" + device_name<Other>() +
-                                        "'); move one with .to('" + device_name<D>() + "') or .to('" +
-                                        device_name<Other>() + "')");
-        });
-#endif
+            if (type == "juzhen._core.cpu.Matrix" || type == "juzhen._core.gpu.Matrix") {
+                if (type != "juzhen._core." + mine + ".Matrix") {
+                    const std::string theirs = mine == "cpu" ? "gpu" : "cpu";
+                    throw std::invalid_argument("the matrices are on different devices ('" + mine + "' and '" +
+                                                theirs + "'); move one with .to('" + mine + "') or .to('" +
+                                                theirs + "')");
+                }
+                if (name == "__imul__" || name == "__itruediv__") {
+                    const Mat &b = nb::cast<const Mat &>(other);
+                    if (b.num_row() == 1 && b.num_col() == 1)
+                        throw nb::next_overload();  // a 1 x 1 matrix is taken as its number
+                    const std::string sign = name == "__imul__" ? "*" : "/";
+                    throw nb::type_error(("A " + sign + "= B changes A in place for a number only; with a matrix "
+                                          "write A = A " + sign + " B (a new matrix)").c_str());
+                }
+                if (name == "__pow__")
+                    throw nb::type_error("the power must be a number: A ** 0.5, A ** 1 and A ** 2 are supported; "
+                                         "for positive entries jz.exp(B * jz.log(A)) is A to the power B");
+            }
+            if (PyFloat_Check(other.ptr()) || PyLong_Check(other.ptr()) ||
+                (type.rfind("numpy.", 0) == 0 && PyNumber_Check(other.ptr()))) {
+                if (name == "__matmul__" || name == "__rmatmul__")
+                    throw nb::type_error("@ is the matrix product and needs two matrices; to multiply by a "
+                                         "number write A * 2");
+                throw nb::next_overload();
+            }
+            return nb::borrow(Py_NotImplemented);
+        }, nb::arg("other").none());
+    }
 
     sub.def("from_numpy", &from_numpy<D>, "array"_a);
     // juzhen/__init__.py checks the sizes and says what to write; sized() is the backstop
