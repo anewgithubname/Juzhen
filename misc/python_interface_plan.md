@@ -458,3 +458,7 @@ for epoch in range(5):
 - **CUDA、ROCm 上 `max`、`min`、`argmax` 按轴。** 库里新增 `axis_extreme(M, dim, AxisExtreme::Max|Min|ArgMax)`（`cumatrix.cu`，`hipkernels.cpp` + `hipmatrix.cpp`），两个内核：一组数是一个存储列时，一个线程块里的线程交错着分担这一列；一组数横跨各列时，每个位置由块里的 16 个线程分担，相邻线程读相邻地址，不再拷贝。一组数很长时分段做（横跨时每段 4096 个，沿着列每段 262144 个），每段留下结果和位置，再对这些结果做一遍。
 - **结果和从头扫一遍相同。** 每个线程都从这一组的第一个数开始，只在严格更好时才换，合并时相等的取靠前的：并列、零的正负号、NaN（在第一个位置就留下，在后面就跳过）都和单线程一致。
 - **损失函数也用它。** `loss_detail::column_max`（softmax、交叉熵、`logsumexp`）和 `predict_one_hot` 的按列最大值在 CUDA、ROCm 上改用 `axis_extreme`。区别只在有 NaN 时：`predict_one_hot` 原来跳过所有 NaN，现在一列的第一个数是 NaN 时这一列什么都不标。
+
+按轴求和在 CUDA 上也换成了同样布局的内核（`sumPerRunKernel`、`sumAcrossRunsKernel`），不再用"矩阵乘全 1 向量"：
+- **CUDA。** 原来每次求和要清零结果、建一个全 1 向量再调 cuBLAS 的 gemv。CUDA 上多发一遍内核很便宜，所以分段取得小（横跨时每段 1024 个，沿着列每段 16384 个，`max`、`min`、`argmax` 也一样），每个线程最多看 64 个数；结果少而每组很长的形状因此也有足够多的线程。
+- **结果的末位会变。** 相加的顺序和 gemv 不同（每个线程先加自己的，再两两合并），和旧版相比在第 6、7 位有效数字上会有差别；固定随机种子的训练不再和旧版逐位相同。

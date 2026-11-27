@@ -466,10 +466,12 @@ inline unsigned extremeShare(size_t each, unsigned most, unsigned least) {
 
 // The numbers of a group that one pass takes as a part. Across the runs 16
 // threads share a part (they read 16 neighbouring positions together), along
-// a run 256 do; a thread then has at most 256 or 1024 numbers. The parts are
-// the grid's second dimension, which holds 65535.
+// a run 256 do; a thread then has at most 64 numbers, and a few long groups
+// still get many blocks. (Another pass costs little here; on ROCm, where a
+// launch is dear, the parts are larger.) The parts are the grid's second
+// dimension, which holds 65535.
 inline size_t extremeChunk(size_t group, bool across) {
-    size_t chunk = across ? 4096 : 262144;
+    size_t chunk = across ? 1024 : 16384;
     while ((group + chunk - 1) / chunk > 65535) chunk *= 2;
     return chunk;
 }
@@ -550,30 +552,118 @@ Matrix<CUDAfloat> axis_extreme(const Matrix<CUDAfloat>& M, int dim, AxisExtreme 
     return out;
 }
 
+// ---------------------------------------------------------------------------
+// Sums along an axis, laid out like the two kernels above: the threads of a
+// block share a group, each adds up its numbers, and the block adds those up
+// in pairs; a long group is taken in parts whose sums another pass adds.
+// (The sum used to be cublasSgemv with a vector of ones, which had to be
+// allocated and filled for every call. The numbers are added in a different
+// order now, so a sum can differ from the old one in its last digits.)
+
+// The groups are the runs; the sum of part p of run r goes to index r * parts + p.
+__global__ void sumPerRunKernel(const float* src, float* out, size_t length, size_t count, size_t chunk) {
+    __shared__ float value[extremeThreads];
+    const unsigned share = blockDim.x;
+    const size_t run = static_cast<size_t>(blockIdx.x) * blockDim.y + threadIdx.y;
+    const unsigned slot = threadIdx.y * share + threadIdx.x;
+    float total = 0.0f;
+    if (run < count) {
+        const float* v = src + run * length;
+        const size_t start = static_cast<size_t>(blockIdx.y) * chunk;
+        const size_t stop = start + chunk < length ? start + chunk : length;
+        for (size_t i = start + threadIdx.x; i < stop; i += share) total += v[i];
+    }
+    value[slot] = total;
+    __syncthreads();
+    for (unsigned half = share >> 1; half > 0; half >>= 1) {
+        if (threadIdx.x < half) value[slot] += value[slot + half];
+        __syncthreads();
+    }
+    if (threadIdx.x == 0 && run < count) out[run * gridDim.y + blockIdx.y] = value[slot];
+}
+
+// The groups lie across the runs; the sum of part p at position i goes to index p * length + i.
+__global__ void sumAcrossRunsKernel(const float* src, float* out, size_t length, size_t count, size_t chunk) {
+    __shared__ float value[extremeThreads];
+    const unsigned share = blockDim.y;
+    const size_t pos = static_cast<size_t>(blockIdx.x) * blockDim.x + threadIdx.x;
+    const unsigned slot = threadIdx.x * share + threadIdx.y;
+    float total = 0.0f;
+    if (pos < length) {
+        const size_t start = static_cast<size_t>(blockIdx.y) * chunk;
+        const size_t stop = start + chunk < count ? start + chunk : count;
+        for (size_t j = start + threadIdx.y; j < stop; j += share) total += src[j * length + pos];
+    }
+    value[slot] = total;
+    __syncthreads();
+    for (unsigned half = share >> 1; half > 0; half >>= 1) {
+        if (threadIdx.y < half) value[slot] += value[slot + half];
+        __syncthreads();
+    }
+    if (threadIdx.y == 0 && pos < length) out[static_cast<size_t>(blockIdx.y) * length + pos] = value[slot];
+}
+
+// One pass over src: the sum of every part of every group.
+static void sumPass(const float* src, float* out, size_t length, size_t count, size_t chunk, bool across) {
+    const size_t group = across ? count : length, others = across ? length : count;
+    const unsigned parts = (unsigned)((group + chunk - 1) / chunk);
+    const size_t part = group < chunk ? group : chunk;
+    if (across) {
+        const unsigned share = extremeShare(part, 16, 16), together = extremeThreads / share;
+        sumAcrossRunsKernel<<<dim3((unsigned)((others + together - 1) / together), parts), dim3(together, share)>>>(
+            src, out, length, count, chunk);
+    } else {
+        const unsigned share = extremeShare(part, extremeThreads, 8), together = extremeThreads / share;
+        sumPerRunKernel<<<dim3((unsigned)((others + together - 1) / together), parts), dim3(share, together)>>>(
+            src, out, length, count, chunk);
+    }
+    CudaErrorCheck(cudaGetLastError());
+}
+
 //similar to MATLAB's sum function, sum the matrix along the specified dimension
 Matrix<CUDAfloat> sum(const Matrix<CUDAfloat>& M, int dim)
 {
-    int transM = M.transpose;
-    if (dim == 0)
-    {
-        transM = !transM;
-    }
-
-    Matrix<CUDAfloat> sumM("sumM", transM ? M.numcol : M.numrow, 1, 0);
-    Matrix<CUDAfloat> ones("ones", transM ? M.numrow : M.numcol, 1, 0);
-    ones.ones();
-
-    cublasOperation_t cudaTransM = transM ? CUBLAS_OP_T : CUBLAS_OP_N;
-    const float one = 1.0f, zero = 0.0f;
-    CuBLASErrorCheck(
-        cublasSgemv(M.handle, cudaTransM, M.numrow, M.numcol,
-        &one, (float *) M.elements.get(), M.numrow, (float *) ones.elements.get(),
-        1, &zero, (float *) sumM.elements.get(), 1)
-    )
-
+    // the groups are the stored columns, or else lie across them
+    bool across = (dim == 0) == static_cast<bool>(M.transpose);
+    const size_t results = across ? M.numrow : M.numcol;
+    const size_t each = across ? M.numcol : M.numrow;
+    // results x 1, seen as 1 x results for dim 0
+    Matrix<CUDAfloat> sumM = Matrix<CUDAfloat>::uninitialized("sumM", results, 1, 0);
     if (dim == 0)
     {
         sumM.transpose = true;
+    }
+    if (results == 0) return sumM;
+    if (each == 0)
+    {
+        fill(sumM, 0.0);
+        return sumM;
+    }
+    size_t length = M.numrow, count = M.numcol;
+    if (across && length == 1)
+    {
+        // one position: the runs are one long run
+        across = false;
+        length = count;
+        count = 1;
+    }
+    const float* src = (const float*) M.elements.get();
+    Matrix<CUDAfloat> partial(nullptr);
+    size_t& group = across ? count : length;
+    for (;;)
+    {
+        const size_t chunk = extremeChunk(group, across);
+        const size_t parts = (group + chunk - 1) / chunk;
+        if (parts == 1)
+        {
+            sumPass(src, (float*) sumM.elements.get(), length, count, chunk, across);
+            break;
+        }
+        Matrix<CUDAfloat> sums = Matrix<CUDAfloat>::uninitialized("sum parts", parts * results, 1, 0);
+        sumPass(src, (float*) sums.elements.get(), length, count, chunk, across);
+        partial = std::move(sums);
+        src = (const float*) partial.elements.get();
+        group = parts;
     }
     return sumM;
 }

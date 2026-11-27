@@ -462,9 +462,10 @@ class TestOnePass:
 
     # on a GPU the threads of a block share a row or a column: shapes that do not fill the blocks, that need
     # more than one, that have a single group or a single entry in a group, and rows and columns long enough
-    # to be taken in parts (more than 4096 across the stored columns, more than 262144 along one)
+    # to be taken in parts (on ROCm more than 4096 across the stored columns and more than 262144 along one;
+    # on CUDA more than 1024 and 16384, and 2 x 1100000 takes three passes there)
     LONGER = [(300, 17), (17, 300), (513, 257), (1100, 1000), (2, 5000), (5000, 2), (1, 3000), (3000, 1),
-              (3, 9001), (9001, 3), (2, 270000), (270000, 2), (1, 300000), (300000, 1)]
+              (3, 9001), (9001, 3), (2, 270000), (270000, 2), (1, 300000), (300000, 1), (2, 1100000)]
 
     @pytest.mark.parametrize("shape", SHAPES + LONGER)
     def test_largest_and_smallest_along_an_axis(self, device, rng, shape):
@@ -490,6 +491,26 @@ class TestOnePass:
                     assert jz.max(A, 1).numpy().ravel().tolist() == [7, 0]
                     assert jz.min(A, 1).numpy().ravel().tolist() == [0, -7]
                     assert jz.max(A.T, 0).numpy().ravel().tolist() == [7, 0]
+
+    @pytest.mark.parametrize("shape", SHAPES + LONGER)
+    def test_sums_of_whole_numbers_are_exact(self, device, rng, shape):
+        # whole numbers add up exactly in any order, so every entry must have been taken once (on CUDA the
+        # threads of a block share a row or a column, and a long one is added up in parts); a NaN or an
+        # infinity stays in its own row and column
+        a = rng.integers(-5, 5, shape).astype(np.float32)
+        # ROCm sums with hipBLAS's gemv, which gives NaN for a sum across the stored columns when the first
+        # of them holds an infinity
+        infinities = () if device == "gpu" and jz.backend() == "rocm" else (np.inf, -np.inf)
+        for value in (None, np.nan) + infinities:
+            for place in ((0, 0), (shape[0] // 2, shape[1] - 1)) if value is not None else (None,):
+                b = a.copy()
+                if place is not None:
+                    b[place] = value
+                for B in (jz.array(b, device=device), plain(b, device), jz.array(b.T.copy(), device=device).T):
+                    for axis in (0, 1):
+                        np.testing.assert_array_equal(jz.sum(B, axis).numpy(), b.sum(axis, keepdims=True))
+                    if value is None:
+                        assert jz.sum(B).item() == b.sum()
 
     @pytest.mark.parametrize("shape", [(2, 5), (3, 40), (2, 700), (700, 3), (300, 300), (2, 9001), (9001, 2),
                                        (2, 270000), (270000, 2)])
