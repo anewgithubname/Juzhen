@@ -22,8 +22,10 @@
 #include <nanobind/stl/tuple.h>
 #include <nanobind/stl/vector.h>
 
+#include <algorithm>
 #include <cstring>
 #include <memory>
+#include <type_traits>
 #include <streambuf>
 
 #include "../../cpp/juzhen.hpp"
@@ -501,9 +503,54 @@ void check_axis(int axis) {
         throw std::invalid_argument("axis must be 0 or 1, got " + std::to_string(axis));
 }
 
+// The largest (or smallest) of n numbers. The comparison is the one of the
+// reduce() lambdas below, done in 16 lanes so that the compiler can use SIMD;
+// every lane starts from v[0], so a NaN is treated as it is there.
+template <class Better>
+float extreme_of(const float *v, size_t n, Better better) {
+    constexpr size_t lanes = 16;
+    float best[lanes];
+    for (size_t k = 0; k < lanes; ++k) best[k] = v[0];
+    size_t i = 0;
+    for (; i + lanes <= n; i += lanes)
+        for (size_t k = 0; k < lanes; ++k) best[k] = better(v[i + k], best[k]) ? v[i + k] : best[k];
+    float result = best[0];
+    for (size_t k = 1; k < lanes; ++k) result = better(best[k], result) ? best[k] : result;
+    for (; i < n; ++i) result = better(v[i], result) ? v[i] : result;
+    return result;
+}
+
+// max or min along an axis on the CPU, read straight from the storage.
+// reduce() hands whole stored columns to its function, so for the other
+// direction it first makes a transposed copy of the matrix; here that
+// direction folds the stored columns into the result one after another.
+template <class Better>
+Matrix<float> cpu_extreme(const Matrix<float> &m, int axis, const char *name, Better better) {
+    const bool flagged = m.get_transpose();
+    const size_t stored_rows = flagged ? m.num_col() : m.num_row();
+    const size_t stored_cols = flagged ? m.num_row() : m.num_col();
+    const float *p = m.data();
+    Matrix<float> result = axis == 0 ? Matrix<float>(name, 1, m.num_col()) : Matrix<float>(name, m.num_row(), 1);
+    float *__restrict out = const_cast<float *>(result.data());
+    if ((axis == 0) != flagged) {  // one value for each stored column
+        for (size_t j = 0; j < stored_cols; ++j) out[j] = extreme_of(p + j * stored_rows, stored_rows, better);
+    } else {                       // one value for each stored row
+        std::copy(p, p + stored_rows, out);
+        for (size_t j = 1; j < stored_cols; ++j) {
+            const float *column = p + j * stored_rows;
+            for (size_t i = 0; i < stored_rows; ++i) out[i] = better(column[i], out[i]) ? column[i] : out[i];
+        }
+    }
+    return result;
+}
+
 template <class D>
 Matrix<D> max_axis(const Matrix<D> &m, int axis) {
     check_axis(axis);
+    if constexpr (std::is_same_v<D, float>) {
+        if (m.num_row() > 0 && m.num_col() > 0)
+            return cpu_extreme(m, axis, "max", [](float a, float b) { return a > b; });
+    }
     return reduce([] __GPU_CPU__(float *v, float *out, int n, int) {
         float best = v[0];
         for (int i = 1; i < n; ++i) best = v[i] > best ? v[i] : best;
@@ -514,6 +561,10 @@ Matrix<D> max_axis(const Matrix<D> &m, int axis) {
 template <class D>
 Matrix<D> min_axis(const Matrix<D> &m, int axis) {
     check_axis(axis);
+    if constexpr (std::is_same_v<D, float>) {
+        if (m.num_row() > 0 && m.num_col() > 0)
+            return cpu_extreme(m, axis, "min", [](float a, float b) { return a < b; });
+    }
     return reduce([] __GPU_CPU__(float *v, float *out, int n, int) {
         float best = v[0];
         for (int i = 1; i < n; ++i) best = v[i] < best ? v[i] : best;

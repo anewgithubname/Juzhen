@@ -98,6 +98,7 @@ class Matrix<ROCMfloat> {
 
     void eleminv(double l);
     Matrix<ROCMfloat> eleminv(double l) const;
+    Matrix<ROCMfloat> elemdiv(const Matrix<ROCMfloat>& B) const;  // this ./ B
 
     float norm() const;
     const Matrix<ROCMfloat> T() const;

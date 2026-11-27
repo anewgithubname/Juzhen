@@ -36,6 +36,7 @@
 #include <sstream>
 #include <fstream>
 #include <cstring>
+#include <type_traits>
 
 template <class D>
 class Matrix;
@@ -186,11 +187,12 @@ class Matrix {
     void add(const Matrix<D> &B, D s1, D s2);
     Matrix<D> add(D b, D s1) const;  // using single for loop
     void add(D b, D s1);
-    Matrix<D> scale(D s1) const { return add(0, s1); }
-    void scale(D s1) { add(0, s1); }
+    Matrix<D> scale(D s1) const;  // a multiplication alone, not s1*A + 0
+    void scale(D s1);
 
     void eleminv(double l);
     Matrix<D> eleminv(double l) const;
+    Matrix<D> elemdiv(const Matrix<D> &B) const;  // this ./ B in one pass
 
     D norm() const;   // using single for loop
     const Matrix<D> T() const;
@@ -216,6 +218,8 @@ class Matrix {
     // Matrix's friends
     template <class Data>
     friend Matrix<Data> sum(const Matrix<Data> &M, int dim);
+    template <class Data>
+    friend Matrix<Data> sum_direct(const Matrix<Data> &M, int dim);
     template <class Data>
     friend Matrix<Data> exp(const Matrix<Data> &M);
     template <class Data>
@@ -484,9 +488,19 @@ void Matrix<D>::add(const Matrix<D> &B, D s1, D s2) {
 template <class D>
 Matrix<D> Matrix<D>::add(D b, D s1) const {
     Matrix<D> C("add", numrow, numcol, transpose);
-    size_t numelems = num_row() * num_col();
-    for (size_t i = 0; i < numelems; i++) {
-        C.elements[i] = s1 * elements[i] + b;
+    // plain pointers: through the shared pointers the loop is vectorized in
+    // some places it is inlined and not in others
+    const size_t numelems = numrow * numcol;
+    const D *in = elements.get();
+    D *__restrict out = C.elements.get();
+    // A + b and b - A are one operation per element, not a product and a sum
+    // (the values are the same: 1*x is x and -1*x + b is b - x exactly)
+    if (s1 == D(1)) {
+        for (size_t i = 0; i < numelems; i++) out[i] = in[i] + b;
+    } else if (s1 == D(-1)) {
+        for (size_t i = 0; i < numelems; i++) out[i] = b - in[i];
+    } else {
+        for (size_t i = 0; i < numelems; i++) out[i] = s1 * in[i] + b;
     }
     return C;
 }
@@ -494,23 +508,82 @@ Matrix<D> Matrix<D>::add(D b, D s1) const {
 // A = s1*A + b
 template <class D>
 void Matrix<D>::add(D b, D s1) {
-    size_t numelems = num_row() * num_col();
-    for (size_t i = 0; i < numelems; i++) {
-        elements[i] = s1 * elements[i] + b;
+    const size_t numelems = numrow * numcol;
+    D *p = elements.get();
+    if (s1 == D(1)) {
+        for (size_t i = 0; i < numelems; i++) p[i] = p[i] + b;
+    } else if (s1 == D(-1)) {
+        for (size_t i = 0; i < numelems; i++) p[i] = b - p[i];
+    } else {
+        for (size_t i = 0; i < numelems; i++) p[i] = s1 * p[i] + b;
     }
 }
 
+// C = s1*A
+template <class D>
+Matrix<D> Matrix<D>::scale(D s1) const {
+    Matrix<D> C("scale", numrow, numcol, transpose);
+    const size_t numelems = numrow * numcol;
+    const D *in = elements.get();
+    D *__restrict out = C.elements.get();
+    for (size_t i = 0; i < numelems; i++) {
+        out[i] = s1 * in[i];
+    }
+    return C;
+}
+
+// A = s1*A
+template <class D>
+void Matrix<D>::scale(D s1) {
+    const size_t numelems = numrow * numcol;
+    D *p = elements.get();
+    for (size_t i = 0; i < numelems; i++) {
+        p[i] = s1 * p[i];
+    }
+}
+
+// The division is done in float for a float matrix (as on the GPUs): dividing
+// in double, one element at a time, is several times slower.
 template <class D>
 void Matrix<D>::eleminv(double l) {
-    for (size_t i = 0; i < numrow * numcol; i++) elements[i] = l / elements[i];
+    using Q = std::conditional_t<std::is_same_v<D, float>, float, double>;
+    const Q s = (Q)l;
+    const size_t n = numrow * numcol;
+    D *p = elements.get();
+    for (size_t i = 0; i < n; i++) p[i] = s / p[i];
 }
 
 template <class D>
 Matrix<D> Matrix<D>::eleminv(double l) const {
     Matrix<D> M((name + "reci").c_str(), numrow, numcol, transpose);
-    for (size_t i = 0; i < numrow * numcol; i++)
-        M.elements[i] = l / elements[i];
+    using Q = std::conditional_t<std::is_same_v<D, float>, float, double>;
+    const Q s = (Q)l;
+    const size_t n = numrow * numcol;
+    const D *in = elements.get();
+    D *__restrict out = M.elements.get();
+    for (size_t i = 0; i < n; i++) out[i] = s / in[i];
     return M;
+}
+
+// this ./ B in one pass over the storage. The result is stored like the two
+// operands when they are stored alike, and without the transpose flag
+// otherwise (see Matrix<D>::add).
+template <class D>
+Matrix<D> Matrix<D>::elemdiv(const Matrix<D> &B) const {
+    if (num_row() != B.num_row() || num_col() != B.num_col()) {
+        throw std::invalid_argument("Matrix dimensions are not compatible");
+    }
+    if (transpose && !B.transpose) {
+        Matrix<D> C("elemdiv", B.numrow, B.numcol, B.transpose);
+        zip_storage(C.elements.get(), B.elements.get(), elements.get(), B.numrow,
+                    B.numcol, true, [](D q, D p) { return p / q; });
+        return C;
+    }
+    Matrix<D> C("elemdiv", numrow, numcol, transpose);
+    zip_storage(C.elements.get(), elements.get(), B.elements.get(), numrow,
+                numcol, transpose != B.transpose,
+                [](D p, D q) { return p / q; });
+    return C;
 }
 
 // Helpers for the existing three-native-int matrix format. Keep stream reads

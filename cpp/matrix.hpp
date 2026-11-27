@@ -70,9 +70,60 @@ inline Matrix<D> Matrix<D>::rand(size_t m, size_t n) {
     return M;
 }
 
+// The sum of n numbers kept in 16 running sums, which a compiler turns into
+// SIMD additions without being allowed to reorder floating point.
+template <class D>
+inline D lane_sum(const D *v, size_t n) {
+    constexpr size_t lanes = 16;
+    D part[lanes] = {};
+    size_t i = 0;
+    for (; i + lanes <= n; i += lanes)
+        for (size_t k = 0; k < lanes; k++) part[k] += v[i + k];
+    D total = 0;
+    for (size_t k = 0; k < lanes; k++) total += part[k];
+    for (; i < n; i++) total += v[i];
+    return total;
+}
+
+// sum(M, dim) with plain loops over the storage, on the calling thread.
+template <class D>
+Matrix<D> sum_direct(const Matrix<D> &M, int dim) {
+    const bool per_stored_column = (dim == 0) != M.transpose;
+    const size_t rows = M.numrow, cols = M.numcol;  // of the storage
+    Matrix<D> sumM("sumM", per_stored_column ? cols : rows, 1, 0);
+    const D *p = M.elements.get();
+    D *__restrict out = sumM.elements.get();
+    if (per_stored_column) {
+        for (size_t j = 0; j < cols; j++) out[j] = lane_sum(p + j * rows, rows);
+    } else {
+        for (size_t i = 0; i < rows; i++) out[i] = 0;
+        for (size_t j = 0; j < cols; j++) {
+            const D *column = p + j * rows;
+            for (size_t i = 0; i < rows; i++) out[i] += column[i];
+        }
+    }
+    if (dim == 0) {
+        sumM.transpose = 1;
+    }
+    return sumM;
+}
+
+// On Windows OpenBLAS wakes its threads for a gemv of more than about 9000
+// numbers, and that costs 0.17 ms whatever the size: 30 times the sum of a
+// 256 x 256 matrix. Up to this many numbers the sum is done directly there.
+// On Linux the threaded gemv is as fast or faster at every size, so it stays.
+#ifdef _WIN32
+constexpr size_t direct_sum_limit = size_t(1) << 20;
+#else
+constexpr size_t direct_sum_limit = 0;
+#endif
+
 // sum function as the "sum" in MATLAB
 template <class D>
 Matrix<D> sum(const Matrix<D> &M, int dim) {
+    if (M.numrow * M.numcol <= direct_sum_limit) {
+        return sum_direct(M, dim);
+    }
     int transM = M.transpose;
     if (dim == 0) {
         transM = !transM;

@@ -195,15 +195,23 @@ Matrix<CUDAfloat> Matrix<CUDAfloat>::dot(const Matrix<CUDAfloat>& B) const
     STATIC_TOC;
     return C;
 }
-//s1*M + a
+// d_out = s1*d_in + a
+__global__ void affineKernel(float *d_out, const float *d_in, float s1, float a, size_t numElements)
+{
+    size_t i = blockDim.x * blockIdx.x + threadIdx.x;
+
+    if (i < numElements)
+    {
+        d_out[i] = s1 * d_in[i] + a;
+    }
+}
+
+//s1*M + a, in one pass (it used to fill the result with a and then add s1*M)
 Matrix<CUDAfloat> Matrix<CUDAfloat>::add(float a, float s1) const
 {
-    Matrix<CUDAfloat> C("add", numrow, numcol, transpose);
-    fill(C, a);
-
-    CuBLASErrorCheck(  
-        cublasSaxpy(handle, numrow * numcol, &s1, (float *) elements.get(), 1, (float *) C.elements.get(), 1)
-    )
+    Matrix<CUDAfloat> C = uninitialized("add", numrow, numcol, transpose);
+    size_t numElem = numrow * numcol;
+    affineKernel<<<cudaConfig(numElem)>>>((float*) C.elements.get(), (const float*) elements.get(), s1, a, numElem);
     return C;
 }
 
@@ -286,12 +294,38 @@ __global__ void divKernel(float *d_out, float d_in1, float *d_in2, size_t numEle
 
 // M_new = M / l
 Matrix<CUDAfloat> Matrix<CUDAfloat>::eleminv(double l) const{
-    Matrix<CUDAfloat> result("elem_rec", numrow, numcol, transpose);
+    Matrix<CUDAfloat> result = uninitialized("elem_rec", numrow, numcol, transpose);
 
     size_t numElem = numrow * numcol;
     divKernel<<<cudaConfig(numElem)>>>((float*) result.elements.get(), (float)l, (float*) elements.get(), numElem);
 
     return result;
+}
+
+// d_out = d_a ./ d_b
+__global__ void quotientKernel(float *d_out, const float *d_a, const float *d_b, size_t numElements)
+{
+    size_t i = blockDim.x * blockIdx.x + threadIdx.x;
+
+    if (i < numElements)
+    {
+        d_out[i] = d_a[i] / d_b[i];
+    }
+}
+
+// this ./ B: one pass when the two are stored alike
+Matrix<CUDAfloat> Matrix<CUDAfloat>::elemdiv(const Matrix<CUDAfloat>& B) const {
+    if (num_row() != B.num_row() || num_col() != B.num_col()) {
+        throw std::invalid_argument("Matrix dimensions are not compatible");
+    }
+    if (transpose != B.transpose) {
+        return hadmd(*this, B.eleminv(1.0));
+    }
+    Matrix<CUDAfloat> C = uninitialized("elemdiv", numrow, numcol, transpose);
+    size_t numElem = numrow * numcol;
+    quotientKernel<<<cudaConfig(numElem)>>>((float*) C.elements.get(), (const float*) elements.get(),
+                                            (const float*) B.elements.get(), numElem);
+    return C;
 }
 
 // M = M / l

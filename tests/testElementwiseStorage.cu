@@ -5,6 +5,9 @@
  * Matrix<float>::add and hadmd run over the storage directly. This checks
  * every pairing of storage orders, the versions that write into an operand,
  * and an operand that shares the storage being written (A += A.T()).
+ *
+ * Also the sum along an axis done with plain loops (sum_direct, which sum()
+ * uses for small matrices on Windows) and a number divided by a matrix.
  */
 #include "../cpp/juzhen.hpp"
 #include <cmath>
@@ -116,6 +119,35 @@ int compute() {
             A = filled(n, n, flagged, left);
             const Matrix<float> view = A.T();
             expect("hadmd(A, A.T()) into A", hadmd(std::move(A), view), n, n, squares);
+        }
+    }
+
+    // Sums along an axis, with BLAS or directly, and a number over a matrix.
+    const size_t sum_shapes[][2] = {{1, 1}, {1, 9}, {7, 1}, {3, 5}, {16, 16}, {40, 33}, {129, 65}, {300, 17}};
+    for (const auto &shape : sum_shapes) {
+        const size_t rows = shape[0], cols = shape[1];
+        for (bool flagged : {false, true}) {
+            const Matrix<float> A = filled(rows, cols, flagged, left);
+            const Matrix<float> B = filled(rows, cols, flagged, right);
+            auto down = [&](size_t, size_t j) {
+                double s = 0;
+                for (size_t i = 0; i < rows; ++i) s += left(i, j);
+                return float(s);
+            };
+            auto across = [&](size_t i, size_t) {
+                double s = 0;
+                for (size_t j = 0; j < cols; ++j) s += left(i, j);
+                return float(s);
+            };
+            expect("sum(A, 0)", sum(A, 0), 1, cols, down, 1e-5f);
+            expect("sum(A, 1)", sum(A, 1), rows, 1, across, 1e-5f);
+            expect("sum_direct(A, 0)", sum_direct(A, 0), 1, cols, down, 1e-5f);
+            expect("sum_direct(A, 1)", sum_direct(A, 1), rows, 1, across, 1e-5f);
+            expect("A is unchanged by sum", A, rows, cols, left);
+            auto over = [](size_t i, size_t j) { return 2.0f / right(i, j); };
+            expect("2 / B", 2.0 / B, rows, cols, over, 1e-6f);
+            expect("2 / temporary", 2.0 / Matrix<float>(B), rows, cols, over, 1e-6f);
+            expect("B is unchanged by 2 / B", B, rows, cols, right);
         }
     }
 

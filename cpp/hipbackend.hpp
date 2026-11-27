@@ -51,6 +51,11 @@ int RocmLogInplace(float* dst_device, std::size_t count);
 int RocmAxpby(float* out_device, const float* a_device, const float* b_device,
               std::size_t count, float s1, float s2);
 int RocmAffineInplace(float* inout_device, std::size_t count, float s1, float a);
+// out = s1 * in + a, out = l / in, out = a ./ b: one pass into another buffer
+int RocmAffine(float* out_device, const float* in_device, std::size_t count, float s1, float a);
+int RocmElemInv(float* out_device, const float* in_device, std::size_t count, float l);
+int RocmElemDiv(float* out_device, const float* a_device, const float* b_device,
+                std::size_t count);
 int RocmHadamard(float* out_device, const float* a_device, const float* b_device,
                  std::size_t count);
 int RocmHadamardInplace(float* inout_device, const float* other_device,

@@ -211,14 +211,16 @@ void Matrix<ROCMfloat>::add(const Matrix<ROCMfloat>& B, float s1, float s2) {
     }
 }
 
+// one pass: the result is written from this matrix, not copied and then changed
 Matrix<ROCMfloat> Matrix<ROCMfloat>::add(float a, float s1) const {
-    Matrix<ROCMfloat> out(*this);
-    int rc = Juzhen::RocmAffineInplace(reinterpret_cast<float*>(out.elements.get()),
-                                      out.num_row() * out.num_col(),
-                                      s1,
-                                      a);
+    Matrix<ROCMfloat> out("add", numrow, numcol, transpose);
+    int rc = Juzhen::RocmAffine(reinterpret_cast<float*>(out.elements.get()),
+                               reinterpret_cast<const float*>(elements.get()),
+                               numrow * numcol,
+                               s1,
+                               a);
     if (rc != 0) {
-        LOG_ERROR("RocmAffineInplace failed with code {}", rc);
+        LOG_ERROR("RocmAffine failed with code {}", rc);
         ERROR_OUT;
     }
     return out;
@@ -248,8 +250,33 @@ void Matrix<ROCMfloat>::eleminv(double l) {
 }
 
 Matrix<ROCMfloat> Matrix<ROCMfloat>::eleminv(double l) const {
-    Matrix<ROCMfloat> out(*this);
-    out.eleminv(l);
+    Matrix<ROCMfloat> out((name + "reci").c_str(), numrow, numcol, transpose);
+    int rc = Juzhen::RocmElemInv(reinterpret_cast<float*>(out.elements.get()),
+                                reinterpret_cast<const float*>(elements.get()),
+                                numrow * numcol,
+                                static_cast<float>(l));
+    if (rc != 0) {
+        LOG_ERROR("RocmElemInv failed with code {}", rc);
+        ERROR_OUT;
+    }
+    return out;
+}
+
+// this ./ B in one pass (it used to copy B, invert the copy and multiply)
+Matrix<ROCMfloat> Matrix<ROCMfloat>::elemdiv(const Matrix<ROCMfloat>& B) const {
+    if (transpose != B.transpose) return elemdiv(MatchLayout(B, transpose));
+    if (num_row() != B.num_row() || num_col() != B.num_col()) {
+        throw std::invalid_argument("Matrix dimensions are not compatible");
+    }
+    Matrix<ROCMfloat> out("elemdiv", numrow, numcol, transpose);
+    int rc = Juzhen::RocmElemDiv(reinterpret_cast<float*>(out.elements.get()),
+                                reinterpret_cast<const float*>(elements.get()),
+                                reinterpret_cast<const float*>(B.elements.get()),
+                                numrow * numcol);
+    if (rc != 0) {
+        LOG_ERROR("RocmElemDiv failed with code {}", rc);
+        ERROR_OUT;
+    }
     return out;
 }
 

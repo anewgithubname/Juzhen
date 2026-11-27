@@ -123,6 +123,17 @@ class Matrix<CUDAfloat> {
 
     Matrix<CUDAfloat>(const char* name, size_t numrow, size_t numcol,
                       int trans);
+
+    // A matrix whose storage is not filled with zeros first (the constructor
+    // above fills it): for a result that one kernel writes whole.
+    static Matrix<CUDAfloat> uninitialized(const char* name, size_t numrow,
+                                           size_t numcol, int trans) {
+        CUDAfloat* p = Memory<CUDAfloat>::allocate(numcol * numrow);
+        return Matrix<CUDAfloat>(
+            name, numrow, numcol, trans,
+            std::shared_ptr<CUDAfloat[]>(
+                p, [](CUDAfloat* p) { Memory<CUDAfloat>::free(p); }));
+    }
    public:
     static GPU_handle global_handle;
 
@@ -186,6 +197,7 @@ class Matrix<CUDAfloat> {
 
     void eleminv(double l);
     Matrix<CUDAfloat> eleminv(double l) const;
+    Matrix<CUDAfloat> elemdiv(const Matrix<CUDAfloat>& B) const;  // this ./ B
 
     float norm() const;
     const Matrix<CUDAfloat> T() const;

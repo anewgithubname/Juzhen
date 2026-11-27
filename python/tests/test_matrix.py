@@ -430,3 +430,67 @@ class TestStorageOrders:
         big = rng.standard_normal((3000, 40)).astype(np.float32)
         order = rng.permutation(3000)
         close(jz.array(big, device=device)[order], big[order])
+
+
+class TestOnePass:
+    """Quotients, multiples, the largest and smallest along an axis and sums, in both storage orders."""
+
+    SHAPES = [(1, 1), (1, 9), (7, 1), (16, 16), (37, 53), (70, 70), (129, 65)]
+
+    @pytest.mark.parametrize("shape", SHAPES)
+    def test_quotients_and_multiples(self, device, rng, shape):
+        a = rng.standard_normal(shape).astype(np.float32)
+        b = np.abs(rng.standard_normal(shape)).astype(np.float32) + 0.5
+        for A in (jz.array(a, device=device), plain(a, device)):
+            for B in (jz.array(b, device=device), plain(b, device)):
+                close(A / B, a / b)
+                close(A * B, a * b)
+                close((A + 1) / (B + 1), (a + 1) / (b + 1))   # temporaries on both sides
+                close(A, a)
+                close(B, b)
+            close(2.5 * A, 2.5 * a)
+            close(A * -3, a * -3)
+            close(A / 4, a / 4)
+            close(A + 1.5, a + 1.5)
+            close(1.5 - A, 1.5 - a)
+            close(-A, -a)
+            close(A, a)   # none of these writes into A
+        for B in (jz.array(b, device=device), plain(b, device)):
+            close(2 / B, 2 / b)
+            close(1 / B, 1 / b)
+            close(B, b)
+
+    @pytest.mark.parametrize("shape", SHAPES)
+    def test_largest_and_smallest_along_an_axis(self, device, rng, shape):
+        normal = rng.standard_normal(shape).astype(np.float32)
+        ties = rng.integers(-3, 3, shape).astype(np.float32)
+        for a in (normal, ties, normal - 100, -ties + 50):   # also all negative and all positive
+            for A in (jz.array(a, device=device), plain(a, device), jz.array(a.T.copy(), device=device).T):
+                for axis in (0, 1):
+                    close(jz.max(A, axis), a.max(axis, keepdims=True))
+                    close(jz.min(A, axis), a.min(axis, keepdims=True))
+                assert jz.max(A).item() == a.max()
+                assert jz.min(A).item() == a.min()
+                close(A, a)
+
+    def test_the_extremes_wherever_they_are(self, device):
+        # the largest value in every position of a row longer than the 16 lanes, and of a short one
+        for n in (5, 16, 37):
+            for at in range(n):
+                a = np.zeros((2, n), dtype=np.float32)
+                a[0, at], a[1, at] = 7, -7
+                for A in (jz.array(a, device=device), plain(a, device)):
+                    assert jz.max(A, 1).numpy().ravel().tolist() == [7, 0]
+                    assert jz.min(A, 1).numpy().ravel().tolist() == [0, -7]
+                    assert jz.max(A.T, 0).numpy().ravel().tolist() == [7, 0]
+
+    @pytest.mark.parametrize("shape", [(1, 1), (1, 9), (7, 1), (16, 16), (37, 53), (300, 17), (1100, 1000)])
+    def test_sums(self, device, rng, shape):
+        # 1100 x 1000 is above the size up to which the CPU sums directly on Windows
+        a = rng.standard_normal(shape).astype(np.float32)
+        for A in (jz.array(a, device=device), plain(a, device)):
+            close(jz.sum(A, 0), a.sum(0, keepdims=True, dtype=np.float64), tol=1e-4)
+            close(jz.sum(A, 1), a.sum(1, keepdims=True, dtype=np.float64), tol=1e-4)
+            assert jz.sum(A).item() == pytest.approx(a.sum(dtype=np.float64), rel=1e-4, abs=1e-2)
+            close(jz.mean(A, 0), a.mean(0, keepdims=True, dtype=np.float64), tol=1e-4)
+            close(A, a)

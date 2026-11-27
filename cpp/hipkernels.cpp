@@ -191,6 +191,21 @@ __global__ void ElemInvInplaceKernel(float* out, std::size_t n, float l) {
     if (idx < n) out[idx] = l / out[idx];
 }
 
+__global__ void AffineKernel(float* out, const float* in, std::size_t n, float s1, float a) {
+    const std::size_t idx = static_cast<std::size_t>(blockIdx.x) * blockDim.x + threadIdx.x;
+    if (idx < n) out[idx] = s1 * in[idx] + a;
+}
+
+__global__ void ElemInvKernel(float* out, const float* in, std::size_t n, float l) {
+    const std::size_t idx = static_cast<std::size_t>(blockIdx.x) * blockDim.x + threadIdx.x;
+    if (idx < n) out[idx] = l / in[idx];
+}
+
+__global__ void ElemDivKernel(float* out, const float* a, const float* b, std::size_t n) {
+    const std::size_t idx = static_cast<std::size_t>(blockIdx.x) * blockDim.x + threadIdx.x;
+    if (idx < n) out[idx] = a[idx] / b[idx];
+}
+
 __global__ void TanhKernel(float* out, const float* in, std::size_t n) {
     const std::size_t idx = static_cast<std::size_t>(blockIdx.x) * blockDim.x + threadIdx.x;
     if (idx < n) out[idx] = tanhf(in[idx]);
@@ -951,6 +966,53 @@ int RocmElemInvInplace(float* inout_device, std::size_t count, float l) {
     (void)count;
     (void)l;
     LOG_ERROR("ROCm runtime headers not found; RocmElemInvInplace is unavailable.");
+    return -1;
+#endif
+}
+
+int RocmAffine(float* out_device, const float* in_device, std::size_t count, float s1, float a) {
+#if JUZHEN_ROCM_KERNELS_AVAILABLE
+    hipLaunchKernelGGL(AffineKernel, dim3(BlocksFor(count)), dim3(kThreadsPerBlock), 0, 0,
+                       out_device, in_device, count, s1, a);
+    return HipToInt(hipGetLastError());
+#else
+    (void)out_device;
+    (void)in_device;
+    (void)count;
+    (void)s1;
+    (void)a;
+    LOG_ERROR("ROCm runtime headers not found; RocmAffine is unavailable.");
+    return -1;
+#endif
+}
+
+int RocmElemInv(float* out_device, const float* in_device, std::size_t count, float l) {
+#if JUZHEN_ROCM_KERNELS_AVAILABLE
+    hipLaunchKernelGGL(ElemInvKernel, dim3(BlocksFor(count)), dim3(kThreadsPerBlock), 0, 0,
+                       out_device, in_device, count, l);
+    return HipToInt(hipGetLastError());
+#else
+    (void)out_device;
+    (void)in_device;
+    (void)count;
+    (void)l;
+    LOG_ERROR("ROCm runtime headers not found; RocmElemInv is unavailable.");
+    return -1;
+#endif
+}
+
+int RocmElemDiv(float* out_device, const float* a_device, const float* b_device,
+                std::size_t count) {
+#if JUZHEN_ROCM_KERNELS_AVAILABLE
+    hipLaunchKernelGGL(ElemDivKernel, dim3(BlocksFor(count)), dim3(kThreadsPerBlock), 0, 0,
+                       out_device, a_device, b_device, count);
+    return HipToInt(hipGetLastError());
+#else
+    (void)out_device;
+    (void)a_device;
+    (void)b_device;
+    (void)count;
+    LOG_ERROR("ROCm runtime headers not found; RocmElemDiv is unavailable.");
     return -1;
 #endif
 }
