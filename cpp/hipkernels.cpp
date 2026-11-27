@@ -733,6 +733,56 @@ inline std::size_t ExtremeChunk(std::size_t group, bool across) {
     return chunk;
 }
 
+// ---------------------------------------------------------------------------
+// Sums along an axis, laid out like the two kernels above: the threads of a
+// block share a group, each adds up its numbers, and the block adds those up
+// in pairs; a long group is taken in parts whose sums another pass adds.
+
+// The groups are the runs; the sum of part p of run r goes to index r * parts + p.
+__global__ void SumPerRunKernel(const float* src, float* out, std::size_t length, std::size_t count,
+                                std::size_t chunk) {
+    __shared__ float value[kExtremeThreads];
+    const unsigned share = blockDim.x;
+    const std::size_t run = static_cast<std::size_t>(blockIdx.x) * blockDim.y + threadIdx.y;
+    const unsigned slot = threadIdx.y * share + threadIdx.x;
+    float total = 0.0f;
+    if (run < count) {
+        const float* v = src + run * length;
+        const std::size_t start = static_cast<std::size_t>(blockIdx.y) * chunk;
+        const std::size_t stop = start + chunk < length ? start + chunk : length;
+        for (std::size_t i = start + threadIdx.x; i < stop; i += share) total += v[i];
+    }
+    value[slot] = total;
+    __syncthreads();
+    for (unsigned half = share >> 1; half > 0; half >>= 1) {
+        if (threadIdx.x < half) value[slot] += value[slot + half];
+        __syncthreads();
+    }
+    if (threadIdx.x == 0 && run < count) out[run * gridDim.y + blockIdx.y] = value[slot];
+}
+
+// The groups lie across the runs; the sum of part p at position i goes to index p * length + i.
+__global__ void SumAcrossRunsKernel(const float* src, float* out, std::size_t length, std::size_t count,
+                                    std::size_t chunk) {
+    __shared__ float value[kExtremeThreads];
+    const unsigned share = blockDim.y;
+    const std::size_t pos = static_cast<std::size_t>(blockIdx.x) * blockDim.x + threadIdx.x;
+    const unsigned slot = threadIdx.x * share + threadIdx.y;
+    float total = 0.0f;
+    if (pos < length) {
+        const std::size_t start = static_cast<std::size_t>(blockIdx.y) * chunk;
+        const std::size_t stop = start + chunk < count ? start + chunk : count;
+        for (std::size_t j = start + threadIdx.y; j < stop; j += share) total += src[j * length + pos];
+    }
+    value[slot] = total;
+    __syncthreads();
+    for (unsigned half = share >> 1; half > 0; half >>= 1) {
+        if (threadIdx.y < half) value[slot] += value[slot + half];
+        __syncthreads();
+    }
+    if (threadIdx.y == 0 && pos < length) out[static_cast<std::size_t>(blockIdx.y) * length + pos] = value[slot];
+}
+
 inline int BlocksFor(std::size_t n) {
     return static_cast<int>((n + static_cast<std::size_t>(kThreadsPerBlock) - 1) /
                             static_cast<std::size_t>(kThreadsPerBlock));
@@ -1196,6 +1246,38 @@ int RocmAxisExtremePass(const float* src_device, const float* lookup_device,
     (void)across;
     (void)smallest;
     LOG_ERROR("ROCm runtime headers not found; RocmAxisExtremePass is unavailable.");
+    return -1;
+#endif
+}
+
+int RocmAxisSumPass(const float* src_device, float* out_device, std::size_t length, std::size_t count,
+                    std::size_t chunk, bool across) {
+#if JUZHEN_ROCM_KERNELS_AVAILABLE
+    if (length == 0 || count == 0 || chunk == 0) return -1;
+    const std::size_t group = across ? count : length, others = across ? length : count;
+    const std::size_t parts = (group + chunk - 1) / chunk;
+    if (parts > 65535) return -1;
+    const std::size_t part = group < chunk ? group : chunk;
+    if (across) {
+        const unsigned share = ExtremeShare(part, 16, 16), together = kExtremeThreads / share;
+        hipLaunchKernelGGL(SumAcrossRunsKernel,
+                           dim3(static_cast<unsigned>((others + together - 1) / together), static_cast<unsigned>(parts)),
+                           dim3(together, share), 0, 0, src_device, out_device, length, count, chunk);
+    } else {
+        const unsigned share = ExtremeShare(part, kExtremeThreads, 8), together = kExtremeThreads / share;
+        hipLaunchKernelGGL(SumPerRunKernel,
+                           dim3(static_cast<unsigned>((others + together - 1) / together), static_cast<unsigned>(parts)),
+                           dim3(share, together), 0, 0, src_device, out_device, length, count, chunk);
+    }
+    return HipToInt(hipGetLastError());
+#else
+    (void)src_device;
+    (void)out_device;
+    (void)length;
+    (void)count;
+    (void)chunk;
+    (void)across;
+    LOG_ERROR("ROCm runtime headers not found; RocmAxisSumPass is unavailable.");
     return -1;
 #endif
 }

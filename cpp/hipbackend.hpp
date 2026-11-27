@@ -69,6 +69,10 @@ int RocmAxisExtremePass(const float* src_device, const float* lookup_device,
                         float* out_value_device, float* out_position_device,
                         std::size_t length, std::size_t count, std::size_t chunk,
                         bool across, bool smallest);
+// The same for sums: out gets the sum of every part of every group, laid out
+// as the src of the next pass (with one part, the sums themselves).
+int RocmAxisSumPass(const float* src_device, float* out_device, std::size_t length, std::size_t count,
+                    std::size_t chunk, bool across);
 int RocmHadamard(float* out_device, const float* a_device, const float* b_device,
                  std::size_t count);
 int RocmHadamardInplace(float* inout_device, const float* other_device,

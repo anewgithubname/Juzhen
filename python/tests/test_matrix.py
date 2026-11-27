@@ -494,14 +494,11 @@ class TestOnePass:
 
     @pytest.mark.parametrize("shape", SHAPES + LONGER)
     def test_sums_of_whole_numbers_are_exact(self, device, rng, shape):
-        # whole numbers add up exactly in any order, so every entry must have been taken once (on CUDA the
-        # threads of a block share a row or a column, and a long one is added up in parts); a NaN or an
-        # infinity stays in its own row and column
+        # whole numbers add up exactly in any order, so every entry must have been taken once (on CUDA and
+        # ROCm the threads of a block share a row or a column, and a long one is added up in parts); a NaN or
+        # an infinity stays in its own row and column
         a = rng.integers(-5, 5, shape).astype(np.float32)
-        # ROCm sums with hipBLAS's gemv, which gives NaN for a sum across the stored columns when the first
-        # of them holds an infinity
-        infinities = () if device == "gpu" and jz.backend() == "rocm" else (np.inf, -np.inf)
-        for value in (None, np.nan) + infinities:
+        for value in (None, np.nan, np.inf, -np.inf):
             for place in ((0, 0), (shape[0] // 2, shape[1] - 1)) if value is not None else (None,):
                 b = a.copy()
                 if place is not None:

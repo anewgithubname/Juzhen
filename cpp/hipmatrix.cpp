@@ -681,30 +681,56 @@ Matrix<ROCMfloat> axis_extreme(const Matrix<ROCMfloat>& M, int dim, AxisExtreme 
     return out;
 }
 
-Matrix<ROCMfloat> sum(const Matrix<ROCMfloat>& M, int dim) {
-    CBLAS_TRANSPOSE transM = M.transpose ? CblasTrans : CblasNoTrans;
-    if (dim == 0) {
-        transM = (transM == CblasTrans) ? CblasNoTrans : CblasTrans;
+static void RocmSumPass(const float* src, float* out, size_t length, size_t count, size_t chunk, bool across) {
+    int rc = Juzhen::RocmAxisSumPass(src, out, length, count, chunk, across);
+    if (rc != 0) {
+        LOG_ERROR("RocmAxisSumPass failed with code {}", rc);
+        ERROR_OUT;
     }
+}
 
-    Matrix<ROCMfloat> sumM("sumM", transM == CblasTrans ? M.numcol : M.numrow, 1, 0);
-    Matrix<ROCMfloat> ones("ones", transM == CblasTrans ? M.numrow : M.numcol, 1, 0);
-    ones.ones();
-
-    gemv(transM,
-         static_cast<int>(M.numrow),
-         static_cast<int>(M.numcol),
-         1.0f,
-         const_cast<ROCMfloat*>(M.elements.get()),
-         static_cast<int>(M.numrow),
-         ones.elements.get(),
-         1,
-         0.0f,
-         sumM.elements.get(),
-         1);
-
+// The sum of every column (dim 0) or row. It was hipBLAS's gemv with a vector
+// of ones, which gave NaN for a sum across the stored columns when the first
+// of them held an infinity; the kernels of hipkernels.cpp add the numbers up
+// themselves (in another order, so a sum can differ from the old one in its
+// last digits).
+Matrix<ROCMfloat> sum(const Matrix<ROCMfloat>& M, int dim) {
+    // the groups are the stored columns, or else lie across them
+    bool across = (dim == 0) == static_cast<bool>(M.transpose);
+    const size_t results = across ? M.numrow : M.numcol;
+    const size_t each = across ? M.numcol : M.numrow;
+    // results x 1, seen as 1 x results for dim 0
+    Matrix<ROCMfloat> sumM("sumM", results, 1, 0);
     if (dim == 0) {
         sumM.transpose = 1;
+    }
+    if (results == 0) return sumM;
+    if (each == 0) {
+        fill(sumM, 0.0);
+        return sumM;
+    }
+    size_t length = M.numrow, count = M.numcol;
+    if (across && length == 1) {
+        // one position: the runs are one long run
+        across = false;
+        length = count;
+        count = 1;
+    }
+    const float* src = reinterpret_cast<const float*>(M.elements.get());
+    Matrix<ROCMfloat> partial(nullptr);
+    size_t& group = across ? count : length;
+    for (;;) {
+        const size_t chunk = Juzhen::RocmAxisExtremeChunk(group, across);
+        const size_t parts = (group + chunk - 1) / chunk;
+        if (parts == 1) {
+            RocmSumPass(src, reinterpret_cast<float*>(sumM.elements.get()), length, count, chunk, across);
+            break;
+        }
+        Matrix<ROCMfloat> sums("sum parts", parts * results, 1, 0);
+        RocmSumPass(src, reinterpret_cast<float*>(sums.elements.get()), length, count, chunk, across);
+        partial = std::move(sums);
+        src = reinterpret_cast<const float*>(partial.elements.get());
+        group = parts;
     }
     return sumM;
 }
