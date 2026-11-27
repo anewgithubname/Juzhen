@@ -113,6 +113,7 @@ public:
     Matrix<MPSfloat> scale(float s1) const { return add(0, s1); }
     void eleminv(double l);
     Matrix<MPSfloat> eleminv(double l) const;
+    Matrix<MPSfloat> elemdiv(const Matrix<MPSfloat>& B) const;  // this ./ B in one pass
     float norm() const;
     // 2D submatrix (GPU block copy, stays in the command stream). Read form
     // returns the block; write form copies M into the

@@ -257,7 +257,7 @@ Matrix<D> operator*(double l, Matrix<D>&& rM) {
 
 template <ElemInvitable D>
 Matrix<D> operator/(const Matrix<D>& lM, const Matrix<D>& rM) {
-    // one pass on the backends that have elemdiv (CPU, CUDA, ROCm)
+    // one pass on the backends that have elemdiv (all four)
     if constexpr (requires { { lM.elemdiv(rM) } -> std::same_as<Matrix<D>>; }) {
         return lM.elemdiv(rM);
     } else {

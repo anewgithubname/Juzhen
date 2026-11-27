@@ -129,6 +129,15 @@ Matrix<MPSfloat> Matrix<MPSfloat>::dot(const Matrix<MPSfloat>& B) const
         throw std::invalid_argument("Matrix dimensions are not compatible");
     }
     Matrix<MPSfloat> C("dot", num_row(), B.num_col());
+    // One column on the right: the matrix-vector kernel, which is several
+    // times faster than the general product (1 ms against 7 to 11 ms for a
+    // 4096 x 4096 matrix on an M2). The column is n numbers in a row in
+    // either storage order.
+    if (B.num_col() == 1 && numrow > 0 && numcol > 0) {
+        mpsGemv((float*) elements.get(), (float*) B.elements.get(), (float*) C.elements.get(),
+                numrow, numcol, transpose);
+        return C;
+    }
     mpsGemm((float*) elements.get(), (float*) B.elements.get(), (float*) C.elements.get(),
             numrow, numcol, B.numrow, B.numcol, transpose, B.get_transpose());
     return C;
@@ -188,6 +197,18 @@ Matrix<MPSfloat> Matrix<MPSfloat>::eleminv(double l) const
     Matrix<MPSfloat> M("reci", numrow, numcol, transpose);
     mpsElemInv((float*) elements.get(), (float*) M.elements.get(), numrow * numcol, l);
     return M;
+}
+
+// C = M ./ B in one kernel, where it used to be a reciprocal and a product
+Matrix<MPSfloat> Matrix<MPSfloat>::elemdiv(const Matrix<MPSfloat>& B) const
+{
+    if (num_row() != B.num_row() || num_col() != B.num_col()){
+        throw std::invalid_argument("Matrix dimensions are not compatible");
+    }
+    Matrix<MPSfloat> C("elemdiv", numrow, numcol, transpose);
+    mpsQuotient((float*) B.elements.get(), (float*) elements.get(), (float*) C.elements.get(),
+                B.numrow, B.numcol, transpose != B.transpose);
+    return C;
 }
 
 // M = M / l

@@ -496,7 +496,8 @@ nb::object get_item(const Matrix<D> &m, nb::handle key) {
 // More functions: reductions along an axis, softmax, top-k, one-hot, stacking.
 // Axis 0 works down each column (one result per column, 1 x cols); axis 1
 // along each row (rows x 1). The reductions run on the device on CUDA and
-// ROCm; on Metal reduce() and elemwise() copy through the host.
+// ROCm; on Metal reduce() and elemwise() copy through the host, except max
+// and min, which read the buffer where it is (see metal_extreme).
 
 void check_axis(int axis) {
     if (axis != 0 && axis != 1)
@@ -520,6 +521,21 @@ float extreme_of(const float *v, size_t n, Better better) {
     return result;
 }
 
+// p holds `count` runs of `length` numbers, one after another. out gets the
+// extreme of every run (per_run), or of every position across the runs.
+template <class Better>
+void extreme_of_runs(const float *p, size_t length, size_t count, bool per_run, float *__restrict out, Better better) {
+    if (per_run) {
+        for (size_t j = 0; j < count; ++j) out[j] = extreme_of(p + j * length, length, better);
+        return;
+    }
+    std::copy(p, p + length, out);
+    for (size_t j = 1; j < count; ++j) {
+        const float *run = p + j * length;
+        for (size_t i = 0; i < length; ++i) out[i] = better(run[i], out[i]) ? run[i] : out[i];
+    }
+}
+
 // max or min along an axis on the CPU, read straight from the storage.
 // reduce() hands whole stored columns to its function, so for the other
 // direction it first makes a transposed copy of the matrix; here that
@@ -527,22 +543,30 @@ float extreme_of(const float *v, size_t n, Better better) {
 template <class Better>
 Matrix<float> cpu_extreme(const Matrix<float> &m, int axis, const char *name, Better better) {
     const bool flagged = m.get_transpose();
-    const size_t stored_rows = flagged ? m.num_col() : m.num_row();
-    const size_t stored_cols = flagged ? m.num_row() : m.num_col();
-    const float *p = m.data();
     Matrix<float> result = axis == 0 ? Matrix<float>(name, 1, m.num_col()) : Matrix<float>(name, m.num_row(), 1);
-    float *__restrict out = const_cast<float *>(result.data());
-    if ((axis == 0) != flagged) {  // one value for each stored column
-        for (size_t j = 0; j < stored_cols; ++j) out[j] = extreme_of(p + j * stored_rows, stored_rows, better);
-    } else {                       // one value for each stored row
-        std::copy(p, p + stored_rows, out);
-        for (size_t j = 1; j < stored_cols; ++j) {
-            const float *column = p + j * stored_rows;
-            for (size_t i = 0; i < stored_rows; ++i) out[i] = better(column[i], out[i]) ? column[i] : out[i];
-        }
-    }
+    // the runs are the stored columns: columns of the matrix unless it is flagged
+    extreme_of_runs(m.data(), flagged ? m.num_col() : m.num_row(), flagged ? m.num_row() : m.num_col(),
+                    (axis == 0) != flagged, const_cast<float *>(result.data()), better);
     return result;
 }
+
+#ifdef APPLE_SILICON
+// The same on Metal. A Metal buffer is memory the CPU can read once the
+// pending GPU work has finished, so nothing is copied to the host: reduce()
+// would copy and transpose the whole matrix first (11 ms for 4096 x 4096 on
+// an M2, before the reduction itself). The buffer holds the matrix row by
+// row, so the runs are rows of the matrix unless it is flagged.
+template <class Better>
+Matrix<MPSfloat> metal_extreme(const Matrix<MPSfloat> &m, int axis, const char *name, Better better) {
+    const bool flagged = m.get_transpose();
+    Matrix<float> result = axis == 0 ? Matrix<float>(name, 1, m.num_col()) : Matrix<float>(name, m.num_row(), 1);
+    mpsSynchronize();
+    extreme_of_runs(reinterpret_cast<const float *>(m.data()), flagged ? m.num_row() : m.num_col(),
+                    flagged ? m.num_col() : m.num_row(), (axis == 1) != flagged,
+                    const_cast<float *>(result.data()), better);
+    return Matrix<MPSfloat>(result);
+}
+#endif
 
 template <class D>
 Matrix<D> max_axis(const Matrix<D> &m, int axis) {
@@ -551,6 +575,12 @@ Matrix<D> max_axis(const Matrix<D> &m, int axis) {
         if (m.num_row() > 0 && m.num_col() > 0)
             return cpu_extreme(m, axis, "max", [](float a, float b) { return a > b; });
     }
+#ifdef APPLE_SILICON
+    if constexpr (std::is_same_v<D, MPSfloat>) {
+        if (m.num_row() > 0 && m.num_col() > 0)
+            return metal_extreme(m, axis, "max", [](float a, float b) { return a > b; });
+    }
+#endif
     return reduce([] __GPU_CPU__(float *v, float *out, int n, int) {
         float best = v[0];
         for (int i = 1; i < n; ++i) best = v[i] > best ? v[i] : best;
@@ -565,6 +595,12 @@ Matrix<D> min_axis(const Matrix<D> &m, int axis) {
         if (m.num_row() > 0 && m.num_col() > 0)
             return cpu_extreme(m, axis, "min", [](float a, float b) { return a < b; });
     }
+#ifdef APPLE_SILICON
+    if constexpr (std::is_same_v<D, MPSfloat>) {
+        if (m.num_row() > 0 && m.num_col() > 0)
+            return metal_extreme(m, axis, "min", [](float a, float b) { return a < b; });
+    }
+#endif
     return reduce([] __GPU_CPU__(float *v, float *out, int n, int) {
         float best = v[0];
         for (int i = 1; i < n; ++i) best = v[i] < best ? v[i] : best;

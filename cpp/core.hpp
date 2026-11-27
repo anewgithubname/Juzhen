@@ -90,6 +90,15 @@ inline void zip_storage(D *out, const D *a, const D *b, size_t numrow,
                         size_t numcol, bool b_is_transposed, F f) {
     const size_t n = numrow * numcol;
     if (!b_is_transposed) {
+        if (out == a && out != b) {
+            // In place (A += B). The loop below is compiled with a test for
+            // overlapping storage that sends this case to its one-at-a-time
+            // version; here the compiler is told that only b is separate.
+            D *__restrict o = out;
+            const D *__restrict q = b;
+            for (size_t k = 0; k < n; k++) o[k] = f(o[k], q[k]);
+            return;
+        }
         for (size_t k = 0; k < n; k++) out[k] = f(a[k], b[k]);
         return;
     }

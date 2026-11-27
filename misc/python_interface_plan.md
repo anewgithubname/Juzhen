@@ -447,3 +447,9 @@ for epoch in range(5):
 - **Windows 上小矩阵的 `sum`。** OpenBLAS 对超过约 9000 个数的 gemv 会唤醒线程，固定花 0.17 毫秒；现在不超过 2^20 个数时用循环直接求和（`sum_direct`）。Linux 上线程版 gemv 本来就不慢，保持不变。
 
 顺带：CPU 上 `s * A` 是单独的乘法循环（原来借用 `s*A + 0`），`A + s` 和 `s - A` 每个元素只做一次运算；这些循环都改成直接用指针，clang 才会向量化。
+
+同一个脚本在 M2 上对 PyTorch 的 Metal 设备（mps）再比了一遍（脚本里 PyTorch 的 GPU 在有 CUDA 时是 CUDA，在 Mac 上是 mps），又找出四处：
+- **Metal 上 `max`、`min` 按轴。** 原来走 `reduce()` 的主机回退：整个矩阵转置拷回主机（4096×4096 要 11 毫秒），再用 CPU 的旧归约。Metal 的缓冲区 CPU 可以直接读，绑定层现在同步之后原地读（`metal_extreme`，和 CPU 共用 `extreme_of_runs`），只把结果传回去。`argmax` 仍走主机回退。
+- **Metal 上 `A @ v`。** `dot` 原来一律用矩阵乘矩阵的内核；右边只有一列时改用矩阵乘向量的内核（`mpsGemv`，原来只有 `sum` 在用），快 7 到 9 倍。`mpsGemv` 同时加上了 `mpsGemm` 已有的自动释放池。
+- **Metal 上 `A / B`。** 补上一遍完成的 `elemdiv`（`matrix_quotient` 内核），四个后端现在都是一遍。
+- **CPU 上 `A += B`、`A -= B`。** `zip_storage` 的循环在输出就是第一个输入时，被编译器的重叠检查送进逐个元素的版本；现在原地的情况单独一个循环，告诉编译器只有另一个操作数是分开的。

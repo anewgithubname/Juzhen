@@ -19,6 +19,7 @@ static id<MTLComputePipelineState> ax_bPipelineState = nil;
 static id<MTLComputePipelineState> matrixaddPipelineState = nil;
 static id<MTLComputePipelineState> matrixcopyblockPipelineState = nil;
 static id<MTLComputePipelineState> matrixproductPipelineState = nil;
+static id<MTLComputePipelineState> matrixquotientPipelineState = nil;
 static id<MTLComputePipelineState> expPipelineState = nil;
 static id<MTLComputePipelineState> logPipelineState = nil;
 static id<MTLComputePipelineState> elemInvPipelineState = nil;
@@ -165,6 +166,7 @@ void mpsInit() {
     id<MTLFunction> matrixaddKernel = [defaultLibrary newFunctionWithName:@"matrix_add"];
     id<MTLFunction> matrixcopyblockKernel = [defaultLibrary newFunctionWithName:@"matrix_copy_block"];
     id<MTLFunction> matrixproductKernel = [defaultLibrary newFunctionWithName:@"matrix_product"];
+    id<MTLFunction> matrixquotientKernel = [defaultLibrary newFunctionWithName:@"matrix_quotient"];
     id<MTLFunction> expKernel = [defaultLibrary newFunctionWithName:@"exp_kernel"];
     id<MTLFunction> logKernel = [defaultLibrary newFunctionWithName:@"log_kernel"];
     id<MTLFunction> elemInvKernel = [defaultLibrary newFunctionWithName:@"elem_inv_kernel"];
@@ -206,6 +208,7 @@ void mpsInit() {
     matrixaddPipelineState = [device newComputePipelineStateWithFunction:matrixaddKernel error:&error];
     matrixcopyblockPipelineState = [device newComputePipelineStateWithFunction:matrixcopyblockKernel error:&error];
     matrixproductPipelineState = [device newComputePipelineStateWithFunction:matrixproductKernel error:&error];
+    matrixquotientPipelineState = [device newComputePipelineStateWithFunction:matrixquotientKernel error:&error];
     expPipelineState = [device newComputePipelineStateWithFunction:expKernel error:&error];
     logPipelineState = [device newComputePipelineStateWithFunction:logKernel error:&error];
     elemInvPipelineState = [device newComputePipelineStateWithFunction:elemInvKernel error:&error];
@@ -279,6 +282,7 @@ void mpsDestroy() {
     [matrixaddPipelineState release];
     [matrixcopyblockPipelineState release];
     [matrixproductPipelineState release];
+    [matrixquotientPipelineState release];
     [expPipelineState release];
     [logPipelineState release];
     [elemInvPipelineState release];
@@ -523,7 +527,20 @@ void mpsCopyMatrixBlock(const float* src, float* dst,
     opEncoded();
 }
 
+// matrix_product and matrix_quotient take the same arguments
+static void encodeProductLike(id<MTLComputePipelineState> pso, const float* A, const float* B, float* C,
+                              int rowA, int colA, bool transpose);
+
 void mpsProduct(const float* A, const float* B, float* C, int rowA, int colA, bool transpose){
+    encodeProductLike(matrixproductPipelineState, A, B, C, rowA, colA, transpose);
+}
+
+void mpsQuotient(const float* A, const float* B, float* C, int rowA, int colA, bool transpose){
+    encodeProductLike(matrixquotientPipelineState, A, B, C, rowA, colA, transpose);
+}
+
+static void encodeProductLike(id<MTLComputePipelineState> pso, const float* A, const float* B, float* C,
+                              int rowA, int colA, bool transpose){
     if (rowA <= 0 || colA <= 0) return;
     id<MTLBuffer> bufferA = bufferMap[(float *) A];
     id<MTLBuffer> bufferB = bufferMap[(float *) B];
@@ -531,7 +548,7 @@ void mpsProduct(const float* A, const float* B, float* C, int rowA, int colA, bo
 
     id<MTLComputeCommandEncoder> encoder = currentComputeEncoder();
 
-    [encoder setComputePipelineState:matrixproductPipelineState];
+    [encoder setComputePipelineState:pso];
     [encoder setBuffer:bufferA offset:0 atIndex:0];
     [encoder setBuffer:bufferB offset:0 atIndex:1];
     [encoder setBuffer:bufferC offset:0 atIndex:2];
@@ -1202,6 +1219,9 @@ void mpsAddBias(float* y, const float* b, int N, int total) {
 }
 
 void mpsGemv(const float* A, const float* x, float* y, int rowA, int colA, bool transposeA) {
+    // The pool is there for the same reason as in mpsGemm: the encoding
+    // leaves autoreleased objects that keep the buffers alive.
+    @autoreleasepool {
     id<MTLCommandBuffer> cb = currentMPSCommandBuffer();
 
     auto matA = [[MPSMatrix alloc] initWithBuffer:bufferMap[(float *) A]
@@ -1228,6 +1248,7 @@ void mpsGemv(const float* A, const float* x, float* y, int rowA, int colA, bool 
     opEncoded();
 
     [matA release]; [vecX release]; [vecY release];
+    }
 }
 
 void mpsTopk(const float* A, float* B, float *C, int rowA, int colA, int k){

@@ -484,6 +484,22 @@ class TestOnePass:
                     assert jz.min(A, 1).numpy().ravel().tolist() == [0, -7]
                     assert jz.max(A.T, 0).numpy().ravel().tolist() == [7, 0]
 
+    @pytest.mark.parametrize("shape", SHAPES)
+    def test_a_matrix_times_one_column(self, device, rng, shape):
+        # Metal has a kernel of its own for a single column on the right
+        a = rng.standard_normal(shape).astype(np.float32)
+        v = rng.standard_normal((shape[1], 1)).astype(np.float32)
+        w = rng.standard_normal((shape[0], 1)).astype(np.float32)
+        for A in (jz.array(a, device=device), plain(a, device), jz.array(a.T.copy(), device=device).T):
+            for V in (jz.array(v, device=device), plain(v, device), jz.array(v.T.copy(), device=device).T):
+                close(A @ V, a @ v, tol=1e-4)
+                close(A @ (V + 1), a @ (v + 1), tol=1e-4)      # a temporary on the right
+                close(V, v)
+            for W in (jz.array(w, device=device), plain(w, device)):
+                close(A.T @ W, a.T @ w, tol=1e-4)
+                close(W.T @ A, w.T @ a, tol=1e-4)              # a row on the left: the general product
+            close(A, a)
+
     @pytest.mark.parametrize("shape", [(1, 1), (1, 9), (7, 1), (16, 16), (37, 53), (300, 17), (1100, 1000)])
     def test_sums(self, device, rng, shape):
         # 1100 x 1000 is above the size up to which the CPU sums directly on Windows
