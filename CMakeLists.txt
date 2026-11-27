@@ -469,6 +469,10 @@ GENERATE_PROJ(testSecurityIO tests/testSecurityIO.cu)
 GENERATE_PROJ(testGather tests/testGather.cu)
 add_test(NAME indexed_gather COMMAND testGather)
 set_tests_properties(indexed_gather PROPERTIES LABELS "unit;indexing" ENVIRONMENT "NVIDIA_TF32_OVERRIDE=0;NVIDIA_TF32=0")
+# + - .* ./ on the CPU for every pairing of storage orders.
+GENERATE_PROJ(testElementwiseStorage tests/testElementwiseStorage.cu)
+add_test(NAME elementwise_storage COMMAND testElementwiseStorage)
+set_tests_properties(elementwise_storage PROPERTIES LABELS "unit")
 # Device RNG reseeding (CUDA, ROCm, Metal) and logical slice assignment (CUDA, Metal).
 GENERATE_PROJ(testCUDAMatrixContracts tests/testCUDAMatrixContracts.cu)
 add_test(NAME cuda_rng_reseed COMMAND testCUDAMatrixContracts)

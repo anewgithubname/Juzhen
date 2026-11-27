@@ -270,7 +270,10 @@ void inplace(Matrix<D> &a, const Matrix<D> &b, Op op) {
     if (!fits(b.num_row(), a.num_row()) || !fits(b.num_col(), a.num_col()))
         throw std::invalid_argument("cannot broadcast " + shape_str(b) + " into " + shape_str(a) +
                                     " for " + op_symbol(op) + "=");
-    const Matrix<D> y = broadcast(b, a.num_row(), a.num_col());
+    Matrix<D> y = broadcast(b, a.num_row(), a.num_col());
+    // A += A.T: the right side is the storage being written; use a copy of it
+    if ((const void *)y.data() == (const void *)a.data() && y.get_transpose() != a.get_transpose())
+        y = copy_of(y);
     if (op == Op::add)
         a += y;
     else
@@ -479,9 +482,12 @@ nb::object get_item(const Matrix<D> &m, nb::handle key) {
     }
     if (r.contiguous && c.contiguous)
         return nb::cast(take_block(m, r.start, r.stop, c.start, c.stop));
-    // lists of indices are gathered on the host
-    Matrix<float> picked = host(m).slice(r.as_list(), c.as_list());
-    return nb::cast(to_device<D>(std::move(picked)));
+    // Lists of indices: gathered on the matrix's own device. Like
+    // take_block, the result keeps the storage order of m, so chosen rows
+    // of a sample-first matrix are copied row by row.
+    if (m.get_transpose())
+        return nb::cast(transposed(transposed(m).slice(c.as_list(), r.as_list())));
+    return nb::cast(m.slice(r.as_list(), c.as_list()));
 }
 
 // ---------------------------------------------------------------------------

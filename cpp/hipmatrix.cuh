@@ -111,6 +111,10 @@ class Matrix<ROCMfloat> {
     void rows(size_t rstart, size_t rend, const Matrix<ROCMfloat>& M);
     Matrix<ROCMfloat> columns(size_t cstart, size_t cend) const;
     void columns(size_t cstart, size_t cend, const Matrix<ROCMfloat>& M);
+    // Indexed gather on the device: result(i, j) = (*this)(rowidx[i], colidx[j]).
+    Matrix<ROCMfloat> slice(const idxlist& rowidx, const idxlist& colidx) const;
+    Matrix<ROCMfloat> rows(idxlist rlist) const { return slice(rlist, seq(num_col())); }
+    Matrix<ROCMfloat> columns(idxlist clist) const { return slice(seq(num_row()), clist); }
 
     friend Matrix<ROCMfloat> sum(const Matrix<ROCMfloat>& M, int dim);
     friend Matrix<ROCMfloat> hadmd(const Matrix<ROCMfloat>& M1,

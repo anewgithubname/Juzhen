@@ -86,6 +86,15 @@ int RocmSliceExtract(float* dst_device,
                      std::size_t cstart,
                      std::size_t rows,
                      std::size_t cols);
+// dst(i, j) = src(row i of the list, column j of the list), dst column-major
+// rows x cols. index_device holds the row numbers, then the column numbers.
+int RocmGather(float* dst_device,
+               const float* src_device,
+               std::size_t src_numrow,
+               bool src_transpose,
+               const std::uint32_t* index_device,
+               std::size_t rows,
+               std::size_t cols);
 int RocmSliceAssign(float* dst_device,
                     std::size_t dst_numrow,
                     bool dst_transpose,

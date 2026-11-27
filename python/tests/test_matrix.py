@@ -358,3 +358,75 @@ class TestNumbersMethodsPositions:
             jz.argmax(scores, None)
         values, positions = jz.topk(jz.array([[np.nan, np.nan, 1.0]], device=device), 2)
         assert positions.tolist() == [[2, -1]] and np.isnan(values.numpy()[0, 1])
+
+
+def plain(a, device):
+    """a as a matrix stored column by column, as jz.randn and a matrix product give it."""
+    M = jz.zeros(*a.shape, device=device)
+    M += jz.array(a, device=device)
+    assert a.shape[0] == 1 or a.shape[1] == 1 or M.numpy().flags["F_CONTIGUOUS"]
+    return M
+
+
+class TestStorageOrders:
+    """A matrix from numpy is stored row by row, one made by juzhen column by column; every pairing must agree."""
+
+    @pytest.mark.parametrize("shape", [(1, 1), (1, 9), (7, 1), (37, 53), (70, 70)])
+    def test_elementwise_in_every_pairing(self, device, rng, shape):
+        a = rng.standard_normal(shape).astype(np.float32)
+        b = rng.standard_normal(shape).astype(np.float32) + 3
+        for A in (jz.array(a, device=device), plain(a, device)):
+            for B in (jz.array(b, device=device), plain(b, device)):
+                close(A + B, a + b)
+                close(A - B, a - b)
+                close(A * B, a * b)
+                close(A / B, a / b)
+                close(A < B, a < b)
+                C = A.copy()
+                C += B
+                close(C, a + b)
+                C -= B
+                close(C, a, tol=1e-4)
+                close(A, a)   # the operands are left alone
+                close(B, b)
+
+    @pytest.mark.parametrize("n", [1, 3, 70])
+    def test_in_place_with_its_own_transpose(self, device, rng, n):
+        # the right side is the storage being written: this used to give wrong numbers on the CPU
+        a = rng.standard_normal((n, n)).astype(np.float32)
+        for make in (lambda: jz.array(a, device=device), lambda: plain(a, device)):
+            A = make()
+            A += A.T
+            close(A, a + a.T)
+            A = make()
+            A -= A.T
+            close(A, a - a.T)
+            A = make()
+            B = A.T
+            B += A
+            close(A, a + a.T)       # B is a view of A
+            A = make()
+            A += A
+            close(A, 2 * a)
+            A = make()
+            close(A + A.T, a + a.T)
+            close(A * A.T, a * a.T)
+            close(A, a)
+
+    def test_rows_and_columns_by_number(self, device, rng):
+        a = rng.standard_normal((50, 23)).astype(np.float32)
+        rows = np.array([49, 0, 7, 7, -1, 12])
+        cols = [22, 3, 3, 0]
+        for A, expected in ((jz.array(a, device=device), a), (plain(a, device), a),
+                            (jz.array(a.T.copy(), device=device).T, a)):
+            for picked, want in ((A[rows], expected[rows]), (A[rows.tolist()], expected[rows]),
+                                 (A[:, cols], expected[:, cols]), (A[rows, cols], expected[np.ix_(rows, cols)]),
+                                 (A[::7], expected[::7]), (A[::-1, ::3], expected[::-1, ::3]),
+                                 (A[5, cols], expected[5:6, cols]), (A[rows, 2], expected[rows, 2:3]),
+                                 (A.T[cols], expected.T[cols]), (A.T[:, rows], expected.T[:, rows])):
+                assert picked.device == device
+                close(picked, want)
+            close(A, expected)
+        big = rng.standard_normal((3000, 40)).astype(np.float32)
+        order = rng.permutation(3000)
+        close(jz.array(big, device=device)[order], big[order])

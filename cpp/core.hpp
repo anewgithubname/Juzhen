@@ -78,6 +78,40 @@ class MatrixView {
         std::vector<MatrixView<CUDAfloat>> matrices);
 };
 
+// out = f(a, b), element by element, for two matrices of the same shape.
+// a and out are stored the same way (numrow x numcol, column-major, and out
+// may be a itself); b is stored either like them or as their transpose.
+// Stored alike, it is one pass over the storage. Otherwise b is read against
+// its storage order, and the work goes tile by tile so that b's tile stays in
+// the cache.
+template <class D, class F>
+inline void zip_storage(D *out, const D *a, const D *b, size_t numrow,
+                        size_t numcol, bool b_is_transposed, F f) {
+    const size_t n = numrow * numcol;
+    if (!b_is_transposed) {
+        for (size_t k = 0; k < n; k++) out[k] = f(a[k], b[k]);
+        return;
+    }
+    // A += A.T: b is the storage being written; read it from a copy.
+    std::vector<D> kept;
+    if (b == out) {
+        kept.assign(b, b + n);
+        b = kept.data();
+    }
+    // 16 x 16: small enough that the tile of b stays cached even when the
+    // number of rows is a power of two and its pieces share cache sets.
+    const size_t tile = 16;
+    for (size_t j0 = 0; j0 < numcol; j0 += tile) {
+        const size_t j1 = std::min(j0 + tile, numcol);
+        for (size_t i0 = 0; i0 < numrow; i0 += tile) {
+            const size_t i1 = std::min(i0 + tile, numrow);
+            for (size_t j = j0; j < j1; j++)
+                for (size_t i = i0; i < i1; i++)
+                    out[j * numrow + i] = f(a[j * numrow + i], b[i * numcol + j]);
+        }
+    }
+}
+
 template <class D>
 class Matrix {
    protected:
@@ -234,6 +268,10 @@ class Matrix {
     friend Matrix<Data> vstack(std::vector<MatrixView<Data>> matrices);
     template <class Data>
     friend Matrix<Data> hadmd(const Matrix<Data> &M1, const Matrix<Data> &M2);
+    template <class Data>
+    friend Matrix<Data> hadmd(const Matrix<Data> &M1, Matrix<Data> &&M2);
+    template <class Data>
+    friend Matrix<Data> hadmd(Matrix<Data> &&M1, const Matrix<Data> &M2);
     friend Matrix<float> topk(const Matrix<MPSfloat>& M, int k, int dim);
 
     template <class Data>
@@ -383,17 +421,10 @@ template <class D>
 Matrix<D> Matrix<D>::slice(const idxlist &rowidx, const idxlist &colidx) const {
     // TODO: the size of matrix is int, which may not be enough
     Matrix<D> M("submatrix", rowidx.size(), colidx.size(), 0);
-    size_t i = 0;
-    for (auto it = rowidx.begin(); it != rowidx.end(); it++) {
-        size_t r = *it;
-        size_t j = 0;
-        for (auto it2 = colidx.begin(); it2 != colidx.end(); it2++) {
-            size_t c = *it2;
-            M.elem(i, j) = elem(r, c);
-            j++;
-        }
-        i++;
-    }
+    // column by column, so that the result is written in storage order
+    D *out = M.elements.get();
+    for (size_t c : colidx)
+        for (size_t r : rowidx) *out++ = elem(r, c);
     return M;
 }
 
@@ -424,16 +455,15 @@ Matrix<D> Matrix<D>::add(const Matrix<D> &B, D s1, D s2) const {
         throw std::invalid_argument("Matrix dimensions are not compatible");
     }
 
-    Matrix<D> C("add", num_row(), num_col(), 0);
-
-    for (size_t j = 0; j < num_col(); j++) {
-        for (size_t i = 0; i < num_row(); i++) {
-            // NOTE: Perhaps there is better way of doing this
-            //  considering the cache hit rate.
-            // NOTE: there was a mistake here
-            C.elem(i, j) = s1 * elem(i, j) + s2 * B.elem(i, j);
-        }
-    }
+    // The result is stored like the two operands when they are stored alike
+    // (transposed or not), and without the transpose flag otherwise.
+    const bool swap = transpose && !B.transpose;
+    const Matrix<D> &x = swap ? B : *this, &y = swap ? *this : B;
+    const D sx = swap ? s2 : s1, sy = swap ? s1 : s2;
+    Matrix<D> C("add", x.numrow, x.numcol, x.transpose);
+    zip_storage(C.elements.get(), x.elements.get(), y.elements.get(), x.numrow,
+                x.numcol, x.transpose != y.transpose,
+                [sx, sy](D p, D q) { return sx * p + sy * q; });
     return C;
 }
 
@@ -445,14 +475,9 @@ void Matrix<D>::add(const Matrix<D> &B, D s1, D s2) {
         throw std::invalid_argument("Matrix dimensions are not compatible");
     }
 
-    for (size_t j = 0; j < num_col(); j++) {
-        for (size_t i = 0; i < num_row(); i++) {
-            // NOTE: Perhaps there is better way of doing this
-            //  considering the cache hit rate.
-            // NOTE: there was a mistake here
-            elem(i, j) = s1 * elem(i, j) + s2 * B.elem(i, j);
-        }
-    }
+    zip_storage(elements.get(), elements.get(), B.elements.get(), numrow,
+                numcol, transpose != B.transpose,
+                [s1, s2](D p, D q) { return s1 * p + s2 * q; });
 }
 
 // C = s1*A + b

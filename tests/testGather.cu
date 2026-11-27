@@ -48,5 +48,8 @@ int compute(){
 #ifdef APPLE_SILICON
     ok=suite<MPSfloat>()&&ok;
 #endif
+#ifdef ROCM_HIP
+    ok=suite<ROCMfloat>()&&ok;
+#endif
     std::cout<<(ok?"PASS":"FAIL")<<" indexed gather\n";return ok?0:1;
 }

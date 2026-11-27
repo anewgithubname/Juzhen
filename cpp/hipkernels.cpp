@@ -294,6 +294,21 @@ __global__ void SliceExtractKernel(float* dst,
     dst[dst_idx] = src[src_idx];
 }
 
+__global__ void GatherKernel(float* dst,
+                             const float* src,
+                             std::size_t src_numrow,
+                             bool src_transpose,
+                             const std::uint32_t* index,
+                             std::size_t rows,
+                             std::size_t cols) {
+    const std::size_t idx = static_cast<std::size_t>(blockIdx.x) * blockDim.x + threadIdx.x;
+    if (idx >= rows * cols) return;
+
+    const std::size_t sr = index[idx % rows];
+    const std::size_t sc = index[rows + idx / rows];
+    dst[idx] = src[src_transpose ? (sr * src_numrow + sc) : (sc * src_numrow + sr)];
+}
+
 __global__ void SliceAssignKernel(float* dst,
                                   std::size_t dst_numrow,
                                   bool dst_transpose,
@@ -1116,6 +1131,30 @@ int RocmSliceExtract(float* dst_device,
     (void)rows;
     (void)cols;
     LOG_ERROR("ROCm runtime headers not found; RocmSliceExtract is unavailable.");
+    return -1;
+#endif
+}
+
+int RocmGather(float* dst_device,
+               const float* src_device,
+               std::size_t src_numrow,
+               bool src_transpose,
+               const std::uint32_t* index_device,
+               std::size_t rows,
+               std::size_t cols) {
+#if JUZHEN_ROCM_KERNELS_AVAILABLE
+    hipLaunchKernelGGL(GatherKernel, dim3(BlocksFor(rows * cols)), dim3(kThreadsPerBlock), 0, 0,
+                       dst_device, src_device, src_numrow, src_transpose, index_device, rows, cols);
+    return HipToInt(hipGetLastError());
+#else
+    (void)dst_device;
+    (void)src_device;
+    (void)src_numrow;
+    (void)src_transpose;
+    (void)index_device;
+    (void)rows;
+    (void)cols;
+    LOG_ERROR("ROCm runtime headers not found; RocmGather is unavailable.");
     return -1;
 #endif
 }

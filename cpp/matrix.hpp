@@ -430,14 +430,14 @@ Matrix<D> hadmd(const Matrix<D> &M1, const Matrix<D> &M2) {
     if (M1.num_row() != M2.num_row() || M1.num_col() != M2.num_col()) {
         throw std::invalid_argument("Matrix dimensions are not compatible");
     }
-    size_t numcol = M1.num_col();
-    size_t numrow = M1.num_row();
-    Matrix<D> result("hadmd", M1.num_row(), M1.num_col());
-    for (size_t j = 0; j < numcol; j++) {
-        for (size_t i = 0; i < numrow; i++) {
-            result.elem(i, j) = M1.elem(i, j) * M2.elem(i, j);
-        }
-    }
+    // stored like the two operands when they are stored alike, and without
+    // the transpose flag otherwise (see Matrix<D>::add)
+    const bool swap = M1.transpose && !M2.transpose;
+    const Matrix<D> &x = swap ? M2 : M1, &y = swap ? M1 : M2;
+    Matrix<D> result("hadmd", x.numrow, x.numcol, x.transpose);
+    zip_storage(result.elements.get(), x.elements.get(), y.elements.get(),
+                x.numrow, x.numcol, x.transpose != y.transpose,
+                [](D p, D q) { return p * q; });
     return result;
 }
 // M2 = M1 .* M2
@@ -447,10 +447,9 @@ Matrix<D> hadmd(const Matrix<D> &M1, Matrix<D> &&M2) {
     if (M1.num_row() != M2.num_row() || M1.num_col() != M2.num_col()) {
         throw std::invalid_argument("Matrix dimensions are not compatible");
     }
-    size_t numcol = M1.num_col();
-    size_t numrow = M1.num_row();
-    for (size_t j = 0; j < numcol; j++)
-        for (size_t i = 0; i < numrow; i++) M2.elem(i, j) *= M1.elem(i, j);
+    zip_storage(M2.elements.get(), M2.elements.get(), M1.elements.get(),
+                M2.numrow, M2.numcol, M1.transpose != M2.transpose,
+                [](D p, D q) { return p * q; });
     return std::move(M2);
 }
 // M1 = M1 .* M2
@@ -460,10 +459,9 @@ Matrix<D> hadmd(Matrix<D> &&M1, const Matrix<D> &M2) {
     if (M1.num_row() != M2.num_row() || M1.num_col() != M2.num_col()) {
         throw std::invalid_argument("Matrix dimensions are not compatible");
     }
-    size_t numcol = M1.num_col();
-    size_t numrow = M1.num_row();
-    for (size_t j = 0; j < numcol; j++)
-        for (size_t i = 0; i < numrow; i++) M1.elem(i, j) *= M2.elem(i, j);
+    zip_storage(M1.elements.get(), M1.elements.get(), M2.elements.get(),
+                M1.numrow, M1.numcol, M1.transpose != M2.transpose,
+                [](D p, D q) { return p * q; });
     return std::move(M1);
 }
 

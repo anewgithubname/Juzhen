@@ -343,6 +343,42 @@ void Matrix<ROCMfloat>::slice(size_t rstart, size_t rend, size_t cstart, size_t 
     }
 }
 
+// The row and column numbers go to the device in one buffer from the matrix
+// pool (32-bit numbers kept in float storage), so a gather is one small
+// upload and one kernel.
+Matrix<ROCMfloat> Matrix<ROCMfloat>::slice(const idxlist& rowidx, const idxlist& colidx) const {
+    for (size_t row : rowidx) if (row >= num_row()) throw std::out_of_range("ROCm gather row index");
+    for (size_t col : colidx) if (col >= num_col()) throw std::out_of_range("ROCm gather column index");
+    const size_t nr = rowidx.size(), nc = colidx.size();
+    const size_t limit = std::numeric_limits<std::uint32_t>::max();
+    if (num_row() > limit || num_col() > limit || nr > limit || nc > limit ||
+        (nc && nr > std::numeric_limits<size_t>::max() / sizeof(float) / nc))
+        throw std::length_error("ROCm gather size overflows");
+    Matrix<ROCMfloat> out("submatrix", nr, nc, 0);
+    if (nr == 0 || nc == 0) return out;
+
+    static_assert(sizeof(std::uint32_t) == sizeof(float), "indices are kept in float storage");
+    std::vector<std::uint32_t> numbers;
+    numbers.reserve(nr + nc);
+    for (size_t row : rowidx) numbers.push_back(static_cast<std::uint32_t>(row));
+    for (size_t col : colidx) numbers.push_back(static_cast<std::uint32_t>(col));
+    Matrix<ROCMfloat> index("gather_index", nr + nc, 1, 0);
+    Juzhen::RocmCheck(Juzhen::RocmMemcpyH2D(reinterpret_cast<float*>(index.elements.get()),
+                                            reinterpret_cast<const float*>(numbers.data()), nr + nc));
+    int rc = Juzhen::RocmGather(reinterpret_cast<float*>(out.elements.get()),
+                                reinterpret_cast<const float*>(elements.get()),
+                                numrow,
+                                transpose,
+                                reinterpret_cast<const std::uint32_t*>(index.elements.get()),
+                                nr,
+                                nc);
+    if (rc != 0) {
+        LOG_ERROR("RocmGather failed with code {}", rc);
+        ERROR_OUT;
+    }
+    return out;
+}
+
 Matrix<ROCMfloat> Matrix<ROCMfloat>::rows(size_t rstart, size_t rend) const {
     return slice(rstart, rend, 0, num_col());
 }

@@ -258,7 +258,7 @@ Matrix<D> operator*(double l, Matrix<D>&& rM) {
 template <ElemInvitable D>
 Matrix<D> operator/(const Matrix<D>& lM, const Matrix<D>& rM) {
     Matrix<D> ret = rM.eleminv(1.0);
-    return hadmd(lM, ret);
+    return hadmd(lM, std::move(ret));  // multiply into the reciprocal: no second matrix
 }
 // rvalue division
 template <ElemInvitable D>
