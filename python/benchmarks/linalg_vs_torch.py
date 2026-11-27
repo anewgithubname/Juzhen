@@ -12,8 +12,9 @@ sum of its absolute values) and the comparison says when the libraries disagree.
 
 A time is the median over the repetitions of one call, in milliseconds. On the
 GPU the clock stops after the device has finished (jz.synchronize(),
-torch.cuda.synchronize()). Nothing is changed in either library's settings
-unless --threads is given.
+torch.cuda.synchronize() or torch.mps.synchronize()). PyTorch's GPU is CUDA
+where it has one and Metal (mps) on a Mac. Nothing is changed in either
+library's settings unless --threads is given.
 """
 import argparse
 import json
@@ -65,9 +66,19 @@ def juzhen_setup(device, n):
     return calls, {"A += B": fresh_in_place}, sync, lambda r: r.numpy()
 
 
+def torch_gpu():
+    """The name of PyTorch's GPU device here, or None."""
+    import torch
+    if torch.cuda.is_available():
+        return "cuda"
+    if torch.backends.mps.is_available():
+        return "mps"
+    return None
+
+
 def torch_setup(device, n):
     import torch
-    where = "cuda" if device == "gpu" else "cpu"
+    where = torch_gpu() if device == "gpu" else "cpu"
     a, b, v, rows = inputs(n)
     A, B, V = (torch.from_numpy(x).to(where) for x in (a, b, v))
     index = torch.from_numpy(rows).to(where)
@@ -91,7 +102,7 @@ def torch_setup(device, n):
         "max(A, axis=1)": lambda: torch.amax(A, 1, keepdim=True),
         "sum(A * A)": lambda: torch.sum(torch.square(A)), "A[n/4 rows]": lambda: A[index],
     }
-    sync = torch.cuda.synchronize if device == "gpu" else (lambda: None)
+    sync = (lambda: None) if device == "cpu" else torch.cuda.synchronize if where == "cuda" else torch.mps.synchronize
     return calls, {"A += B": fresh_in_place}, sync, lambda r: r.detach().cpu().numpy()
 
 
@@ -123,9 +134,11 @@ def environment(lib, device):
         import torch
         info["version"] = torch.__version__
         info["threads"] = torch.get_num_threads()
-        if device == "gpu":
+        if device == "gpu" and torch_gpu() == "cuda":
             info["gpu"] = torch.cuda.get_device_name(0)
             info["tf32_matmul"] = bool(torch.backends.cuda.matmul.allow_tf32)
+        elif device == "gpu":
+            info["gpu"] = "mps " + platform.processor()
     else:
         import juzhen as jz
         info["backend"] = jz.backend()
@@ -142,8 +155,8 @@ def run(lib, device, sizes, budget, threads, out):
         import torch
         if threads:
             torch.set_num_threads(threads)
-        if device == "gpu" and not torch.cuda.is_available():
-            sys.exit("this PyTorch has no CUDA device")
+        if device == "gpu" and torch_gpu() is None:
+            sys.exit("this PyTorch has no GPU device")
         setup = torch_setup
     else:
         import juzhen as jz
