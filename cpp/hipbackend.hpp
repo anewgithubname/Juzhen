@@ -56,6 +56,19 @@ int RocmAffine(float* out_device, const float* in_device, std::size_t count, flo
 int RocmElemInv(float* out_device, const float* in_device, std::size_t count, float l);
 int RocmElemDiv(float* out_device, const float* a_device, const float* b_device,
                 std::size_t count);
+// max, min and argmax along an axis (see hipkernels.cpp). src holds `count`
+// runs of `length` numbers one after another; a group is a run, or with
+// `across` the numbers at one position of every run. A pass takes a group in
+// parts of `chunk` numbers (RocmAxisExtremeChunk says how many, for a group
+// of `group` numbers) and leaves, for every part, the largest (or smallest)
+// number in out_value and its place in the group in out_position; either may
+// be null. With one part these are the results. With more, they are laid out
+// as the src of the next pass, which takes them with lookup = the places.
+std::size_t RocmAxisExtremeChunk(std::size_t group, bool across);
+int RocmAxisExtremePass(const float* src_device, const float* lookup_device,
+                        float* out_value_device, float* out_position_device,
+                        std::size_t length, std::size_t count, std::size_t chunk,
+                        bool across, bool smallest);
 int RocmHadamard(float* out_device, const float* a_device, const float* b_device,
                  std::size_t count);
 int RocmHadamardInplace(float* inout_device, const float* other_device,

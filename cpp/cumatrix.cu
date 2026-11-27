@@ -342,6 +342,214 @@ const Matrix<CUDAfloat> Matrix<CUDAfloat>::T() const
     Matrix<CUDAfloat> MT(newname.c_str(), numrow, numcol, !transpose, elements);
     return MT;
 }
+// ---------------------------------------------------------------------------
+// max, min and argmax along an axis. reduce() gives each stored column to one
+// thread, and for the other direction copies the matrix transposed first;
+// these two kernels share the work on one result among the threads of a block
+// and read the storage as it lies.
+//
+// src holds `count` runs of `length` numbers one after another (the stored
+// columns). A group is a run, or the numbers at one position of every run.
+// Every thread starts from the first number of its group and takes a later
+// one only if it is strictly better, and when the threads' results are merged
+// the earlier of two equal numbers wins. So the result is the one a single
+// pass from the start gives: for ties, for the sign of a zero, and for NaN
+// (one in the first place stays, later ones are passed over).
+//
+// A long group is taken in parts of `chunk` numbers, one part for every block
+// along the grid's second dimension. Each part leaves its result in out_value
+// and where it found it in out_position, and the next pass works on those:
+// `lookup` then holds the places the numbers of src came from. (Every part
+// starts from the group's first number too, so the rule above still holds.)
+static const unsigned extremeThreads = 256;  // the threads of a block
+
+__device__ inline bool extremeWins(float x, int at, float best, int where, bool smallest) {
+    return (smallest ? x < best : x > best) || (x == best && at < where);
+}
+
+// The groups are the runs. blockDim.x threads share a run (thread t takes the
+// numbers t, t + blockDim.x, ... of its part) and a block has blockDim.y
+// runs. The result of part p of run r goes to index r * parts + p.
+__global__ void extremePerRunKernel(const float* src, const float* lookup, float* out_value, float* out_position,
+                                    size_t length, size_t count, size_t chunk, bool smallest) {
+    __shared__ float value[extremeThreads];
+    __shared__ int where[extremeThreads];
+    const unsigned share = blockDim.x;
+    const size_t run = static_cast<size_t>(blockIdx.x) * blockDim.y + threadIdx.y;
+    const unsigned slot = threadIdx.y * share + threadIdx.x;
+    float best = 0.0f;
+    int at = 0;
+    if (run < count) {
+        const float* v = src + run * length;
+        const size_t start = static_cast<size_t>(blockIdx.y) * chunk;
+        const size_t stop = start + chunk < length ? start + chunk : length;
+        best = v[0];
+        for (size_t i = start + threadIdx.x; i < stop; i += share) {
+            const float x = v[i];
+            if (smallest ? x < best : x > best) {
+                best = x;
+                at = static_cast<int>(i);
+            }
+        }
+    }
+    value[slot] = best;
+    where[slot] = at;
+    __syncthreads();
+    for (unsigned half = share >> 1; half > 0; half >>= 1) {
+        if (threadIdx.x < half &&
+            extremeWins(value[slot + half], where[slot + half], value[slot], where[slot], smallest)) {
+            value[slot] = value[slot + half];
+            where[slot] = where[slot + half];
+        }
+        __syncthreads();
+    }
+    if (threadIdx.x == 0 && run < count) {
+        const size_t to = run * gridDim.y + blockIdx.y;
+        if (out_value) out_value[to] = value[slot];
+        if (out_position)
+            out_position[to] = lookup ? lookup[run * length + where[slot]] : static_cast<float>(where[slot]);
+    }
+}
+
+// The groups lie across the runs, one for every position in a run. A block
+// has blockDim.x neighbouring positions, and blockDim.y threads share a
+// position (thread t takes the runs t, t + blockDim.y, ... of its part). The
+// result of part p at position i goes to index p * length + i.
+__global__ void extremeAcrossRunsKernel(const float* src, const float* lookup, float* out_value, float* out_position,
+                                        size_t length, size_t count, size_t chunk, bool smallest) {
+    __shared__ float value[extremeThreads];
+    __shared__ int where[extremeThreads];
+    const unsigned share = blockDim.y;
+    const size_t pos = static_cast<size_t>(blockIdx.x) * blockDim.x + threadIdx.x;
+    const unsigned slot = threadIdx.x * share + threadIdx.y;
+    float best = 0.0f;
+    int at = 0;
+    if (pos < length) {
+        const size_t start = static_cast<size_t>(blockIdx.y) * chunk;
+        const size_t stop = start + chunk < count ? start + chunk : count;
+        best = src[pos];
+        for (size_t j = start + threadIdx.y; j < stop; j += share) {
+            const float x = src[j * length + pos];
+            if (smallest ? x < best : x > best) {
+                best = x;
+                at = static_cast<int>(j);
+            }
+        }
+    }
+    value[slot] = best;
+    where[slot] = at;
+    __syncthreads();
+    for (unsigned half = share >> 1; half > 0; half >>= 1) {
+        if (threadIdx.y < half &&
+            extremeWins(value[slot + half], where[slot + half], value[slot], where[slot], smallest)) {
+            value[slot] = value[slot + half];
+            where[slot] = where[slot + half];
+        }
+        __syncthreads();
+    }
+    if (threadIdx.y == 0 && pos < length) {
+        const size_t to = static_cast<size_t>(blockIdx.y) * length + pos;
+        if (out_value) out_value[to] = value[slot];
+        if (out_position)
+            out_position[to] = lookup ? lookup[static_cast<size_t>(where[slot]) * length + pos]
+                                      : static_cast<float>(where[slot]);
+    }
+}
+
+// How many threads share one result (a power of two, at most `most`), so
+// that each has at least `least` numbers to look at.
+inline unsigned extremeShare(size_t each, unsigned most, unsigned least) {
+    unsigned share = 1;
+    while (share < most && static_cast<size_t>(share) * 2 * least <= each) share <<= 1;
+    return share;
+}
+
+// The numbers of a group that one pass takes as a part. Across the runs 16
+// threads share a part (they read 16 neighbouring positions together), along
+// a run 256 do; a thread then has at most 256 or 1024 numbers. The parts are
+// the grid's second dimension, which holds 65535.
+inline size_t extremeChunk(size_t group, bool across) {
+    size_t chunk = across ? 4096 : 262144;
+    while ((group + chunk - 1) / chunk > 65535) chunk *= 2;
+    return chunk;
+}
+
+// One pass over src (see above): the result of every part of every group.
+static void extremePass(const float* src, const float* lookup, float* out_value, float* out_position,
+                        size_t length, size_t count, size_t chunk, bool across, bool smallest) {
+    const size_t group = across ? count : length, others = across ? length : count;
+    const unsigned parts = (unsigned)((group + chunk - 1) / chunk);
+    const size_t part = group < chunk ? group : chunk;
+    if (across) {
+        const unsigned share = extremeShare(part, 16, 16), together = extremeThreads / share;
+        extremeAcrossRunsKernel<<<dim3((unsigned)((others + together - 1) / together), parts), dim3(together, share)>>>(
+            src, lookup, out_value, out_position, length, count, chunk, smallest);
+    } else {
+        const unsigned share = extremeShare(part, extremeThreads, 8), together = extremeThreads / share;
+        extremePerRunKernel<<<dim3((unsigned)((others + together - 1) / together), parts), dim3(share, together)>>>(
+            src, lookup, out_value, out_position, length, count, chunk, smallest);
+    }
+    CudaErrorCheck(cudaGetLastError());
+}
+
+// The largest or smallest entry of every column (dim 0) or row (dim 1), or
+// the position of the largest.
+Matrix<CUDAfloat> axis_extreme(const Matrix<CUDAfloat>& M, int dim, AxisExtreme what) {
+    if (dim != 0 && dim != 1) {
+        throw std::invalid_argument("axis_extreme: dim must be 0 or 1");
+    }
+    // the groups are the stored columns, or else lie across them
+    bool across = (dim == 0) == static_cast<bool>(M.transpose);
+    const size_t results = across ? M.numrow : M.numcol;
+    const size_t each = across ? M.numcol : M.numrow;
+    Matrix<CUDAfloat> out = Matrix<CUDAfloat>::uninitialized("axis_extreme", dim == 0 ? 1 : results, dim == 0 ? results : 1, 0);
+    if (results == 0) return out;
+    if (each == 0) {
+        // nothing to compare: what a comparison would start from
+        const double inf = std::numeric_limits<double>::infinity();
+        fill(out, what == AxisExtreme::Max ? -inf : what == AxisExtreme::Min ? inf : 0.0);
+        return out;
+    }
+    if (M.numrow > static_cast<size_t>(std::numeric_limits<int>::max()) ||
+        M.numcol > static_cast<size_t>(std::numeric_limits<int>::max())) {
+        throw std::invalid_argument("axis_extreme: the matrix is too large");
+    }
+    const bool smallest = what == AxisExtreme::Min, position = what == AxisExtreme::ArgMax;
+    size_t length = M.numrow, count = M.numcol;
+    if (across && length == 1) {
+        // one position: the runs are one long run
+        across = false;
+        length = count;
+        count = 1;
+    }
+    const float* src = reinterpret_cast<const float*>(M.elements.get());
+    const float* lookup = nullptr;
+    float* const dst = reinterpret_cast<float*>(out.elements.get());
+    // A long group is taken in parts: a pass leaves the result of every part
+    // and where it was, and the next pass works on those.
+    Matrix<CUDAfloat> values(nullptr), places(nullptr);
+    size_t& group = across ? count : length;
+    for (;;) {
+        const size_t chunk = extremeChunk(group, across);
+        const size_t parts = (group + chunk - 1) / chunk;
+        if (parts == 1) {
+            extremePass(src, lookup, position ? nullptr : dst, position ? dst : nullptr,
+                        length, count, chunk, across, smallest);
+            break;
+        }
+        Matrix<CUDAfloat> part_values = Matrix<CUDAfloat>::uninitialized("axis_extreme values", parts * results, 1, 0);
+        Matrix<CUDAfloat> part_places = Matrix<CUDAfloat>::uninitialized("axis_extreme places", parts * results, 1, 0);
+        extremePass(src, lookup, reinterpret_cast<float*>(part_values.elements.get()),
+                    reinterpret_cast<float*>(part_places.elements.get()), length, count, chunk, across, smallest);
+        values = std::move(part_values);
+        places = std::move(part_places);
+        src = reinterpret_cast<const float*>(values.elements.get());
+        lookup = reinterpret_cast<const float*>(places.elements.get());
+        group = parts;
+    }
+    return out;
+}
+
 //similar to MATLAB's sum function, sum the matrix along the specified dimension
 Matrix<CUDAfloat> sum(const Matrix<CUDAfloat>& M, int dim)
 {

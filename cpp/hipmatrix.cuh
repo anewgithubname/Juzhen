@@ -118,6 +118,7 @@ class Matrix<ROCMfloat> {
     Matrix<ROCMfloat> columns(idxlist clist) const { return slice(seq(num_row()), clist); }
 
     friend Matrix<ROCMfloat> sum(const Matrix<ROCMfloat>& M, int dim);
+    friend Matrix<ROCMfloat> axis_extreme(const Matrix<ROCMfloat>& M, int dim, AxisExtreme what);
     friend Matrix<ROCMfloat> hadmd(const Matrix<ROCMfloat>& M1,
                                    const Matrix<ROCMfloat>& M2);
     friend Matrix<ROCMfloat> hadmd(const Matrix<ROCMfloat>& M1,
@@ -154,6 +155,10 @@ class Matrix<ROCMfloat> {
 };
 
 Matrix<ROCMfloat> sum(const Matrix<ROCMfloat>& M, int dim);
+// The largest or smallest entry of every column (dim 0: 1 x cols) or of every
+// row (dim 1: rows x 1), or the position of the largest. In parallel on the
+// device, whichever way the matrix is stored; see hipkernels.cpp.
+Matrix<ROCMfloat> axis_extreme(const Matrix<ROCMfloat>& M, int dim, AxisExtreme what);
 std::ostream& operator<<(std::ostream& os, const Matrix<ROCMfloat>& M);
 Matrix<ROCMfloat> exp(const Matrix<ROCMfloat>& M);
 Matrix<ROCMfloat> exp(Matrix<ROCMfloat>&& M);

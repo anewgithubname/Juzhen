@@ -496,8 +496,10 @@ nb::object get_item(const Matrix<D> &m, nb::handle key) {
 // More functions: reductions along an axis, softmax, top-k, one-hot, stacking.
 // Axis 0 works down each column (one result per column, 1 x cols); axis 1
 // along each row (rows x 1). The reductions run on the device on CUDA and
-// ROCm; on Metal reduce() and elemwise() copy through the host, except max
-// and min, which read the buffer where it is (see metal_extreme).
+// ROCm (max, min and argmax with the parallel kernels of axis_extreme, the
+// others with reduce(), one thread for each group); on Metal reduce() and
+// elemwise() copy through the host, except max and min, which read the
+// buffer where it is (see metal_extreme).
 
 void check_axis(int axis) {
     if (axis != 0 && axis != 1)
@@ -581,6 +583,11 @@ Matrix<D> max_axis(const Matrix<D> &m, int axis) {
             return metal_extreme(m, axis, "max", [](float a, float b) { return a > b; });
     }
 #endif
+#if defined(CUDA) || defined(ROCM_HIP)
+    if constexpr (!std::is_same_v<D, float>) {
+        if (m.num_row() > 0 && m.num_col() > 0) return axis_extreme(m, axis, AxisExtreme::Max);
+    }
+#endif
     return reduce([] __GPU_CPU__(float *v, float *out, int n, int) {
         float best = v[0];
         for (int i = 1; i < n; ++i) best = v[i] > best ? v[i] : best;
@@ -601,6 +608,11 @@ Matrix<D> min_axis(const Matrix<D> &m, int axis) {
             return metal_extreme(m, axis, "min", [](float a, float b) { return a < b; });
     }
 #endif
+#if defined(CUDA) || defined(ROCM_HIP)
+    if constexpr (!std::is_same_v<D, float>) {
+        if (m.num_row() > 0 && m.num_col() > 0) return axis_extreme(m, axis, AxisExtreme::Min);
+    }
+#endif
     return reduce([] __GPU_CPU__(float *v, float *out, int n, int) {
         float best = v[0];
         for (int i = 1; i < n; ++i) best = v[i] < best ? v[i] : best;
@@ -612,6 +624,11 @@ Matrix<D> min_axis(const Matrix<D> &m, int axis) {
 template <class D>
 Matrix<D> argmax_axis(const Matrix<D> &m, int axis) {
     check_axis(axis);
+#if defined(CUDA) || defined(ROCM_HIP)
+    if constexpr (!std::is_same_v<D, float>) {
+        if (m.num_row() > 0 && m.num_col() > 0) return axis_extreme(m, axis, AxisExtreme::ArgMax);
+    }
+#endif
     return reduce([] __GPU_CPU__(float *v, float *out, int n, int) {
         int best = 0;
         for (int i = 1; i < n; ++i) best = v[i] > v[best] ? i : best;

@@ -453,3 +453,8 @@ for epoch in range(5):
 - **Metal 上 `A @ v`。** `dot` 原来一律用矩阵乘矩阵的内核；右边只有一列时改用矩阵乘向量的内核（`mpsGemv`，原来只有 `sum` 在用），快 7 到 9 倍。`mpsGemv` 同时加上了 `mpsGemm` 已有的自动释放池。
 - **Metal 上 `A / B`。** 补上一遍完成的 `elemdiv`（`matrix_quotient` 内核），四个后端现在都是一遍。
 - **CPU 上 `A += B`、`A -= B`。** `zip_storage` 的循环在输出就是第一个输入时，被编译器的重叠检查送进逐个元素的版本；现在原地的情况单独一个循环，告诉编译器只有另一个操作数是分开的。
+
+本机的 ROCm 也能和 PyTorch 比（conda 环境 `ml-research` 里是带 ROCm 的 PyTorch），结果和 CUDA 上一样，只有按轴的 `max` 差得远。原因在 `reduce()`：它把每个存储列交给一个 GPU 线程从头扫到尾，另一个方向还要先做一份转置拷贝。
+- **CUDA、ROCm 上 `max`、`min`、`argmax` 按轴。** 库里新增 `axis_extreme(M, dim, AxisExtreme::Max|Min|ArgMax)`（`cumatrix.cu`，`hipkernels.cpp` + `hipmatrix.cpp`），两个内核：一组数是一个存储列时，一个线程块里的线程交错着分担这一列；一组数横跨各列时，每个位置由块里的 16 个线程分担，相邻线程读相邻地址，不再拷贝。一组数很长时分段做（横跨时每段 4096 个，沿着列每段 262144 个），每段留下结果和位置，再对这些结果做一遍。
+- **结果和从头扫一遍相同。** 每个线程都从这一组的第一个数开始，只在严格更好时才换，合并时相等的取靠前的：并列、零的正负号、NaN（在第一个位置就留下，在后面就跳过）都和单线程一致。
+- **损失函数也用它。** `loss_detail::column_max`（softmax、交叉熵、`logsumexp`）和 `predict_one_hot` 的按列最大值在 CUDA、ROCm 上改用 `axis_extreme`。区别只在有 NaN 时：`predict_one_hot` 原来跳过所有 NaN，现在一列的第一个数是 NaN 时这一列什么都不标。

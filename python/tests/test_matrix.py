@@ -460,7 +460,13 @@ class TestOnePass:
             close(1 / B, 1 / b)
             close(B, b)
 
-    @pytest.mark.parametrize("shape", SHAPES)
+    # on a GPU the threads of a block share a row or a column: shapes that do not fill the blocks, that need
+    # more than one, that have a single group or a single entry in a group, and rows and columns long enough
+    # to be taken in parts (more than 4096 across the stored columns, more than 262144 along one)
+    LONGER = [(300, 17), (17, 300), (513, 257), (1100, 1000), (2, 5000), (5000, 2), (1, 3000), (3000, 1),
+              (3, 9001), (9001, 3), (2, 270000), (270000, 2), (1, 300000), (300000, 1)]
+
+    @pytest.mark.parametrize("shape", SHAPES + LONGER)
     def test_largest_and_smallest_along_an_axis(self, device, rng, shape):
         normal = rng.standard_normal(shape).astype(np.float32)
         ties = rng.integers(-3, 3, shape).astype(np.float32)
@@ -469,6 +475,7 @@ class TestOnePass:
                 for axis in (0, 1):
                     close(jz.max(A, axis), a.max(axis, keepdims=True))
                     close(jz.min(A, axis), a.min(axis, keepdims=True))
+                    assert jz.argmax(A, axis).tolist() == a.argmax(axis).tolist()   # of equal ones, the first
                 assert jz.max(A).item() == a.max()
                 assert jz.min(A).item() == a.min()
                 close(A, a)
@@ -483,6 +490,27 @@ class TestOnePass:
                     assert jz.max(A, 1).numpy().ravel().tolist() == [7, 0]
                     assert jz.min(A, 1).numpy().ravel().tolist() == [0, -7]
                     assert jz.max(A.T, 0).numpy().ravel().tolist() == [7, 0]
+
+    @pytest.mark.parametrize("shape", [(2, 5), (3, 40), (2, 700), (700, 3), (300, 300), (2, 9001), (9001, 2),
+                                       (2, 270000), (270000, 2)])
+    def test_nan_as_in_one_pass_from_the_start(self, device, rng, shape):
+        # a NaN in the first place of a row or column is its result; later ones are passed over
+        a = rng.integers(-5, 5, shape).astype(np.float32)
+        for axis in (0, 1):
+            for place in sorted({0, 1, shape[axis] // 2, shape[axis] - 1} | ({4096, 262144} & set(range(shape[axis])))):
+                b = a.copy()
+                if axis == 0:
+                    b[place, :] = np.nan
+                else:
+                    b[:, place] = np.nan
+                for B in (jz.array(b, device=device), plain(b, device), jz.array(b.T.copy(), device=device).T):
+                    largest, smallest, where = jz.max(B, axis).numpy(), jz.min(B, axis).numpy(), jz.argmax(B, axis)
+                    if place == 0:
+                        assert np.isnan(largest).all() and np.isnan(smallest).all() and not where.any()
+                    else:
+                        assert (largest == np.nanmax(b, axis, keepdims=True)).all()
+                        assert (smallest == np.nanmin(b, axis, keepdims=True)).all()
+                        assert where.tolist() == np.nanargmax(b, axis).tolist()
 
     @pytest.mark.parametrize("shape", SHAPES)
     def test_a_matrix_times_one_column(self, device, rng, shape):

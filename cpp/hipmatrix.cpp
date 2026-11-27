@@ -613,6 +613,74 @@ Matrix<ROCMfloat> vstack(std::vector<MatrixView<ROCMfloat>> matrices) {
     return result;
 }
 
+static void RocmExtremePass(const float* src, const float* lookup, float* out_value, float* out_position,
+                            size_t length, size_t count, size_t chunk, bool across, bool smallest) {
+    int rc = Juzhen::RocmAxisExtremePass(src, lookup, out_value, out_position, length, count, chunk,
+                                         across, smallest);
+    if (rc != 0) {
+        LOG_ERROR("RocmAxisExtremePass failed with code {}", rc);
+        ERROR_OUT;
+    }
+}
+
+// The largest or smallest entry of every column (dim 0) or row (dim 1), or
+// the position of the largest.
+Matrix<ROCMfloat> axis_extreme(const Matrix<ROCMfloat>& M, int dim, AxisExtreme what) {
+    if (dim != 0 && dim != 1) {
+        throw std::invalid_argument("axis_extreme: dim must be 0 or 1");
+    }
+    // the groups are the stored columns, or else lie across them
+    bool across = (dim == 0) == static_cast<bool>(M.transpose);
+    const size_t results = across ? M.numrow : M.numcol;
+    const size_t each = across ? M.numcol : M.numrow;
+    Matrix<ROCMfloat> out = Matrix<ROCMfloat>("axis_extreme", dim == 0 ? 1 : results, dim == 0 ? results : 1, 0);
+    if (results == 0) return out;
+    if (each == 0) {
+        // nothing to compare: what a comparison would start from
+        const double inf = std::numeric_limits<double>::infinity();
+        fill(out, what == AxisExtreme::Max ? -inf : what == AxisExtreme::Min ? inf : 0.0);
+        return out;
+    }
+    if (M.numrow > static_cast<size_t>(std::numeric_limits<int>::max()) ||
+        M.numcol > static_cast<size_t>(std::numeric_limits<int>::max())) {
+        throw std::invalid_argument("axis_extreme: the matrix is too large");
+    }
+    const bool smallest = what == AxisExtreme::Min, position = what == AxisExtreme::ArgMax;
+    size_t length = M.numrow, count = M.numcol;
+    if (across && length == 1) {
+        // one position: the runs are one long run
+        across = false;
+        length = count;
+        count = 1;
+    }
+    const float* src = reinterpret_cast<const float*>(M.elements.get());
+    const float* lookup = nullptr;
+    float* const dst = reinterpret_cast<float*>(out.elements.get());
+    // A long group is taken in parts: a pass leaves the result of every part
+    // and where it was, and the next pass works on those.
+    Matrix<ROCMfloat> values(nullptr), places(nullptr);
+    size_t& group = across ? count : length;
+    for (;;) {
+        const size_t chunk = Juzhen::RocmAxisExtremeChunk(group, across);
+        const size_t parts = (group + chunk - 1) / chunk;
+        if (parts == 1) {
+            RocmExtremePass(src, lookup, position ? nullptr : dst, position ? dst : nullptr,
+                            length, count, chunk, across, smallest);
+            break;
+        }
+        Matrix<ROCMfloat> part_values = Matrix<ROCMfloat>("axis_extreme values", parts * results, 1, 0);
+        Matrix<ROCMfloat> part_places = Matrix<ROCMfloat>("axis_extreme places", parts * results, 1, 0);
+        RocmExtremePass(src, lookup, reinterpret_cast<float*>(part_values.elements.get()),
+                        reinterpret_cast<float*>(part_places.elements.get()), length, count, chunk, across, smallest);
+        values = std::move(part_values);
+        places = std::move(part_places);
+        src = reinterpret_cast<const float*>(values.elements.get());
+        lookup = reinterpret_cast<const float*>(places.elements.get());
+        group = parts;
+    }
+    return out;
+}
+
 Matrix<ROCMfloat> sum(const Matrix<ROCMfloat>& M, int dim) {
     CBLAS_TRANSPOSE transM = M.transpose ? CblasTrans : CblasNoTrans;
     if (dim == 0) {

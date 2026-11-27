@@ -304,6 +304,7 @@ class Matrix<CUDAfloat> {
 
     // our friends
     friend Matrix<CUDAfloat> sum(const Matrix<CUDAfloat>& M, int dim);
+    friend Matrix<CUDAfloat> axis_extreme(const Matrix<CUDAfloat>& M, int dim, AxisExtreme what);
     friend Matrix<CUDAfloat> exp(const Matrix<CUDAfloat>& M);
     friend Matrix<CUDAfloat> exp(Matrix<CUDAfloat>&& M);
     friend Matrix<CUDAfloat> log(const Matrix<CUDAfloat>& M);
@@ -391,6 +392,10 @@ struct GPUSampler {
 
 // operators, math functions
 Matrix<CUDAfloat> sum(const Matrix<CUDAfloat>& M, int dim);
+// The largest or smallest entry of every column (dim 0: 1 x cols) or of every
+// row (dim 1: rows x 1), or the position of the largest. In parallel on the
+// device, whichever way the matrix is stored; see cumatrix.cu.
+Matrix<CUDAfloat> axis_extreme(const Matrix<CUDAfloat>& M, int dim, AxisExtreme what);
 std::ostream& operator<<(std::ostream& os, const Matrix<CUDAfloat>& M);
 Matrix<CUDAfloat> exp(const Matrix<CUDAfloat>& M);
 Matrix<CUDAfloat> exp(Matrix<CUDAfloat>&& M);

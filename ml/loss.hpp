@@ -44,6 +44,18 @@ template<class D> Matrix<D> column_max(const Matrix<D>& input) {
             result[0] = maximum;
         }, input, 0, 1);
 }
+// On CUDA and ROCm reduce() gives each column to a single thread;
+// axis_extreme shares a column among the threads of a block.
+#ifdef CUDA
+inline Matrix<CUDAfloat> column_max(const Matrix<CUDAfloat>& input) {
+    return axis_extreme(input, 0, AxisExtreme::Max);
+}
+#endif
+#ifdef ROCM_HIP
+inline Matrix<ROCMfloat> column_max(const Matrix<ROCMfloat>& input) {
+    return axis_extreme(input, 0, AxisExtreme::Max);
+}
+#endif
 #ifdef APPLE_SILICON
 // One fused kernel instead of the generic reduction's host round trip.
 inline Matrix<MPSfloat> column_max(const Matrix<MPSfloat>& input) {

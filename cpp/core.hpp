@@ -41,6 +41,10 @@
 template <class D>
 class Matrix;
 
+// What axis_extreme() looks for along an axis: the largest entry, the
+// smallest, or the position of the largest.
+enum class AxisExtreme { Max, Min, ArgMax };
+
 /**
  * @brief non-owning view of a matrix.
  *

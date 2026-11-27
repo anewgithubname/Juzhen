@@ -168,10 +168,10 @@ struct adam_state{
     }
 };
 
+// the maximum of each column, 1 x N, for predict_one_hot
 template <class T>
-Matrix<T> predict_one_hot(const Matrix<T>& input){
-    //finding the maximum of input for each column
-    auto colmax = reduce(
+Matrix<T> one_hot_column_max(const Matrix<T>& input){
+    return reduce(
 
         [] __GPU_CPU__(float *v, float *vdes, int lenv, int lendes){
             double max = - DBL_MAX;
@@ -184,6 +184,25 @@ Matrix<T> predict_one_hot(const Matrix<T>& input){
         },
         
         input, 0, 1);
+}
+// On CUDA and ROCm the parallel kernels of axis_extreme, not one thread for
+// each column. (They start from a column's first entry, so a NaN there is
+// the result and nothing in that column is marked.)
+#ifdef CUDA
+inline Matrix<CUDAfloat> one_hot_column_max(const Matrix<CUDAfloat>& input){
+    return axis_extreme(input, 0, AxisExtreme::Max);
+}
+#endif
+#ifdef ROCM_HIP
+inline Matrix<ROCMfloat> one_hot_column_max(const Matrix<ROCMfloat>& input){
+    return axis_extreme(input, 0, AxisExtreme::Max);
+}
+#endif
+
+template <class T>
+Matrix<T> predict_one_hot(const Matrix<T>& input){
+    //finding the maximum of input for each column
+    auto colmax = one_hot_column_max(input);
 
     //substraction of the maximum from each column
     auto sub = input - Matrix<T>::ones(input.num_row(), 1) * colmax;
