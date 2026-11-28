@@ -5,6 +5,7 @@ import math
 import numpy as np
 
 import juzhen as jz
+from juzhen._compile import recorded as _recorded
 
 __all__ = ["AdamW"]
 
@@ -45,10 +46,12 @@ class AdamW:
         self._impl = core.AdamW(params, self._lr, float(betas[0]), float(betas[1]),
                                 float(eps), float(weight_decay))
 
+    @_recorded(method=True)
     def zero_grad(self):
         """Clear the gradients; call before each backward()."""
         self._impl.zero_grad()
 
+    @_recorded(method=True)
     def step(self):
         """Update every parameter that has a gradient; returns how many were updated."""
         updated = self._impl.step()
@@ -62,10 +65,15 @@ class AdamW:
         return self._lr
 
     @lr.setter
+    @_recorded(method=True, form="{0}.lr = {1}")
     def lr(self, value):
         self._impl.set_lr(float(value))
         self._lr = float(value)
 
+    @_recorded(method=True)
     def clip_grad_norm(self, max_norm):
         """Scale the gradients so their total norm is at most max_norm; returns the norm before."""
         return self._impl.clip_grad_norm(float(max_norm))
+
+
+jz._compile.OBJECTS += (AdamW,)

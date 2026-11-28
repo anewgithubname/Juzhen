@@ -45,9 +45,11 @@ if os.name == "nt":
             os.add_dll_directory(_dir)
 
 from . import _core
+from . import _compile
+from ._compile import CompileError, compile  # noqa: A004 - jz.compile, as torch.compile
 
 __all__ = [
-    "Matrix", "array", "zeros", "ones", "randn", "rand", "zeros_like", "ones_like",
+    "compile", "CompileError", "Matrix", "array", "zeros", "ones", "randn", "rand", "zeros_like", "ones_like",
     "exp", "log", "tanh", "sin", "cos", "sqrt", "square", "abs", "relu", "sigmoid",
     "sum", "mean", "max", "min", "argmax", "topk", "softmax", "logsumexp",
     "hstack", "vstack", "backend", "has_gpu", "manual_seed",
@@ -79,6 +81,7 @@ class Matrix(abc.ABC):
 Matrix.register(_core.cpu.Matrix)
 if _core.has_gpu:
     Matrix.register(_core.gpu.Matrix)
+Matrix.register(_compile.Traced)  # a matrix while a function under jz.compile is being recorded
 
 def _array_ufunc(self, ufunc, method, *inputs, **kwargs):
     """What numpy does when a matrix meets a numpy operator or function.
@@ -159,10 +162,13 @@ def _call(function, m, axis, choices=_ROW_OR_COLUMN, name=None):
     try:
         return getattr(_core, function)(m, axis)
     except TypeError:
-        if type(m) not in _MATRIX_TYPES:
+        traced = type(m) is _compile.Traced
+        if type(m) not in _MATRIX_TYPES and not traced:
             raise _not_a_matrix(name or function, m) from None
         if isinstance(axis, bool) or not isinstance(axis, (int, np.integer)):
             raise _axis_error(name or function, axis, choices) from None
+        if traced:
+            return m._function(function, int(axis))
         raise
 
 
@@ -182,6 +188,8 @@ def _elementwise(name, doc):
         except TypeError:
             if type(m) in _MATRIX_TYPES:
                 raise
+            if type(m) is _compile.Traced:
+                return m._function(name)
             raise _not_a_matrix(name, m) from None
 
     f.__name__ = f.__qualname__ = name
@@ -241,6 +249,8 @@ def _as_2d(data):
 
 def array(data, device="cpu"):
     """A new matrix holding a copy of data (a numpy array, list or matrix)."""
+    if _compile._active is not None:
+        raise _compile.refuse_array()
     if isinstance(data, Matrix):
         data = data.numpy()
     return _device(device).from_numpy(_as_2d(data))
@@ -262,24 +272,31 @@ def _shape(rows, cols, what):
     return int(rows), int(cols)
 
 
+def _new(kind, core, rows, cols):
+    """core.kind(rows, cols); written down when a function under jz.compile is being recorded."""
+    if _compile._active is not None:
+        return _compile.create(kind, core, rows, cols)
+    return getattr(core, kind)(rows, cols)
+
+
 def zeros(rows, cols=None, device="cpu"):
     """A rows x cols matrix of zeros."""
-    return _device(device).zeros(*_shape(rows, cols, "zeros"))
+    return _new("zeros", _device(device), *_shape(rows, cols, "zeros"))
 
 
 def ones(rows, cols=None, device="cpu"):
     """A rows x cols matrix of ones."""
-    return _device(device).ones(*_shape(rows, cols, "ones"))
+    return _new("ones", _device(device), *_shape(rows, cols, "ones"))
 
 
 def randn(rows, cols=None, device="cpu"):
     """Standard normal samples; jz.manual_seed() makes them repeatable."""
-    return _device(device).randn(*_shape(rows, cols, "randn"))
+    return _new("randn", _device(device), *_shape(rows, cols, "randn"))
 
 
 def rand(rows, cols=None, device="cpu"):
     """Uniform samples in [0, 1); jz.manual_seed() makes them repeatable."""
-    return _device(device).rand(*_shape(rows, cols, "rand"))
+    return _new("rand", _device(device), *_shape(rows, cols, "rand"))
 
 
 def zeros_like(m):
@@ -292,7 +309,7 @@ def ones_like(m):
 
 def sigmoid(m):
     """1 / (1 + exp(-x)) of every element."""
-    if type(m) not in _MATRIX_TYPES:
+    if type(m) not in _MATRIX_TYPES and type(m) is not _compile.Traced:
         raise _not_a_matrix("sigmoid", m)
     return 1 / (1 + exp(-m))
 
@@ -342,6 +359,8 @@ def argmax(m, axis=1):
         raise ValueError("argmax works along axis 1 (each row, the default) or axis 0 (each column); for the "
                          "position in the whole matrix read as one row, as numpy counts it, use "
                          "np.argmax(A.numpy())")
+    if type(m) is _compile.Traced:
+        raise _compile.refuse("argmax")
     return _positions(_call("argmax", m, axis)).ravel()
 
 
@@ -357,6 +376,8 @@ def topk(m, k, axis=1, largest=True):
         raise ValueError(f"jz.topk: k must be a whole number (how many values to keep), got {k!r}")
     if not isinstance(largest, (bool, np.bool_)):
         raise TypeError(f"jz.topk: largest must be True or False, got {largest!r}")
+    if type(m) is _compile.Traced:
+        raise _compile.refuse("topk")
     try:
         values, positions = _core.topk(m, int(k), axis, bool(largest))
     except TypeError:
@@ -392,12 +413,16 @@ def _same_device(matrices, what):
 def hstack(matrices):
     """Matrices side by side (same number of rows), like numpy.hstack."""
     matrices, core = _same_device(matrices, "hstack")
+    if _compile._active is not None:
+        return _compile.stack(matrices, True)
     return core.stack(matrices, True)
 
 
 def vstack(matrices):
     """Matrices one above the other (same number of columns), like numpy.vstack."""
     matrices, core = _same_device(matrices, "vstack")
+    if _compile._active is not None:
+        return _compile.stack(matrices, False)
     return core.stack(matrices, False)
 
 
@@ -447,12 +472,15 @@ for _class in [_core.cpu.Matrix] + ([_core.gpu.Matrix] if _core.has_gpu else [])
     _class.__int__ = lambda m: int(_number(m, "int()"))
     _class.__round__ = _round
     _class.__format__ = _format
+for _name, _function in _METHODS.items():
+    setattr(_compile.Traced, _name, _method(_name, _function))
 
 
 # Shuffling in juzhen.data uses this generator, so manual_seed() covers it too.
 _rng = np.random.default_rng()
 
 
+@_compile.recorded
 def manual_seed(seed):
     """Seed every random number generator juzhen uses (CPU, GPU, data shuffling)."""
     global _rng
