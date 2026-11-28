@@ -23,6 +23,7 @@
 #include <nanobind/stl/vector.h>
 
 #include <algorithm>
+#include <array>
 #include <cstring>
 #include <memory>
 #include <type_traits>
@@ -280,6 +281,114 @@ void inplace(Matrix<D> &a, const Matrix<D> &b, Op op) {
         a += y;
     else
         a -= y;
+}
+
+// ---------------------------------------------------------------------------
+// Operations that take over an operand: a becomes "a op b" (or "b op a"),
+// with the values and the storage order the operator gives, and in a's
+// storage where the library computes that in one pass. juzhen.compile calls
+// them for a matrix that nothing reads afterwards. A view of a (A.T) shares
+// the storage, so it would see the new values, or the old ones when the
+// result needed storage of its own: the caller holds no view.
+
+// Does "left op right" come out with the transpose flag, for operands stored
+// with and without it? The backends differ when the two are stored
+// differently (the CPU then stores the result without the flag, ROCm like
+// the left operand), so the library is asked, once, with 2 x 2 matrices. A
+// later sum adds the entries up in the order of the storage, so that order
+// decides its last digits.
+template <class D>
+bool result_transposed(Op op, bool left, bool right) {
+    static const auto table = [] {
+        std::array<bool, 16> t{};
+        for (int o = 0; o < 3; o++)
+            for (int l = 0; l < 2; l++)
+                for (int r = 0; r < 2; r++) {
+                    const Matrix<D> ones = Matrix<D>::ones(2, 2);
+                    const Matrix<D> x = l ? transposed(ones) : copy_of(ones), y = r ? transposed(ones) : copy_of(ones);
+                    const Matrix<D> z = o == 0 ? x + y : o == 1 ? x - y : hadmd(x, y);
+                    t[o * 4 + l * 2 + r] = z.get_transpose();
+                }
+        return t;
+    }();
+    const int o = op == Op::add ? 0 : op == Op::sub ? 1 : 2;
+    return table[o * 4 + (left ? 2 : 0) + (right ? 1 : 0)];
+}
+
+// a = a op b, or a = b - a for `reversed`; b may be broadcast to a's shape
+template <class D>
+void take_over(Matrix<D> &a, const Matrix<D> &b, Op op, bool reversed) {
+    if (!fits(b.num_row(), a.num_row()) || !fits(b.num_col(), a.num_col()))
+        throw std::invalid_argument("cannot broadcast " + shape_str(b) + " into " + shape_str(a) +
+                                    " for " + op_symbol(op));
+    const Matrix<D> y = broadcast(b, a.num_row(), a.num_col());
+    const bool at = a.get_transpose(), yt = y.get_transpose();
+    const bool stored_like_a = result_transposed<D>(op, reversed ? yt : at, reversed ? at : yt) == at;
+    // A op A.T reads the storage it would be writing
+    const bool crossed = (const void *)y.data() == (const void *)a.data() && yt != at;
+    if (!stored_like_a || crossed) {
+        switch (op) {
+            case Op::add: a = a + y; break;
+            case Op::sub: a = reversed ? y - a : a - y; break;
+            default: a = hadmd(a, y);
+        }
+        return;
+    }
+    switch (op) {
+        case Op::add: a = std::move(a) + y; break;
+        case Op::sub: a = reversed ? y - std::move(a) : std::move(a) - y; break;
+        default: a = hadmd(std::move(a), y);
+    }
+}
+
+// The functions of one matrix. cpp/matrix.hpp has templates for a temporary
+// of any type that loop over host memory, so a GPU type is given to a
+// function for temporaries only where its backend declares one; elsewhere,
+// and for log on every device, the result gets storage of its own.
+#if defined(APPLE_SILICON)
+constexpr bool kGpuExpInStorage = false;
+#else
+constexpr bool kGpuExpInStorage = true;
+#endif
+
+// a = s * a. On the GPU types A * s is the kernel of "s * A + 0", which gives
+// 0 where A holds -0; the same kernel is used here (CUDA's scale() in place
+// is cuBLAS's, which keeps the -0).
+template <class D>
+void scale_into(Matrix<D> &a, float s) {
+    if constexpr (std::is_same_v<D, float>)
+        a.scale(s);
+    else
+        a.add(0.0f, s);
+}
+
+template <class D>
+void exp_into(Matrix<D> &m) {
+    if constexpr (std::is_same_v<D, float> || kGpuExpInStorage)
+        m = exp(std::move(m));
+    else
+        m = exp(m);
+}
+
+template <class D>
+void sin_into(Matrix<D> &m) {
+    if constexpr (std::is_same_v<D, float>)
+        m = sin(std::move(m));
+    else
+        m = elemwise([=] __GPU_CPU__(float x) { return sinf(x); }, std::move(m));
+}
+
+template <class D>
+void cos_into(Matrix<D> &m) {
+    if constexpr (std::is_same_v<D, float>)
+        m = cos(std::move(m));
+    else
+        m = elemwise([=] __GPU_CPU__(float x) { return cosf(x); }, std::move(m));
+}
+
+template <class D>
+void abs_into(Matrix<D> &m) {
+    m = elemwise([] __GPU_CPU__(float x) { return fabsf(x); }, std::move(m));
 }
 
 template <class D>
@@ -1336,6 +1445,30 @@ void bind(nb::module_ &top, nb::module_ &sub) {
     top.def("topk", &topk_axis<D>, "m"_a, "k"_a, "axis"_a, "largest"_a);
     top.def("softmax", &softmax_axis<D>, "m"_a, "axis"_a);
     top.def("logsumexp", &logsumexp_axis<D>, "m"_a, "axis"_a);
+    // The operations that take over their first operand (see take_over), for
+    // juzhen.compile: add_(A, B) leaves A + B in A.
+    top.def("add_", [](Mat &a, const Mat &b) { take_over(a, b, Op::add, false); });
+    top.def("sub_", [](Mat &a, const Mat &b) { take_over(a, b, Op::sub, false); });
+    top.def("rsub_", [](Mat &a, const Mat &b) { take_over(a, b, Op::sub, true); });
+    top.def("mul_", [](Mat &a, const Mat &b) { take_over(a, b, Op::mul, false); });
+    top.def("add_", [](Mat &a, double s) { a = std::move(a) + s; });
+    top.def("sub_", [](Mat &a, double s) { a = std::move(a) - s; });
+    top.def("rsub_", [](Mat &a, double s) { a = s - std::move(a); });
+    top.def("mul_", [](Mat &a, double s) { scale_into(a, (float)s); });
+    top.def("div_", [](Mat &a, double s) { scale_into(a, (float)(1.0 / s)); });
+    top.def("rdiv_", [](Mat &a, double s) { a = s / std::move(a); });
+    top.def("neg_", [](Mat &a) { a = -std::move(a); });
+    top.def("exp_", &exp_into<D>);
+    top.def("log_", [](Mat &m) { m = log(m); });
+    top.def("tanh_", [](Mat &m) { m = tanh(std::move(m)); });
+    top.def("square_", [](Mat &m) { m = square(std::move(m)); });
+    top.def("sqrt_", [](Mat &m) { m = sqrt(std::move(m)); });
+    top.def("sin_", &sin_into<D>);
+    top.def("cos_", &cos_into<D>);
+    top.def("relu_", [](Mat &m) { m = relu(std::move(m)); });
+    top.def("abs_", &abs_into<D>);
+    // how a matrix is stored, for the tests of the operations above
+    top.def("stored_transposed", [](const Mat &m) { return (bool)m.get_transpose(); });
     sub.def("one_hot", &one_hot_of<D>, "labels"_a, "classes"_a);
     sub.def("stack", &stack_of<D>, "matrices"_a, "horizontal"_a);
 
