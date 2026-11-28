@@ -251,6 +251,9 @@ const char *op_symbol(Op op) {
 bool fits(size_t n, size_t target) { return n == target || n == 1; }
 
 template <class D>
+void take_over(Matrix<D> &a, const Matrix<D> &b, Op op, bool reversed);
+
+template <class D>
 Matrix<D> binary(const Matrix<D> &a, const Matrix<D> &b, Op op) {
     const size_t rows = std::max(a.num_row(), b.num_row());
     const size_t cols = std::max(a.num_col(), b.num_col());
@@ -258,7 +261,21 @@ Matrix<D> binary(const Matrix<D> &a, const Matrix<D> &b, Op op) {
         !fits(b.num_col(), cols))
         throw std::invalid_argument("shapes " + shape_str(a) + " and " + shape_str(b) +
                                     " cannot be broadcast together for " + op_symbol(op));
-    const Matrix<D> x = broadcast(a, rows, cols), y = broadcast(b, rows, cols);
+    Matrix<D> x = broadcast(a, rows, cols), y = broadcast(b, rows, cols);
+    // An operand that had to be broadcast is a matrix made here: the result
+    // goes into it where take_over() can do that (not for a division).
+    if (op != Op::div) {
+        const bool a_made = a.num_row() != rows || a.num_col() != cols;
+        const bool b_made = b.num_row() != rows || b.num_col() != cols;
+        if (b_made) {
+            take_over(y, x, op, true);
+            return y;
+        }
+        if (a_made) {
+            take_over(x, y, op, false);
+            return x;
+        }
+    }
     switch (op) {
         case Op::add: return x + y;
         case Op::sub: return x - y;
@@ -315,7 +332,8 @@ bool result_transposed(Op op, bool left, bool right) {
     return table[o * 4 + (left ? 2 : 0) + (right ? 1 : 0)];
 }
 
-// a = a op b, or a = b - a for `reversed`; b may be broadcast to a's shape
+// a = a op b, or a = b op a for `reversed` (the same values for + and *, but
+// possibly stored the other way round); b may be broadcast to a's shape
 template <class D>
 void take_over(Matrix<D> &a, const Matrix<D> &b, Op op, bool reversed) {
     if (!fits(b.num_row(), a.num_row()) || !fits(b.num_col(), a.num_col()))
@@ -328,9 +346,9 @@ void take_over(Matrix<D> &a, const Matrix<D> &b, Op op, bool reversed) {
     const bool crossed = (const void *)y.data() == (const void *)a.data() && yt != at;
     if (!stored_like_a || crossed) {
         switch (op) {
-            case Op::add: a = a + y; break;
+            case Op::add: a = reversed ? y + a : a + y; break;
             case Op::sub: a = reversed ? y - a : a - y; break;
-            default: a = hadmd(a, y);
+            default: a = reversed ? hadmd(y, a) : hadmd(a, y);
         }
         return;
     }
@@ -1451,6 +1469,8 @@ void bind(nb::module_ &top, nb::module_ &sub) {
     top.def("sub_", [](Mat &a, const Mat &b) { take_over(a, b, Op::sub, false); });
     top.def("rsub_", [](Mat &a, const Mat &b) { take_over(a, b, Op::sub, true); });
     top.def("mul_", [](Mat &a, const Mat &b) { take_over(a, b, Op::mul, false); });
+    top.def("radd_", [](Mat &a, const Mat &b) { take_over(a, b, Op::add, true); });
+    top.def("rmul_", [](Mat &a, const Mat &b) { take_over(a, b, Op::mul, true); });
     top.def("add_", [](Mat &a, double s) { a = std::move(a) + s; });
     top.def("sub_", [](Mat &a, double s) { a = std::move(a) - s; });
     top.def("rsub_", [](Mat &a, double s) { a = s - std::move(a); });
@@ -1469,6 +1489,7 @@ void bind(nb::module_ &top, nb::module_ &sub) {
     top.def("abs_", &abs_into<D>);
     // how a matrix is stored, for the tests of the operations above
     top.def("stored_transposed", [](const Mat &m) { return (bool)m.get_transpose(); });
+    top.def("stored_at", [](const Mat &m) { return (size_t)(uintptr_t)m.data(); });
     sub.def("one_hot", &one_hot_of<D>, "labels"_a, "classes"_a);
     sub.def("stack", &stack_of<D>, "matrices"_a, "horizontal"_a);
 

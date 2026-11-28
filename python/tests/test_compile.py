@@ -39,7 +39,7 @@ SHAPES = [(1, 1), (1, 9), (7, 1), (37, 53), (70, 70)]
 
 # name of the operation, and what it must leave in its first operand
 WITH_A_MATRIX = {"add_": lambda A, B: A + B, "sub_": lambda A, B: A - B, "rsub_": lambda A, B: B - A,
-                 "mul_": lambda A, B: A * B}
+                 "mul_": lambda A, B: A * B, "radd_": lambda A, B: B + A, "rmul_": lambda A, B: B * A}
 WITH_A_NUMBER = {"add_": lambda A, s: A + s, "sub_": lambda A, s: A - s, "rsub_": lambda A, s: s - A,
                  "mul_": lambda A, s: A * s, "div_": lambda A, s: A / s, "rdiv_": lambda A, s: s / A}
 OF_ONE_MATRIX = {"neg_": lambda A: -A, "exp_": jz.exp, "log_": jz.log, "tanh_": jz.tanh, "square_": jz.square,
@@ -109,6 +109,30 @@ class TestTakeOver:
                 assert getattr(_core, name)(A) is None
                 same(A, expected)
 
+    @pytest.mark.parametrize("shape", [(1, 9), (7, 1), (37, 53)])
+    def test_broadcasting_gives_what_numpy_gives(self, device, rng, shape):
+        # the operators leave the result in the matrix they made for the broadcast operand; each entry is
+        # still one float32 operation
+        a = values(rng, shape)
+        for small in [(1, shape[1]), (shape[0], 1), (1, 1)]:
+            b = values(rng, small)
+            for make_a in orders(a, device):
+                for make_b in orders(b, device):
+                    A, B = make_a(), make_b()
+                    with np.errstate(all="ignore"):
+                        for got, want in [(A + B, a + b), (B + A, b + a), (A - B, a - b), (B - A, b - a),
+                                          (A * B, a * b), (B * A, b * a)]:
+                            np.testing.assert_array_equal(got.numpy(), want)
+                    same(A, make_a())
+                    same(B, make_b())
+        row, column = values(rng, (1, shape[1])), values(rng, (shape[0], 1))
+        with np.errstate(all="ignore"):
+            for make_row in orders(row, device):
+                for make_column in orders(column, device):
+                    R, C = make_row(), make_column()
+                    for got, want in [(R + C, row + column), (C - R, column - row), (R * C, row * column)]:
+                        np.testing.assert_array_equal(got.numpy(), want)
+
     def test_a_larger_operand_is_refused(self, device, rng):
         A = jz.array(values(rng, (1, 5)), device=device)
         B = jz.array(values(rng, (4, 5)), device=device)
@@ -140,7 +164,7 @@ class TestTakeOver:
                     assert like_a or _core.stored_transposed(make_a()) or _core.stored_transposed(B)
                     # CUDA multiplies two matrices that are stored differently into a new one
                     mixed = _core.stored_transposed(make_a()) != _core.stored_transposed(B)
-                    expected = like_a and not (name == "mul_" and mixed and cuda_gpu)
+                    expected = like_a and not (name in ("mul_", "rmul_") and mixed and cuda_gpu)
                     assert in_storage(lambda A: getattr(_core, name)(A, B), make_a) == expected, name
             for name in WITH_A_NUMBER:
                 assert in_storage(lambda A: getattr(_core, name)(A, 1.5), make_a), name
@@ -307,8 +331,9 @@ class TestCompile:
         compiled.explain()
         out = capsys.readouterr().out
         assert f"# step, recorded for W: 3 x 2 on '{device}'; X: 6 x 3 on '{device}'" in out and "lr: a number" in out
-        assert "def step(W, X, Y, lr):" in out and "t1 = X @ W" in out and "t2 = tanh(t1)" in out
+        assert "def step(W, X, Y, lr):" in out and "t1 = X @ W" in out and "tanh_(t1)" in out
         assert "W -= t" in out and "return t" in out
+        assert "# 5 new matrices in each call; as written, the function makes 13" in out
 
     def test_an_error_while_recording_leaves_no_record(self, device, rng):
         @jz.compile
@@ -331,6 +356,132 @@ class TestCompile:
         with pytest.warns(UserWarning, match="pass it as a float"):
             for t in range(40):
                 f(A, t)
+
+
+# small functions around the rule for reuse: (function of A and B, new matrices per call)
+REUSE_CASES = [
+    (lambda A, B: jz.exp(A), 1),                                 # an argument is never taken over
+    (lambda A, B: jz.exp(A + B), 1),
+    (lambda A, B: jz.tanh(jz.exp(-(A + B)) * 2 + 1) ** 2, 1),    # a chain in one matrix
+    (lambda A, B: (A + B) * (A + B), 1),                         # written twice, computed once
+    (lambda A, B: (A + B) * (B + A), 2),                         # two temporaries, the product goes into one
+    (lambda A, B: jz.sum((A - B) * (A - B)) + jz.sum((A - B) * (A - B)), 3),
+    (lambda A, B: (A.T @ B) + (A.T @ B), 1),
+    (lambda A, B: [T := A + B, U := A + B, V := U.T, jz.exp(T) @ V][3], 3),  # U is T, so V shows T's storage
+    (lambda A, B: (A + B, A + B), 2),                            # two results stay two matrices
+    (lambda A, B: jz.zeros_like(A) + jz.ones_like(A) + jz.ones_like(A), 3),
+    (lambda A, B: [T := A + B, T * 2][1], 1),
+    (lambda A, B: [T := A + B, (T, T * 2)][1], 2),               # a returned matrix keeps its values
+    (lambda A, B: [T := A + B, U := jz.exp(T), T + U][2], 2),    # read again later: not at exp, but at +
+    (lambda A, B: [T := A + B, V := T.T, jz.exp(T) @ V][2], 3),  # a view shows the storage to a later line
+    (lambda A, B: [T := A + B, V := T.T, U := V @ B, jz.exp(T) + U][3], 2),  # the view's last line is past
+    (lambda A, B: [T := A + B, T * T][1], 1),                    # the same operand twice
+    (lambda A, B: [T := A + B, T + T.T][1], 1),                  # with its own transpose
+    (lambda A, B: [T := A + B, T - T.T][1], 1),
+    (lambda A, B: [T := A - B, r := jz.sum(T, 1), r + T][2], 2),  # the result is larger than r: broadcast
+    (lambda A, B: [T := A * B, r := jz.sum(T, 0), T - r][2], 2),
+    (lambda A, B: B - (A + 1), 1),                               # the right operand is the temporary
+    (lambda A, B: B + (A * 2), 1),
+    (lambda A, B: B * (A - 2), 1),
+    (lambda A, B: 2 - (A + B), 1),
+    (lambda A, B: 2 / (jz.abs(A) + 1), 1),
+    (lambda A, B: (A + B) / 3, 1),
+    (lambda A, B: (A + B) / (jz.abs(B) + 1), 3),                 # no division of two matrices in place
+    (lambda A, B: jz.log(jz.abs(A) + 1), 2),                     # nor log
+    (lambda A, B: [T := A + B, T.__iadd__(A), T * 2][2], 1),     # with the function's own in-place operation
+    (lambda A, B: [T := A @ B.T, jz.relu(T) @ T][1], 3),         # read again by the next line: not taken
+    (lambda A, B: jz.sin(jz.cos(jz.sqrt(jz.abs(jz.square(jz.relu(A + B)))))), 1),
+    (lambda A, B: (A < B) * 2 + 1, 1),
+]
+
+
+class TestCompileReuse:
+    """Temporaries that nothing reads again are taken over; the bits stay those of the function as written."""
+
+    def test_the_rule(self, device, rng):
+        a, b = values(rng, (6, 6)), values(rng, (6, 6))
+        for number, (function, new) in enumerate(REUSE_CASES):
+            compiled = jz.compile(function)
+            for make_a in orders(a, device):
+                for make_b in orders(b, device):
+                    A, B = make_a(), make_b()
+                    for _ in range(2):  # the recording, then the record
+                        assert bits(compiled(A, B)) == bits(function(A, B)), number
+                    assert bits([A, B]) == bits([make_a(), make_b()]), number
+            record, = compiled._records.values()
+            assert record.new == new, (number, record.source)
+
+    def test_the_same_expression_twice(self, device, rng):
+        a, b = values(rng, (6, 6)), values(rng, (6, 6))
+
+        def argument_changed_between(A, B):
+            T = A + B
+            A += B
+            return T - (A + B)
+
+        def result_changed(A, B):
+            T = A + B
+            U = A + B
+            T += 1
+            return T - U
+
+        def view_changed(A, B):
+            T = A * B
+            U = A * B
+            V = U.T
+            V -= B
+            return T + U
+
+        def one_of_two_zeros_changed(A, B):
+            Z1, Z2 = jz.zeros_like(A), jz.zeros_like(A)
+            Z1 += A
+            return Z1 + Z2
+
+        for function in (argument_changed_between, result_changed, view_changed, one_of_two_zeros_changed):
+            compiled = jz.compile(function)
+            for make_a in orders(a, device):
+                for _ in range(2):
+                    A1, A2, B = make_a(), make_a(), jz.array(b, device=device)
+                    assert bits(compiled(A1, B)) == bits(function(A2, B)), function.__name__
+                    assert bits(A1) == bits(A2)
+
+        both = jz.compile(lambda A, B: (A + B, A + B))
+        A, B = jz.array(a, device=device), jz.array(b, device=device)
+        for _ in range(2):
+            first, second = both(A, B)
+            assert first is not second and bits(first) == bits(second) == bits(A + B)
+
+        random = jz.compile(lambda A: jz.randn(*A.shape, device=A.device) - jz.randn(*A.shape, device=A.device))
+        for _ in range(2):
+            assert np.abs(random(A).numpy()).max() > 0
+
+    def test_a_training_step_makes_five_matrices(self, device, rng):
+        compiled = jz.compile(step)
+        compiled(jz.ones(20, 3, device=device), jz.ones(64, 20, device=device), jz.ones(64, 3, device=device), 0.1)
+        record, = compiled._records.values()
+        assert (record.new, record.new_as_written) == (5, 13)
+
+    def test_without_reuse_the_record_is_the_function(self, device, rng, monkeypatch):
+        from juzhen import _compile
+        monkeypatch.setattr(_compile, "REUSE", False)
+        a, b = values(rng, (6, 6)), values(rng, (6, 6))
+        A, B = jz.array(a, device=device), jz.array(b, device=device)
+        for function, _ in REUSE_CASES:
+            compiled = jz.compile(function)
+            assert bits(compiled(A, B)) == bits(compiled(A, B)) == bits(function(A, B))
+            record, = compiled._records.values()
+            assert record.new == record.new_as_written and "_(" not in record.source
+
+    def test_only_views_share_storage_with_an_operand(self, device, rng, monkeypatch):
+        # the rule rests on this: every recorded operation but .T gives a matrix with storage of its own
+        from juzhen import _compile
+        monkeypatch.setattr(_compile, "CHECK_STORAGE", True)
+        a, b, c = values(rng, (5, 4)), values(rng, (5, 4)), values(rng, (4, 5))
+        for make_a in orders(a, device):
+            for make_b in orders(b, device):
+                jz.compile(everything)(make_a(), make_b(), jz.array(c, device=device), np.array([3, 0, 3]), 0.5)
+        for function, _ in REUSE_CASES:
+            jz.compile(function)(jz.array(values(rng, (6, 6)), device=device), plain(values(rng, (6, 6)), device))
 
 
 def refused(function, *args, match):

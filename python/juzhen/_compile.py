@@ -14,6 +14,15 @@ its own (step.explain() prints it), which every later call with those shapes
 runs instead of the function. Python code that is not a matrix operation
 (loops, prints, counters) therefore runs once, while recording.
 
+Reuse. An expression the function writes twice, as in (P - Y) * (P - Y), is
+computed once. In the record every value has a name, so it is known which ones
+nothing reads again. An operation on such a value is written as the operation that
+takes over its operand (tanh_(t1) for t2 = tanh(t1); see take_over in
+python/src/core.cu), which leaves the result in the operand's storage instead
+of a new matrix, with the same bits. Only matrices the record made itself are
+taken over: never an argument, and never one whose storage a view (A.T) still
+shows to a later line.
+
 What cannot be repeated from the record is refused while recording, with a
 CompileError that says what to write instead: reading a value out of a matrix
 (float(), .numpy(), if A > 0:), a matrix that is not an argument, jz.array().
@@ -50,6 +59,8 @@ if _core.has_gpu:
     _DEVICE_OF[_core.gpu.Matrix] = "gpu"
 _HERE = os.path.dirname(os.path.abspath(__file__))
 _MANY = 32  # records of one function before a warning
+REUSE = True  # take over the temporaries nothing reads again (off: the record as the function wrote it)
+CHECK_STORAGE = False  # tests: while recording, check which results share storage with an operand
 
 _active = None  # the Recording in progress, if any
 
@@ -83,15 +94,17 @@ def _literal(x):
     return repr(x) if x >= 0 and not (x == 0 and math.copysign(1, x) < 0) else f"({x!r})"
 
 
+class _V(str):
+    """The name of a matrix in a record (the other operands, numbers, are plain text)."""
+    __slots__ = ()
+
+
 class _Line:
-    """One recorded operation: `out = expr`, or `expr` alone for an in-place one."""
-    __slots__ = ("out", "op", "args", "expr", "where")
+    """One recorded operation: `out = form(args)`, or `form(args)` alone for an in-place one."""
+    __slots__ = ("out", "op", "form", "args", "where")
 
-    def __init__(self, out, op, args, expr, where):
-        self.out, self.op, self.args, self.expr, self.where = out, op, args, expr, where
-
-    def text(self):
-        return self.expr if self.out is None else f"{self.out} = {self.expr}"
+    def __init__(self, out, op, form, args, where):
+        self.out, self.op, self.form, self.args, self.where = out, op, form, args, where
 
 
 class Recording:
@@ -102,6 +115,9 @@ class Recording:
         self.open = True
         self.arrays = {}  # id of a numpy array that is an argument -> its name
         self.taken = set()  # names in use
+        self.shape = {}  # name of a matrix -> its shape
+        self.made = set()  # the matrices an operation of the record made, with storage of their own
+        self.view_of = {}  # name of a view (A.T) -> the matrix whose storage it shows
 
     def name_for(self, wanted):
         """A Python name that nothing else in the record uses."""
@@ -133,11 +149,28 @@ class Recording:
             return x, _literal(x)
         return x, None  # not something a record can hold; the real operation says what is wrong with it
 
-    def add(self, real, op, args, expr):
-        """Write down `expr`, which gave the matrix `real`; the Traced for it."""
+    def argument(self, real, name):
+        """The Traced for a matrix that is an argument."""
+        name = _V(name)
+        self.shape[name] = real.shape
+        return Traced(real, name, self)
+
+    def add(self, real, op, form, args, sources=(), view_of=None):
+        """Write down `form.format(*args)`, which gave the matrix `real`; the Traced for it.
+
+        sources are the matrices it was computed from; view_of names the one whose storage it shows.
+        """
         self.count += 1
-        name = f"t{self.count}"
-        self.lines.append(_Line(name, op, args, expr, _where()))
+        name = _V(f"t{self.count}")
+        self.lines.append(_Line(name, op, form, args, _where()))
+        self.shape[name] = real.shape
+        if view_of is None:
+            self.made.add(name)
+        else:
+            self.view_of[name] = view_of
+        if CHECK_STORAGE:
+            shared = [m for m in sources if type(m) in _MATRIX_TYPES and _core.stored_at(m) == _core.stored_at(real)]
+            assert bool(shared) == (view_of is not None), f"{op}: shares storage with an operand: {bool(shared)}"
         return Traced(real, name, self)
 
     def operate(self, what, run, operands, template, op):
@@ -156,7 +189,7 @@ class Recording:
                 f"{what} reads a value out of a matrix. Inside a function compiled with jz.compile that "
                 "happens once, while recording, and the record keeps the number it saw. Keep the value as a "
                 "1 x 1 matrix (A[0:1, 0:1], jz.sum(A)) or return the matrix and read it outside")
-        return self.add(real, op, tuple(p[1] for p in pairs), template.format(*[p[1] for p in pairs]))
+        return self.add(real, op, template, tuple(p[1] for p in pairs), [p[0] for p in pairs])
 
 
 def _ended(what):
@@ -197,6 +230,9 @@ _FUNCTIONS = ("exp", "log", "tanh", "sin", "cos", "sqrt", "square", "abs", "relu
               "softmax", "logsumexp")
 _NAMESPACE = {name: getattr(_core, name) for name in _FUNCTIONS}
 _NAMESPACE.update(cpu=_core.cpu, inf=math.inf, nan=math.nan, fabs=math.fabs)  # abs is the matrix function
+_NAMESPACE.update({name: getattr(_core, name) for name in (
+    "add_", "radd_", "sub_", "rsub_", "mul_", "rmul_", "div_", "rdiv_", "neg_", "exp_", "tanh_", "square_",
+    "sqrt_", "sin_", "cos_", "relu_", "abs_")})
 if _core.has_gpu:
     _NAMESPACE["gpu"] = _core.gpu
 
@@ -230,22 +266,22 @@ class Traced:
     @property
     def T(self):
         self._check(".T")
-        return self._rec.add(self._m.T, "T", (self._name,), f"{self._name}.T")
+        return self._rec.add(self._m.T, "T", "{0}.T", (self._name,), (self._m,), view_of=self._name)
 
     def copy(self):
         self._check(".copy()")
-        return self._rec.add(self._m.copy(), "copy", (self._name,), f"{self._name}.copy()")
+        return self._rec.add(self._m.copy(), "copy", "{0}.copy()", (self._name,), (self._m,))
 
     def to(self, device):
         self._check(".to()")
         real = self._m.to(device)
         if real is self._m:
             return self
-        return self._rec.add(real, "to", (self._name,), f"{self._name}.to({device!r})")
+        return self._rec.add(real, "to", f"{{0}}.to({device!r})", (self._name,), (self._m,))
 
     def __neg__(self):
         self._check("-A")
-        return self._rec.add(-self._m, "neg", (self._name,), f"-{self._name}")
+        return self._rec.add(-self._m, "neg", "-{0}", (self._name,), (self._m,))
 
     def __pos__(self):
         return self
@@ -267,7 +303,7 @@ class Traced:
                 "A[...] with an index computed inside a function compiled with jz.compile: the record would "
                 "keep the positions of the first call. Use whole numbers and slices, or pass the positions "
                 "to the function as an argument (a numpy array of integers) and use that argument unchanged")
-        return self._rec.add(real, "getitem", (self._name,), f"{self._name}[{text}]")
+        return self._rec.add(real, "getitem", f"{{0}}[{text}]", (self._name,), (self._m,))
 
     def _index(self, key):
         """Text of an index made of whole numbers, slices and numpy arrays that are arguments; None otherwise."""
@@ -292,8 +328,8 @@ class Traced:
         """jz.name(self, *constants) for the functions of _FUNCTIONS; the constants are whole numbers."""
         self._check(f"jz.{name}")
         real = getattr(_core, name)(self._m, *constants)
-        text = ", ".join([self._name] + [repr(c) for c in constants])
-        return self._rec.add(real, name, (self._name,), f"{name}({text})")
+        form = name + "({0}" + "".join(f", {c!r}" for c in constants) + ")"
+        return self._rec.add(real, name, form, (self._name,), (self._m,))
 
     def __repr__(self):
         rows, cols = self._m.shape
@@ -358,7 +394,7 @@ def _in_place_method(name):
         self._m = run(self._m, real)  # the same matrix; the library's own errors come from here
         if text is None:
             raise CompileError(f"{what} with a {type(other).__name__} cannot be recorded by jz.compile")
-        rec.lines.append(_Line(None, name, (self._name, text), template.format(self._name, text), _where()))
+        rec.lines.append(_Line(None, name, template, (self._name, text), _where()))
         return self
 
     method.__name__ = f"__{name}__"
@@ -468,7 +504,7 @@ def recording():
 def create(kind, core, rows, cols):
     """jz.zeros, ones, randn or rand inside a recording: a new matrix in every call of the record."""
     module = "cpu" if core is _core.cpu else "gpu"
-    return _active.add(getattr(core, kind)(rows, cols), kind, (), f"{module}.{kind}({rows}, {cols})")
+    return _active.add(getattr(core, kind)(rows, cols), kind, f"{module}.{kind}({rows}, {cols})", ())
 
 
 def stack(matrices, horizontal):
@@ -477,8 +513,9 @@ def stack(matrices, horizontal):
     pairs = [_active.operand(m, what) for m in matrices]
     module = "cpu" if pairs[0][0].device == "cpu" else "gpu"
     real = getattr(_core, module).stack([p[0] for p in pairs], horizontal)
-    texts = tuple(p[1] for p in pairs)
-    return _active.add(real, "stack", texts, f"{module}.stack([{', '.join(texts)}], {horizontal})")
+    places = ", ".join(f"{{{i}}}" for i in range(len(pairs)))
+    return _active.add(real, "stack", f"{module}.stack([{places}], {horizontal})", tuple(p[1] for p in pairs),
+                       [p[0] for p in pairs])
 
 
 def refuse_array():
@@ -498,7 +535,7 @@ def refuse(name):
 
 class _Record:
     """The function written from one recording."""
-    __slots__ = ("run", "source", "summary")
+    __slots__ = ("run", "source", "summary", "new", "new_as_written")
 
 
 class Compiled:
@@ -551,7 +588,7 @@ class Compiled:
                 name = rec.name_for(name)
                 names.append(name)
                 described.append(f"{name}: {x.shape[0]} x {x.shape[1]} on '{x.device}'")
-                return Traced(x, name, rec)
+                return rec.argument(x, name)
             if t is float or isinstance(x, np.floating):
                 name = rec.name_for(name)
                 names.append(name)
@@ -582,8 +619,12 @@ class Compiled:
             _active = None
 
         record = _Record()
+        texts, text_of_result, record.new, record.new_as_written = _reuse(rec, returned[1])
         record.summary = f"# {function.__name__}, recorded for " + ("; ".join(described) or "no matrices")
-        record.source, record.run = _write(function, rec, names, returned[1], len(self._records))
+        if record.new != record.new_as_written:
+            record.summary += (f"\n# {record.new} new matrices in each call; as written, the function makes "
+                               f"{record.new_as_written}")
+        record.source, record.run = _write(function, rec, names, texts, text_of_result, len(self._records))
         self._records[key] = record
         if len(self._records) == _MANY and not self._warned:
             self._warned = True
@@ -624,7 +665,7 @@ def _key(x, leaves):
 
 
 def _returned(x, rec):
-    """(what the first call returns, the text of the record's return value)."""
+    """(what the first call returns, the record's return value as nested lists of texts and names)."""
     t = type(x)
     if t is Traced:
         x._check("Returning a matrix")
@@ -637,16 +678,15 @@ def _returned(x, rec):
                            "arguments and was not computed from them; pass it in as an argument")
     if t is tuple or t is list:
         pairs = [_returned(item, rec) for item in x]
-        texts = ", ".join(p[1] for p in pairs)
         if t is tuple:
-            return tuple(p[0] for p in pairs), f"({texts}{',' if len(pairs) == 1 else ''})"
-        return [p[0] for p in pairs], f"[{texts}]"
+            return tuple(p[0] for p in pairs), ["(", *_separated(p[1] for p in pairs), ",)" if len(pairs) == 1 else ")"]
+        return [p[0] for p in pairs], ["[", *_separated(p[1] for p in pairs), "]"]
     if t is dict:
         pairs = {k: _returned(v, rec) for k, v in x.items()}
         for k in pairs:
             if not isinstance(k, (str, int)):
                 raise CompileError("a compiled function can return a dict with text or whole-number keys only")
-        return {k: p[0] for k, p in pairs.items()}, "{" + ", ".join(f"{k!r}: {p[1]}" for k, p in pairs.items()) + "}"
+        return {k: p[0] for k, p in pairs.items()}, ["{", *_separated([f"{k!r}: ", p[1]] for k, p in pairs.items()), "}"]
     if t is np.ndarray and id(x) in rec.arrays:
         return x, rec.arrays[id(x)]
     if x is None or t in (bool, str):
@@ -658,15 +698,148 @@ def _returned(x, rec):
         "was given, and tuples, lists and dicts of them; anything else was computed once, while recording")
 
 
-def _write(function, rec, names, returned, number):
-    """The record as the source of a Python function, and that function."""
-    files = {line.where[0] for line in rec.lines}
-    width = max([len(line.text()) for line in rec.lines], default=0)
-    body = []
+def _separated(items):
+    """items with ", " between them."""
+    out = []
+    for item in items:
+        if out:
+            out.append(", ")
+        out.append(item)
+    return out
+
+
+def _flat(node):
+    """The texts and names of a tree made by _returned, in order."""
+    if isinstance(node, list):
+        for item in node:
+            yield from _flat(item)
+    else:
+        yield node
+
+
+# The operations that have a form that takes over an operand, as the text of that form. {0} and {1} are the
+# operands of the line as recorded; the operand named first in the new text is the one taken over.
+_TAKE_LEFT = {"add": "add_({0}, {1})", "sub": "sub_({0}, {1})", "mul": "mul_({0}, {1})"}
+_TAKE_RIGHT = {"add": "radd_({1}, {0})", "sub": "rsub_({1}, {0})", "mul": "rmul_({1}, {0})"}
+_TAKE_BESIDE_NUMBER = {  # a matrix with a number on its right, and on its left
+    "add": ("add_({0}, {1})", "add_({1}, {0})"), "sub": ("sub_({0}, {1})", "rsub_({1}, {0})"),
+    "mul": ("mul_({0}, {1})", "mul_({1}, {0})"), "truediv": ("div_({0}, {1})", "rdiv_({1}, {0})")}
+_TAKE_ONE = {name: f"{name}_({{0}})" for name in ("neg", "exp", "tanh", "square", "sqrt", "sin", "cos", "relu", "abs")}
+_POWERS = {"2": "square_({0})", "2.0": "square_({0})", "0.5": "sqrt_({0})"}
+
+
+def _reuse(rec, result):
+    """The lines of the record as text, each computed once and in a matrix nothing reads again where it can be.
+
+    Returns (the texts with their lines, the text of the return value, new matrices per call, the same as
+    written).
+    """
+    returned = {a for a in _flat(result) if type(a) is _V}
+
+    same_as = {}  # the name of a dropped line's result -> the name of the earlier, equal one
+
+    def storage(a):
+        """The matrix whose storage a shows: a itself unless it is a view."""
+        a = same_as.get(a, a)
+        while a in rec.view_of:
+            a = same_as.get(rec.view_of[a], rec.view_of[a])
+        return a
+
+    # ---- an expression written twice is computed once ----
+    # (P - Y) * (P - Y) records P - Y twice. The second line is dropped and its name stands for the first
+    # result, if the operands hold the same values at both lines and neither result is changed in place
+    # anywhere in the record (the other name would see the change).
+    changed = {storage(line.args[0]) for line in rec.lines if line.out is None}  # targets of +=, -=, *=, /=
+    seen, versions, lines = {}, {}, []
     for line in rec.lines:
+        args = tuple(same_as.get(a, a) if type(a) is _V else a for a in line.args)
+        if line.out is None:
+            versions[storage(args[0])] = versions.get(storage(args[0]), 0) + 1
+            lines.append((line, args))
+            continue
+        key = (line.op, line.form, tuple((a, versions.get(storage(a), 0)) if type(a) is _V else a for a in args))
+        first = seen.get(key)
+        if (REUSE and first is not None and line.op not in ("zeros", "ones", "randn", "rand")
+                and storage(first) not in changed and storage(line.out) not in changed
+                and not (first in returned and line.out in returned)):
+            same_as[line.out] = first
+            continue
+        seen.setdefault(key, line.out)
+        lines.append((line, args))
+
+    def first_name(a):
+        return same_as.get(a, a) if type(a) is _V else a
+
+    # ---- the last line that reads each matrix, and each storage ----
+    last = {}  # name -> the last line that reads it (len(lines): it is returned)
+    for i, (line, args) in enumerate(lines):
+        for a in args:
+            if type(a) is _V:
+                last[a] = i
+    for a in returned:
+        last[first_name(a)] = len(lines)
+    # for every matrix the record made: the last line that reads its storage, through it or through a view
+    storage_last = {name: last.get(name, -1) for name in rec.made}
+    for view in rec.view_of:
+        if storage(view) in storage_last:
+            storage_last[storage(view)] = max(storage_last[storage(view)], last.get(view, -1))
+
+    # ---- a result goes into an operand that nothing reads again ----
+    held_by = {}  # the name of a result that took over an operand -> the name of the matrix that holds it
+    texts, new = [], 0
+
+    def name(a):
+        a = first_name(a)
+        return held_by.get(a, a) if type(a) is _V else a
+
+    for i, (line, args) in enumerate(lines):
+
+        def free(a):
+            """Can the line leave its result in a? A matrix the record made, of the result's shape, that
+            nothing reads after this line."""
+            return (type(a) is _V and a in rec.made and storage_last[a] <= i
+                    and rec.shape[a] == rec.shape[line.out])
+
+        form = taken = None
+        if REUSE and line.out is not None:
+            op = line.op
+            if op in _TAKE_ONE and free(args[0]):
+                form, taken = _TAKE_ONE[op], args[0]
+            elif op == "pow" and args[1] in _POWERS and free(args[0]):
+                form, taken = _POWERS[args[1]], args[0]
+            elif op in _TAKE_BESIDE_NUMBER and type(args[0]) is not type(args[1]):
+                side = 0 if type(args[0]) is _V else 1
+                if free(args[side]):
+                    form, taken = _TAKE_BESIDE_NUMBER[op][side], args[side]
+            elif op in _TAKE_LEFT and type(args[0]) is _V and type(args[1]) is _V:
+                if free(args[0]):
+                    form, taken = _TAKE_LEFT[op], args[0]
+                elif free(args[1]):
+                    form, taken = _TAKE_RIGHT[op], args[1]
+        if taken is None:
+            text = line.form.format(*[name(a) for a in args])
+            if line.out is not None:
+                text = f"{line.out} = {text}"
+                new += line.out in rec.made
+        else:
+            # The result is in `taken` from here on. Nothing reads the old value or a view of it again, so
+            # what is read later of this storage is what is read of the result: storage_last[line.out].
+            text = form.format(*[name(a) for a in args])
+            held_by[line.out] = name(taken)
+        texts.append((text, line))
+    as_written = sum(1 for line in rec.lines if line.out in rec.made)
+    return texts, "".join(name(a) for a in _flat(result)), new, as_written
+
+
+def _write(function, rec, names, texts, returned, number):
+    """The record as the source of a Python function, and that function."""
+    files = {line.where[0] for _, line in texts}
+    width = max([len(text) for text, _ in texts], default=0)
+    body = []
+    for text, line in texts:
         filename, lineno = line.where
         origin = f"line {lineno}" if len(files) == 1 else f"{os.path.basename(filename)}:{lineno}"
-        body.append(f"    {line.text():{width}}  # {origin}")
+        body.append(f"    {text:{width}}  # {origin}")
     body.append(f"    return {returned}")
     # under the function's own name, unless that is one of the names the record uses
     name = function.__name__
