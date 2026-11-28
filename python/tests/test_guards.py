@@ -486,10 +486,12 @@ def readme_blocks():
 
 def test_readme_code_runs(capsys):
     blocks = readme_blocks()
-    assert len(blocks) == 3
+    assert len(blocks) == 4
     names = {"jz": jz}  # the blocks are read one after another: the first one imports jz
     for block in blocks:
         if "datasets.mnist" in block:  # needs the data set and a minute; python/examples/fit_mnist.py is the same
             continue
         exec(compile(block, "README.md", "exec"), names)
-    assert "next token: 11" in capsys.readouterr().out
+    out = capsys.readouterr().out
+    assert "next token: 11" in out
+    assert "5 new matrices in each call; as written, the function makes 13" in out  # step.explain()

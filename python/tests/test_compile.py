@@ -4,7 +4,7 @@ import numpy as np
 import pytest
 
 import juzhen as jz
-from juzhen import _core
+from juzhen import _core, nn, optim
 
 
 def plain(a, device):
@@ -590,3 +590,222 @@ class TestCompileRefusals:
             jz.compile(lambda A: jz.sum(A, 2.5))(A)
         with pytest.raises(TypeError, match="needs two matrices"):
             jz.compile(lambda A: A @ 2)(A)
+
+
+# ---------------------------------------------------------------------------------------------------------
+# jz.compile with networks, optimizers and losses
+
+def mlp(device, seed=0):
+    jz.manual_seed(seed)
+    net = nn.Sequential(nn.Dense(3, 16, activation="relu"), nn.Dense(16), nn.Linear(2), device=device)
+    return net, optim.AdamW(net.parameters(), lr=1e-2, weight_decay=0.01)
+
+
+def weights(net):
+    return {name: value.tobytes() for name, value in net.state_dict().items()}
+
+
+def batches(rng, device, count=4, rows=16):
+    return [[jz.array(rng.standard_normal(shape).astype(np.float32), device=device)
+             for shape in ((rows, 2), (rows, 2), (rows, 1))] for _ in range(count)]
+
+
+def flow_step(model, opt, x0, x1, t, lr):
+    xt = x0 * (1 - t) + x1 * t
+    opt.lr = lr
+    opt.zero_grad()
+    loss = nn.mse(model(jz.hstack([xt, t])), x1 - x0)
+    model.backward(loss.grad)
+    norm = opt.clip_grad_norm(0.5)
+    opt.step()
+    return loss.value, norm, loss
+
+
+def sample(model, z, steps):
+    for s in range(steps):
+        t = jz.ones(z.shape[0], 1, device=z.device) * (s / steps)
+        z = z + model.predict(jz.hstack([z, t])) * (1 / steps)
+    return z
+
+
+NET = OPT = None  # the network and optimizer of a function that uses them as globals
+
+
+def global_step(x0, x1, t):
+    OPT.zero_grad()
+    loss = nn.mse(NET(jz.hstack([x0, t])), x1)
+    NET.backward(loss.grad)
+    OPT.step()
+    return loss.value
+
+
+class TestCompileNetworks:
+    """Calls of a network, an optimizer and a loss are lines of the record; the bits stay the same."""
+
+    def test_a_training_step_and_sampling(self, device, rng):
+        (net1, opt1), (net2, opt2) = mlp(device), mlp(device)
+        step, generate = jz.compile(flow_step), jz.compile(sample)
+        for i, (x0, x1, t) in enumerate(batches(rng, device)):
+            lr = 0.01 / (i + 1)
+            assert bits(step(net1, opt1, x0, x1, t, lr)[:2]) == bits(flow_step(net2, opt2, x0, x1, t, lr)[:2])
+            assert weights(net1) == weights(net2)
+        loss = step(net1, opt1, x0, x1, t, 0.001)[2]
+        assert isinstance(loss, nn.Loss) and loss.grad.shape == (16, 2) and float(loss) == loss.value.item()
+        flow_step(net2, opt2, x0, x1, t, 0.001)
+        z = jz.array(values(rng, (8, 2)), device=device)
+        for _ in range(2):
+            assert bits(generate(net1, z, 5)) == bits(sample(net2, z, 5))
+        assert records(step) == 1 and records(generate) == 1
+        source = next(iter(step._records.values())).source
+        for line in ("opt.lr = lr", "opt.zero_grad()", " = model(t", " = mse(t", "model.backward(t",
+                     " = opt.clip_grad_norm(0.5)", "opt.step()"):
+            assert line in source, source
+
+    def test_another_network_is_another_record(self, device, rng):
+        (net1, opt1), (net2, opt2), (net3, opt3), (net4, opt4) = mlp(device), mlp(device), mlp(device, 1), mlp(device, 1)
+        step = jz.compile(flow_step)
+        for x0, x1, t in batches(rng, device, 2):
+            assert bits(step(net1, opt1, x0, x1, t, 0.01)[0]) == bits(flow_step(net2, opt2, x0, x1, t, 0.01)[0])
+            assert bits(step(net3, opt3, x0, x1, t, 0.01)[0]) == bits(flow_step(net4, opt4, x0, x1, t, 0.01)[0])
+        assert weights(net1) == weights(net2) and weights(net3) == weights(net4) and weights(net1) != weights(net3)
+        assert records(step) == 2
+
+    def test_a_network_in_a_global_variable(self, device, rng):
+        global NET, OPT
+        step = jz.compile(global_step)
+        try:
+            for seed in (0, 1):  # the second network takes the variables over: the function follows it
+                (NET, OPT), (net2, opt2) = mlp(device, seed), mlp(device, seed)
+                for x0, x1, t in batches(rng, device, 3):
+                    OPT.zero_grad(), opt2.zero_grad()
+                    plain = nn.mse(net2(jz.hstack([x0, t])), x1)
+                    net2.backward(plain.grad)
+                    opt2.step()
+                    assert bits(step(x0, x1, t)) == bits(plain.value)
+                    assert weights(NET) == weights(net2)
+            assert records(step) == 2 and step._watched == [("global", "OPT"), ("global", "NET")]
+        finally:
+            NET = OPT = None
+
+    def test_a_network_in_an_enclosing_variable(self, device, rng):
+        net, _ = mlp(device)
+        other, _ = mlp(device)
+
+        @jz.compile
+        def f(x):
+            return net.predict(x) * 2
+
+        x = jz.array(values(rng, (4, 3)), device=device)
+        for _ in range(2):
+            assert bits(f(x)) == bits(other.predict(x) * 2)
+        assert f._watched == [("closure", "net")]
+
+    def test_the_losses(self, device, rng):
+        scores = jz.array(rng.standard_normal((6, 4)).astype(np.float32), device=device)
+        one_hot = nn.one_hot(np.array([0, 1, 2, 3, 0, 1]), 4, device=device)
+        labels, weights_ = np.array([0, 1, 2, 3, -100, 1]), np.array([1, 0, 2, 1, 1, 0.5], np.float32)
+        classes = np.array([3, 3, 0, 1, 2, 2])
+
+        def f(scores, one_hot, labels, weights_, classes):
+            a = nn.softmax_cross_entropy(scores, labels)
+            b = nn.softmax_cross_entropy(scores * 2, one_hot)
+            c = nn.softmax_cross_entropy(scores, classes, ignore_index=1)
+            d = nn.masked_softmax_cross_entropy(scores, labels, weights_)
+            e = nn.error_rate(scores, labels)
+            g = nn.mse(scores, one_hot)
+            value, grad = g
+            return [a, b.value + c.value, d.grad * 2, e, value, grad, nn.one_hot(classes, 4, device=scores.device)]
+
+        compiled = jz.compile(f)
+        for _ in range(2):
+            got = compiled(scores, one_hot, labels, weights_, classes)
+            want = f(scores, one_hot, labels, weights_, classes)
+            assert bits([got[0].value, got[0].grad] + got[1:]) == bits([want[0].value, want[0].grad] + want[1:])
+
+    def test_token_ids(self, device, rng):
+        def make():
+            jz.manual_seed(2)
+            net = nn.Sequential(nn.Embedding(11, 8), nn.PositionEmbedding(4), nn.Linear(11, tied=True), device=device)
+            return net, optim.AdamW(net.parameters(), lr=1e-2)
+
+        def f(net, opt, ids, targets):
+            opt.zero_grad()
+            loss = nn.softmax_cross_entropy(net(ids), targets)
+            net.backward(loss.grad)
+            opt.step()
+            return loss.value
+
+        (net1, opt1), (net2, opt2) = make(), make()
+        compiled = jz.compile(f)
+        for _ in range(3):
+            ids, targets = rng.integers(0, 11, (3, 4)), rng.integers(0, 11, 12)
+            assert bits(compiled(net1, opt1, ids, targets)) == bits(f(net2, opt2, ids, targets))
+        assert weights(net1) == weights(net2) and records(compiled) == 1
+
+    def test_a_loss_as_an_argument_and_the_input_gradient(self, device, rng):
+        (net1, opt1), (net2, opt2) = mlp(device), mlp(device)
+
+        def f(net, loss):
+            return net.backward(loss.grad) * 2 + net.jvp(loss.grad @ jz.ones(2, 3, device=loss.grad.device),
+                                                         jz.ones(4, 3, device=loss.grad.device))[0:4, 0:1]
+
+        compiled = jz.compile(f)
+        x, y = jz.array(values(rng, (5, 3))[1:], device=device), jz.ones(4, 2, device=device)
+        for _ in range(2):
+            loss1, loss2 = nn.mse(net1(x), y), nn.mse(net2(x), y)
+            assert bits(compiled(net1, loss1)) == bits(f(net2, loss2))
+
+    def test_the_seed_is_set_in_every_call(self, device):
+        @jz.compile
+        def f(A):
+            jz.manual_seed(5)
+            return A + jz.randn(*A.shape, device=A.device)
+
+        A = jz.zeros(3, 3, device=device)
+        first = bits(f(A))
+        jz.manual_seed(9)
+        assert bits(f(A)) == first == bits(f(A))
+
+    def test_what_a_call_is_given_is_not_taken_over_and_nothing_is_merged_across_it(self, device, rng):
+        (net1, _), (net2, _) = mlp(device), mlp(device)
+
+        def f(net, x):
+            h = jz.tanh(x * 2)
+            out = net.predict(h)
+            again = net.predict(h)
+            return out + again + (jz.exp(h) @ jz.ones(3, 2, device=x.device)) + jz.sum(x * 2) + jz.sum(x * 2)
+
+        compiled = jz.compile(f)
+        x = jz.array(values(rng, (5, 3))[1:], device=device)
+        for _ in range(2):
+            assert bits(compiled(net1, x)) == bits(f(net2, x))
+        source = next(iter(compiled._records.values())).source
+        assert source.count("net.predict(") == 2 and "exp_(" not in source and "= exp(" in source, source
+
+    def test_refusals(self, device, rng):
+        net, opt = mlp(device)
+        x, y = jz.array(rng.standard_normal((4, 3)).astype(np.float32), device=device), jz.ones(4, 2, device=device)
+
+        class Holder:
+            pass
+
+        holder = Holder()
+        holder.net = net
+        refused(lambda x: holder.net(x), x, match="was reached through an attribute")
+        nets = {"a": net}
+        refused(lambda x: nets["a"].predict(x), x, match="was reached through an attribute")
+        refused(lambda net, x: nn.mse(net(x), y), net, x, match="given a matrix that is not an argument")
+        refused(lambda net, x: nn.softmax_cross_entropy(net(x), np.array([0, 1, 0, 1])), net, x,
+                match="numpy array that was made inside")
+        refused(lambda net, x, y: float(nn.mse(net(x), y)), net, x, y, match="once, while recording")
+        refused(lambda net, x, y: f"{nn.mse(net(x), y):.3f}", net, x, y, match="once, while recording")
+        refused(lambda net, x, y: nn.mse(net(x), y).item(), net, x, y, match="once, while recording")
+        refused(lambda net, x, y: 1.0 if nn.mse(net(x), y) < 1 else 0.0, net, x, y, match="once, while recording")
+
+        def branch_on_the_norm(net, opt, x, y):
+            net.backward(nn.mse(net(x), y).grad)
+            return x * (1 if opt.clip_grad_norm(1.0) > 0 else 2)
+
+        refused(branch_on_the_norm, net, opt, x, y, match="Comparing a float argument")
+        with pytest.raises(TypeError, match="takes the gradient, not the loss"):
+            jz.compile(lambda net, x, y: net.backward(nn.mse(net(x), y)))(net, x, y)

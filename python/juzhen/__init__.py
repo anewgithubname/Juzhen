@@ -480,6 +480,7 @@ for _name, _function in _METHODS.items():
 _rng = np.random.default_rng()
 
 
+@_compile.recorded
 def manual_seed(seed):
     """Seed every random number generator juzhen uses (CPU, GPU, data shuffling)."""
     global _rng

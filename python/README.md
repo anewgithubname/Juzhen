@@ -100,6 +100,34 @@ On an RTX 4090 with 5000 x 5000 matrices the first form runs at 43 TFLOPS,
 the second at 46 TFLOPS, the speed of the C++ demo. Matrix products and the
 layers themselves run at the speed of C++.
 
+`@jz.compile` does this for a whole function. The first call records the
+function's matrix operations; later calls run the record, in which an
+expression written twice is computed once and a result goes into a matrix
+that nothing reads again. The results have the same bits as without it.
+
+```python
+@jz.compile
+def step(W, X, Y, lr):
+    P = jz.tanh(X @ W)
+    E = P - Y
+    W -= lr * (X.T @ (E * (1 - P * P))) / X.shape[0]
+    return jz.mean(E * E)
+
+W, X, Y = jz.randn(20, 3) * 0.1, jz.randn(64, 20), jz.randn(64, 3)
+for _ in range(100):
+    loss = step(W, X, Y, 0.1)
+step.explain()           # the operations it runs: 5 new matrices in each call instead of 13
+```
+
+It gains the most for chains of `+ - *` on large matrices (1.5 to 3 times at
+4096 x 4096) and nothing where a matrix product or a network takes the time;
+`python/benchmarks/compile_bench.py` measures it. Networks, optimizers and
+losses can be used inside. A value cannot be read out of a matrix inside a
+compiled function (`float()`, `.numpy()`, `if A > 0:`): that would happen
+once, while recording, so it is an error that says what to write instead.
+Float arguments may change from call to call; for each new shape, and each
+new value of a whole-number argument, the function is recorded again.
+
 Reading a value back (`.item()`, `.numpy()`) waits for the GPU to finish, so
 in a training loop read the loss every few hundred steps rather than every
 step when speed matters.

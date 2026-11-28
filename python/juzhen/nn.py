@@ -28,6 +28,7 @@ import weakref
 import numpy as np
 
 import juzhen as jz
+from juzhen._compile import recorded as _recorded
 
 __all__ = [
     "Layer", "Dense", "Linear", "LayerNorm", "Conv2d", "ConvTranspose2d", "Transformer",
@@ -553,6 +554,7 @@ class Sequential:
         self._check_rows(a.size)
         return np.ascontiguousarray(a, dtype=np.int32).reshape(-1), (self.seq_len or 1)
 
+    @_recorded(method=True)
     def __call__(self, x):
         """The output for a batch x; keeps x for backward().
 
@@ -569,6 +571,7 @@ class Sequential:
 
     forward = __call__
 
+    @_recorded(method=True)
     def predict(self, x):
         """The output without keeping x (no backward() afterwards)."""
         ids = self._check(x)
@@ -581,6 +584,7 @@ class Sequential:
             self._last_call = call
         self._out_shape = None
 
+    @_recorded(method=True)
     def backward(self, grad):
         """Back-propagate grad, the loss gradient for the last output.
 
@@ -616,6 +620,7 @@ class Sequential:
                              f"{self._out_shape}; pass loss.grad of a loss computed from that output")
         return self._net.backward(grad)
 
+    @_recorded(method=True)
     def jvp(self, x, tangent):
         """J(x) @ tangent: how the output changes when x moves along tangent."""
         if self.takes_ids:
@@ -959,6 +964,11 @@ class Loss:
                            "Write net.backward(loss.grad), then opt.step()")
 
 
+# Inside a function under jz.compile, the calls marked _recorded are one line of the record each.
+jz._compile.OBJECTS += (Sequential,)
+jz._compile.LOSS = Loss
+
+
 def _core_of(m):
     return jz._device(m.device)
 
@@ -1047,6 +1057,7 @@ def _ignore(ignore_index, labels, what):
     return int(ignore_index)
 
 
+@_recorded
 def softmax_cross_entropy(logits, labels, ignore_index=-100):
     """Softmax cross-entropy, averaged over the batch.
 
@@ -1066,6 +1077,7 @@ def softmax_cross_entropy(logits, labels, ignore_index=-100):
     return _made(logits, *core.softmax_cross_entropy_labels(logits, numbers, ignore_index))
 
 
+@_recorded
 def mse(prediction, target):
     """Squared error summed over outputs, averaged over the batch."""
     _same(_prediction(prediction, "mse", "prediction"), target, "mse", "prediction", "target",
@@ -1073,6 +1085,7 @@ def mse(prediction, target):
     return _made(prediction, *_core_of(prediction).mse(prediction, target))
 
 
+@_recorded
 def masked_softmax_cross_entropy(logits, labels, weights, ignore_index=-100):
     """Softmax cross-entropy weighted per sample, without batch averaging.
 
@@ -1103,6 +1116,7 @@ def masked_softmax_cross_entropy(logits, labels, weights, ignore_index=-100):
     return _made(logits, *core.masked_softmax_cross_entropy_labels(logits, numbers, weights, ignore_index))
 
 
+@_recorded
 def error_rate(scores, labels, ignore_index=-100):
     """Fraction of rows whose largest score is not the labelled class (1 x 1).
 
@@ -1125,6 +1139,7 @@ def _loss_function(name):
     return losses[name]
 
 
+@_recorded
 def one_hot(labels, num_classes, device="cpu"):
     """Integer class labels (length N) as an N x num_classes one-hot matrix.
 
