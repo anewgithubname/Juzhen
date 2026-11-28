@@ -120,11 +120,33 @@ inline double time_in_ms(Clock::time_point start, Clock::time_point end) {
     return std::chrono::duration_cast<std::chrono::nanoseconds>(end - start).count()/1000000.0;
 }
 
+namespace Juzhen {
+// The text and place of the last LOG_ERROR. ERROR_OUT puts the text into its
+// exception when the log line sits just above it in the same file, so the
+// reason reaches the caller (and Python) instead of only the log.
+struct LoggedError {
+    std::string text;
+    const char* file = nullptr;
+    int line = 0;
+};
+inline LoggedError& last_logged_error() {
+    static thread_local LoggedError error;
+    return error;
+}
+}
+
 //for loggging
 #ifndef LOGGING_OFF
 #define LOG_INFO(...) spdlog::info(__VA_ARGS__)
 #define LOG_WARN(...) spdlog::warn(__VA_ARGS__)
-#define LOG_ERROR(...) spdlog::error(__VA_ARGS__)
+#define LOG_ERROR(...)                                                         \
+    do {                                                                       \
+        auto& juzhen_logged = Juzhen::last_logged_error();                     \
+        juzhen_logged.text = fmt::format(__VA_ARGS__);                         \
+        juzhen_logged.file = __FILE__;                                         \
+        juzhen_logged.line = __LINE__;                                         \
+        spdlog::error("{}", juzhen_logged.text);                               \
+    } while (0)
 #define LOG_DEBUG(...) spdlog::debug(__VA_ARGS__)
 #else
 #define LOG_INFO(...)
@@ -138,9 +160,26 @@ struct Error : std::runtime_error {
     using std::runtime_error::runtime_error;
 };
 }
+namespace Juzhen {
+// "reason (file.hpp:123)" when a LOG_ERROR within the three lines above gave
+// the reason, otherwise "Juzhen error at file.hpp:123". Only the file name is
+// kept: the build machine's folders mean nothing to the reader.
+inline std::string error_text(const char* file, int line) {
+    const char* name = file;
+    for (const char* c = file; *c; ++c)
+        if (*c == '/' || *c == '\\')
+            name = c + 1;
+    const std::string where = std::string(name) + ":" + std::to_string(line);
+    auto& logged = last_logged_error();
+    const bool mine = logged.file && std::string(logged.file) == file && logged.line <= line &&
+                      line - logged.line <= 3 && !logged.text.empty();
+    std::string text = mine ? logged.text + " (" + where + ")" : "Juzhen error at " + where;
+    logged = LoggedError{};
+    return text;
+}
+}
 // abort the current operation; launcher.cu turns an uncaught error into exit code 1
-#define ERROR_OUT \
-    throw Juzhen::Error(std::string("Juzhen error at ") + __FILE__ + ":" + std::to_string(__LINE__))
+#define ERROR_OUT throw Juzhen::Error(Juzhen::error_text(__FILE__, __LINE__))
 
 /**
  * @brief simple profiler class, will only print out the cumulative time. 

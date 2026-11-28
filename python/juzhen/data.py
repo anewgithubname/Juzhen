@@ -3,6 +3,8 @@
 DataLoader keeps the data in host memory and shuffles it each epoch;
 MatrixFileLoader streams .matrix files from disk in order (for data sets too
 big for memory). Both copy each batch into a juzhen matrix on the device.
+Whole numbers (token ids, class numbers) stay numpy integer arrays: that is
+what an Embedding and the losses take.
 """
 
 import os
@@ -19,8 +21,21 @@ def _host(a):
     return jz._as_2d(a.numpy() if isinstance(a, jz.Matrix) else a)
 
 
+def _keep(a):
+    """An integer array as it is (ids or class numbers); anything else as float32 rows."""
+    if not isinstance(a, jz.Matrix):
+        a = np.asarray(a)
+        if a.dtype.kind in "iu":
+            return a
+    return _host(a)
+
+
 class DataLoader:
     """Batches of (X, Y) rows, as juzhen matrices on device.
+
+    An integer array (token ids, class numbers) is handed out as numpy
+    integer batches instead; convert with .astype("float32") first if the
+    whole numbers are features.
 
     One pass of ``for X_i, Y_i in loader`` is one epoch. With shuffle=True the
     rows are visited in a new random order each epoch (jz.manual_seed() makes
@@ -29,8 +44,8 @@ class DataLoader:
     """
 
     def __init__(self, X, Y=None, batch_size=32, shuffle=False, drop_last=True, device="cpu"):
-        self.X = _host(X)
-        self.Y = None if Y is None else _host(Y)
+        self.X = _keep(X)
+        self.Y = None if Y is None else _keep(Y)
         if self.Y is not None and len(self.Y) != len(self.X):
             raise ValueError(f"X has {len(self.X)} rows but Y has {len(self.Y)}")
         if batch_size < 1:
@@ -55,11 +70,13 @@ class DataLoader:
                 rows = slice(b * self.batch_size, min((b + 1) * self.batch_size, n))
             else:
                 rows = order[b * self.batch_size:(b + 1) * self.batch_size]
-            X_i = jz.array(self.X[rows], device=self.device)
             if self.Y is None:
-                yield X_i
+                yield self._batch(self.X, rows)
             else:
-                yield X_i, jz.array(self.Y[rows], device=self.device)
+                yield self._batch(self.X, rows), self._batch(self.Y, rows)
+
+    def _batch(self, a, rows):
+        return a[rows] if a.dtype.kind in "iu" else jz.array(a[rows], device=self.device)
 
 
 class MatrixFileLoader:

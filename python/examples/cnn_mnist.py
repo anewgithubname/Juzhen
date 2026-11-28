@@ -51,7 +51,7 @@ opt = optim.AdamW(model.parameters(), lr=1e-4, weight_decay=0)
 
 # eight test images whose predictions are shown while training
 shown = X_test[:batch].to(device)
-shown_labels = Y_test[:8].numpy().argmax(1)
+shown_labels = jz.argmax(Y_test[:8])
 print(model)
 print(f"device {device}, {steps_per_epoch} steps per epoch\n")
 
@@ -69,7 +69,7 @@ for epoch in range(args.epochs):
 
         global_step = epoch * steps_per_epoch + step
         if global_step % 100 == 0:
-            predicted = jz.argmax(model.predict(shown)).numpy()[:8, 0].astype(int)
+            predicted = jz.argmax(model.predict(shown))[:8]
             marks = " ".join(f"{t}{'=' if t == p else '!'}{p}" for t, p in zip(shown_labels, predicted))
             print(f"epoch {epoch + 1} step {global_step:5d}  loss {losses[-1]:.4f}  "
                   f"true=predicted: {marks}")

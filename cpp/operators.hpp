@@ -257,8 +257,13 @@ Matrix<D> operator*(double l, Matrix<D>&& rM) {
 
 template <ElemInvitable D>
 Matrix<D> operator/(const Matrix<D>& lM, const Matrix<D>& rM) {
-    Matrix<D> ret = rM.eleminv(1.0);
-    return hadmd(lM, ret);
+    // one pass on the backends that have elemdiv (all four)
+    if constexpr (requires { { lM.elemdiv(rM) } -> std::same_as<Matrix<D>>; }) {
+        return lM.elemdiv(rM);
+    } else {
+        Matrix<D> ret = rM.eleminv(1.0);
+        return hadmd(lM, std::move(ret));  // multiply into the reciprocal: no second matrix
+    }
 }
 // rvalue division
 template <ElemInvitable D>

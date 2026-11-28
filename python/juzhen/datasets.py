@@ -22,12 +22,13 @@ def _mnist_folder(path):
     return path
 
 
-def mnist(path=None):
+def mnist(path=None, one_hot=True):
     """MNIST as (X, Y, X_test, Y_test), the data of examples/demo_mnist.cu.
 
     X is 60000 x 784 with pixels in [0, 1], Y is 60000 x 10 one-hot; the test
-    set has 10000 rows. The matrices are on the CPU; path defaults to
-    datasets/MNIST in the Juzhen source tree.
+    set has 10000 rows. With one_hot=False, Y holds the class numbers 0 to 9
+    instead (a numpy integer array of length 60000). The matrices are on the
+    CPU; path defaults to datasets/MNIST in the Juzhen source tree.
     """
     folder = _mnist_folder(path)
     read = jz.matrixio.read_matrix
@@ -35,7 +36,7 @@ def mnist(path=None):
     def split(name):
         X = read(os.path.join(folder, f"{name}_x.matrix"), np.float32).T / np.float32(255)
         labels = read(os.path.join(folder, f"{name}_y.matrix"), np.int32).ravel()
-        return jz.array(X), jz.nn.one_hot(labels, 10)
+        return jz.array(X), (jz.nn.one_hot(labels, 10) if one_hot else labels.astype(np.int64))
 
     X, Y = split("train")
     X_test, Y_test = split("test")

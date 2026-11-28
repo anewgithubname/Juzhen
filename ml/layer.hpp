@@ -36,6 +36,7 @@
 #include "../cpp/matrix.hpp"
 #include "./util.cuh"
 #include "parameter.hpp"
+#include "init.hpp"
 
 #ifdef CUDA
 #include "../cpp/cumatrix.cuh"
@@ -51,6 +52,14 @@
 
 namespace Juzhen
 {
+	// A constructor argument that a member initialiser divides by: checked
+	// first, because a division by zero ends the process instead of throwing.
+	inline int positive_divisor(int value, const char* what) {
+		if (value <= 0)
+			throw std::invalid_argument(std::string(what) + " must be 1 or more, got " + std::to_string(value));
+		return value;
+	}
+
 	/** 
 	* Fully connected layer with tanh activation
 	*/
@@ -84,14 +93,19 @@ namespace Juzhen
         Layer& operator=(const Layer&) = default;
         Layer& operator=(Layer&&) = default;
 
-		Layer(size_t m, size_t n, size_t nb) :
-			weights("weights", m, n), bias("bias", m, 1), val("output", m, nb), adamW(.0001, m, n), adamb(.0001, m, 1), nb(nb) {
+		// W is m x n (outputs x inputs) drawn by `init` (N(0, 1/n) by default,
+		// the rule for tanh and linear layers); the bias starts at zero.
+		Layer(size_t m, size_t n, size_t nb, Init init = {}) : Layer(m, n, nb, init, false) {}
 
-			//intitialize parameters and gradients
-			weights = Matrix<D>::randn(m, n) * .001;
-			bias = Matrix<D>::randn(m, 1) * .001;
+	protected:
+		// `relu` tells the automatic rule that a ReLU follows: N(0, 2/n)
+		Layer(size_t m, size_t n, size_t nb, Init init, bool relu) :
+			weights(init.weights<D>(m, n, double(n), relu)), bias(Matrix<D>::zeros(m, 1)), val("output", m, nb),
+			nb(nb), adamW(.0001, m, n), adamb(.0001, m, 1) {
 			val.zeros();
 		}
+
+	public:
 		virtual Matrix<D> grad(const Matrix<D>& input) const {
 			// TODO: each time make a new matrix, not efficient
 			return d_tanh(weights * input + bias * Matrix<D>::ones(1, input.num_col()));
@@ -150,6 +164,23 @@ namespace Juzhen
 			val = tanh(weights * input + bias * Matrix<D>::ones(1, input.num_col()));
 		}
 
+        // A layer whose input is integer ids (Embedding) overrides these three.
+        // A network takes a Matrix<int> exactly when its input layer does.
+        virtual bool takes_ids() const { return false; }
+        virtual void eval_ids(const Matrix<int>&) {
+            throw std::invalid_argument("this layer takes a matrix of numbers, not integer ids; "
+                                        "only an Embedding at the input end of a network takes ids");
+        }
+        // Returns the gradient with respect to this layer's output: ids have none.
+        virtual Matrix<D> backward_ids(const Matrix<int>&, Matrix<D>&&) {
+            throw std::logic_error("this layer does not take integer ids");
+        }
+
+        // The layer whose parameter this one uses instead of its own (weight
+        // tying), or null. The owner must be in the same network: it registers
+        // the parameter with the optimizer and writes it to checkpoints.
+        virtual const Layer<D>* shares_with() const { return nullptr; }
+
 		Matrix<D>& W() { return weights; };
 		Matrix<D>& b() { return bias; };
 		const Matrix<D>& value() { return val; }
@@ -184,7 +215,7 @@ namespace Juzhen
 	template <class D>
 	class LinearLayer : public Layer<D> {
 	public:
-		LinearLayer(size_t m, size_t n, size_t nb) : Layer<D>(m, n, nb) {
+		LinearLayer(size_t m, size_t n, size_t nb, Init init = {}) : Layer<D>(m, n, nb, init, false) {
 		}
         bool supports_backward() const override { return true; }
         std::vector<ParameterRef<D>> parameters() override {
@@ -274,7 +305,7 @@ namespace Juzhen
         bool has_forward = false;  // val holds relu(W*x + b) of the last eval
 
     public:
-        ReluLayer(size_t m, size_t n, size_t nb) : Layer<D>(m, n, nb) {
+        ReluLayer(size_t m, size_t n, size_t nb, Init init = {}) : Layer<D>(m, n, nb, init, true) {
         }
         bool supports_backward() const override { return true; }
         Matrix<D> grad(const Matrix<D>& input) const override {
@@ -314,10 +345,43 @@ namespace Juzhen
 
 // Lists retain the established Juzhen order: output layer first, input last.
 
+	// The same for a network whose input layer takes integer ids (an
+	// Embedding at the back of the list): ids hold one id per token, read in
+	// storage order, e.g. 1 x N or seq_len x batch (one sequence per column).
+	template <class D>
+	const Matrix<D>& forward(std::list<Layer<D>*> neuralnet, const Matrix<int>& ids) {
+		if (neuralnet.empty() || !neuralnet.back() || !neuralnet.back()->takes_ids())
+			throw std::invalid_argument("integer ids need an Embedding as the input layer of the network");
+		auto* input_layer = neuralnet.back();
+		neuralnet.pop_back();
+		input_layer->eval_ids(ids);
+		return forward(neuralnet, input_layer->value());
+	}
+
+// An ids layer anywhere but the input end, or a tied layer without its owner.
+template<class D> void require_valid_structure(const std::list<Layer<D>*>& net) {
+    for (auto i = net.begin(); i != net.end(); ++i) {
+        if (!*i)
+            continue;
+        if ((*i)->takes_ids() && std::next(i) != net.end())
+            throw std::invalid_argument("a layer that takes integer ids (Embedding) must be the input layer, "
+                                        "the last entry of the list");
+        if (const auto* owner = (*i)->shares_with()) {
+            bool found = false;
+            for (auto* other : net)
+                found = found || other == owner;
+            if (!found)
+                throw std::invalid_argument("a tied layer shares the table of an Embedding that is not in this "
+                                            "network; put that Embedding in the same list");
+        }
+    }
+}
+
 template<class D> void require_backward_support(const std::list<Layer<D>*>& net) {
     for (auto* layer : net)
         if (!layer || !layer->supports_backward())
             throw std::logic_error("network contains a layer without explicit backward support");
+    require_valid_structure(net);
 }
 
 // all trainable parameters, named "layer<k>.<name>" with k counted from the input
@@ -348,10 +412,29 @@ template<class D> Matrix<D> backward(const std::list<Layer<D>*>& net, const Matr
     return gradient;
 }
 
+// The same for a network whose input is integer ids. Ids have no gradient, so
+// this returns the gradient with respect to the output of the input layer
+// (the embedded tokens, dim x N).
+template<class D> Matrix<D> backward(const std::list<Layer<D>*>& net, const Matrix<int>& ids, Matrix<D>&& upstream) {
+    require_backward_support(net);
+    if (net.empty() || !net.back()->takes_ids())
+        throw std::invalid_argument("integer ids need an Embedding as the input layer of the network");
+    auto gradient = std::move(upstream);
+    for (auto i = net.begin(); i != net.end(); ++i) {
+        auto next = std::next(i);
+        if (next == net.end())
+            gradient = (*i)->backward_ids(ids, std::move(gradient));
+        else
+            gradient = (*i)->backward((*next)->value(), std::move(gradient));
+    }
+    return gradient;
+}
+
     // Non-owning wrapper of the native output-first network list.
     template<class D> class Sequential {
         std::list<Layer<D>*> layers_;
         const Matrix<D>* input_ = nullptr;
+        const Matrix<int>* ids_ = nullptr;
     public:
         explicit Sequential(std::list<Layer<D>*> layers) : layers_(std::move(layers)) {
             if (layers_.empty()) throw std::invalid_argument("Sequential requires a nonempty network");
@@ -360,26 +443,44 @@ template<class D> Matrix<D> backward(const std::list<Layer<D>*>& net, const Matr
                 for (auto j = layers_.begin(); j != i; ++j)
                     if (*j == *i) throw std::invalid_argument("Sequential requires distinct layer instances");
             }
+            require_valid_structure(layers_);
         }
+
+        // does this network take integer ids (a Matrix<int>) as its input?
+        bool takes_ids() const { return layers_.back()->takes_ids(); }
         Sequential(std::initializer_list<Layer<D>*> layers)
             : Sequential(std::list<Layer<D>*>(layers)) {}
 
         const Matrix<D>& eval(const Matrix<D>& input) {
             input_ = nullptr;
+            ids_ = nullptr;
             const auto& output = Juzhen::forward(layers_, input);
             input_ = &input;
             return output;
         }
         const Matrix<D>& eval(const Matrix<D>&&) = delete;
 
+        // The network's input layer is an Embedding: ids hold one id per token.
+        const Matrix<D>& eval(const Matrix<int>& ids) {
+            input_ = nullptr;
+            ids_ = nullptr;
+            const auto& output = Juzhen::forward(layers_, ids);
+            ids_ = &ids;
+            return output;
+        }
+        const Matrix<D>& eval(const Matrix<int>&&) = delete;
+
         // `upstream` is the gradient of the loss with respect to the network
         // output, e.g. the `grad` returned by softmax_cross_entropy (loss.hpp).
+        // Returns the gradient with respect to the input; for a network that
+        // takes ids, with respect to the embedded tokens.
         Matrix<D> backward(Matrix<D> upstream) {
+            if (ids_) return Juzhen::backward(layers_, *ids_, std::move(upstream));
             if (!input_) throw std::logic_error("evaluate Sequential before backward");
             return Juzhen::backward(layers_, *input_, std::move(upstream));
         }
         const Matrix<D>& value() const {
-            if (!input_) throw std::logic_error("evaluate Sequential before reading its value");
+            if (!input_ && !ids_) throw std::logic_error("evaluate Sequential before reading its value");
             return layers_.front()->value();
         }
         std::vector<ParameterRef<D>> parameters() const {
@@ -513,20 +614,18 @@ template<class D> Matrix<D> backward(const std::list<Layer<D>*>& net, const Matr
 		 */
 		ConvLayer(int N, int C_in, int H_in, int W_in,
 		          int C_out, int kH, int kW,
-		          int pad = 0, int stride = 1, bool relu = true, bool deterministic = false)
-			: Layer<D>(
-				  C_out * ((H_in + 2*pad - kH)/stride + 1) *
-				          ((W_in + 2*pad - kW)/stride + 1),
-				  1, N),
+		          int pad = 0, int stride = 1, bool relu = true, bool deterministic = false,
+		          Init init = {})
+			: Layer<D>(size_t(N)),
 			  C_in(C_in), H_in(H_in), W_in(W_in),
 			  C_out(C_out), kH(kH), kW(kW),
 			  pad_h(pad), pad_w(pad), stride_h(stride), stride_w(stride),
-			  H_out((H_in + 2*pad - kH)/stride + 1),
+			  H_out((H_in + 2*pad - kH)/positive_divisor(stride, "ConvLayer: stride") + 1),
 			  W_out((W_in + 2*pad - kW)/stride + 1),
 			  batchN(N), use_relu(relu)
 		{
 			// Override base-class weight/bias/adam with convolution-appropriate sizes.
-			this->weights = Matrix<D>::randn(C_out * C_in * kH * kW, 1) * 0.001f;
+			this->weights = init.weights<D>(C_out * C_in * kH * kW, 1, double(C_in) * kH * kW, relu);
 			this->bias    = Matrix<D>::zeros(C_out, 1);
 			this->val     = Matrix<D>("conv_out", C_out * H_out * W_out, N);
 			this->adamW   = adam_state<D>(0.0001, C_out * C_in * kH * kW, 1);
@@ -821,15 +920,13 @@ template<class D> Matrix<D> backward(const std::list<Layer<D>*>& net, const Matr
 		 */
 		convtransLayer(int N, int C_in, int H_in, int W_in,
 		               int C_out, int kH, int kW,
-		               int pad = 0, int stride = 1, bool relu = true, bool deterministic = false)
-			: Layer<D>(
-				  C_out * (((H_in - 1) * stride - 2 * pad + kH)) *
-				          (((W_in - 1) * stride - 2 * pad + kW)),
-				  1, N),
+		               int pad = 0, int stride = 1, bool relu = true, bool deterministic = false,
+		               Init init = {})
+			: Layer<D>(size_t(N)),
 			  C_in(C_in), H_in(H_in), W_in(W_in),
 			  C_out(C_out), kH(kH), kW(kW),
 			  pad_h(pad), pad_w(pad), stride_h(stride), stride_w(stride),
-			  H_out((H_in - 1) * stride - 2 * pad + kH),
+			  H_out((H_in - 1) * positive_divisor(stride, "convtransLayer: stride") - 2 * pad + kH),
 			  W_out((W_in - 1) * stride - 2 * pad + kW),
 			  batchN(N), use_relu(relu)
 		{
@@ -840,7 +937,8 @@ template<class D> Matrix<D> backward(const std::list<Layer<D>*>& net, const Matr
 
 			// cuDNN expects filter dims (K, C, R, S). For transposed-conv
 			// forward via cudnnConvolutionBackwardData, K must match C_in.
-			this->weights = Matrix<D>::randn(C_in * C_out * kH * kW, 1) * 0.001f;
+			this->weights = init.weights<D>(C_in * C_out * kH * kW, 1,
+			                               double(C_in) * kH * kW / (double(stride) * stride), relu);
 			this->bias    = Matrix<D>::zeros(C_out, 1);
 			this->val     = Matrix<D>("convtrans_out", C_out * H_out * W_out, N);
 			this->adamW   = adam_state<D>(0.0001, C_in * C_out * kH * kW, 1);
@@ -1093,19 +1191,16 @@ template<class D> Matrix<D> backward(const std::list<Layer<D>*>& net, const Matr
 		          int C_out, int kH, int kW,
 		          int pad = 0, int stride = 1, bool relu = true,
 		          // Metal kernels are deterministic (GEMM + gather, no atomics).
-		          bool /*deterministic*/ = false)
-			: Layer<D>(
-				  C_out * ((H_in + 2*pad - kH)/stride + 1) *
-				          ((W_in + 2*pad - kW)/stride + 1),
-				  1, N),
+		          bool /*deterministic*/ = false, Init init = {})
+			: Layer<D>(size_t(N)),
 			  C_in(C_in), H_in(H_in), W_in(W_in),
 			  C_out(C_out), kH(kH), kW(kW),
 			  pad_h(pad), pad_w(pad), stride_h(stride), stride_w(stride),
-			  H_out((H_in + 2*pad - kH)/stride + 1),
+			  H_out((H_in + 2*pad - kH)/positive_divisor(stride, "ConvLayer: stride") + 1),
 			  W_out((W_in + 2*pad - kW)/stride + 1),
 			  batchN(N), use_relu(relu)
 		{
-			this->weights = Matrix<D>::randn(C_out * C_in * kH * kW, 1) * 0.001f;
+			this->weights = init.weights<D>(C_out * C_in * kH * kW, 1, double(C_in) * kH * kW, relu);
 			this->bias    = Matrix<D>::zeros(C_out, 1);
 			this->val     = Matrix<D>("conv_out", C_out * H_out * W_out, N);
 			this->adamW   = adam_state<D>(0.0001, C_out * C_in * kH * kW, 1);
@@ -1281,15 +1376,12 @@ template<class D> Matrix<D> backward(const std::list<Layer<D>*>& net, const Matr
 		               int C_out, int kH, int kW,
 		               int pad = 0, int stride = 1, bool relu = true,
 		               // Metal kernels are deterministic (GEMM + gather, no atomics).
-		               bool /*deterministic*/ = false)
-			: Layer<D>(
-				  C_out * (((H_in - 1) * stride - 2 * pad + kH)) *
-				          (((W_in - 1) * stride - 2 * pad + kW)),
-				  1, N),
+		               bool /*deterministic*/ = false, Init init = {})
+			: Layer<D>(size_t(N)),
 			  C_in(C_in), H_in(H_in), W_in(W_in),
 			  C_out(C_out), kH(kH), kW(kW),
 			  pad_h(pad), pad_w(pad), stride_h(stride), stride_w(stride),
-			  H_out((H_in - 1) * stride - 2 * pad + kH),
+			  H_out((H_in - 1) * positive_divisor(stride, "convtransLayer: stride") - 2 * pad + kH),
 			  W_out((W_in - 1) * stride - 2 * pad + kW),
 			  batchN(N), use_relu(relu)
 		{
@@ -1298,7 +1390,8 @@ template<class D> Matrix<D> backward(const std::list<Layer<D>*>& net, const Matr
 				ERROR_OUT;
 			}
 
-			this->weights = Matrix<D>::randn(C_in * C_out * kH * kW, 1) * 0.001f;
+			this->weights = init.weights<D>(C_in * C_out * kH * kW, 1,
+			                               double(C_in) * kH * kW / (double(stride) * stride), relu);
 			this->bias    = Matrix<D>::zeros(C_out, 1);
 			this->val     = Matrix<D>("convtrans_out", C_out * H_out * W_out, N);
 			this->adamW   = adam_state<D>(0.0001, C_in * C_out * kH * kW, 1);
@@ -1451,15 +1544,13 @@ template<class D> Matrix<D> backward(const std::list<Layer<D>*>& net, const Matr
 	public:
 		ConvLayer(int N, int C_in, int H_in, int W_in,
 		          int C_out, int kH, int kW,
-		          int pad = 0, int stride = 1, bool relu = true)
-			: Layer<D>(
-				  C_out * ((H_in + 2*pad - kH)/stride + 1) *
-				          ((W_in + 2*pad - kW)/stride + 1),
-				  1, N),
+		          int pad = 0, int stride = 1, bool relu = true, bool /*deterministic*/ = false,
+		          Init init = {})
+			: Layer<D>(size_t(N)),
 			  C_in(C_in), H_in(H_in), W_in(W_in),
 			  C_out(C_out), kH(kH), kW(kW),
 			  pad_h(pad), pad_w(pad), stride_h(stride), stride_w(stride),
-			  H_out((H_in + 2*pad - kH)/stride + 1),
+			  H_out((H_in + 2*pad - kH)/positive_divisor(stride, "ConvLayer: stride") + 1),
 			  W_out((W_in + 2*pad - kW)/stride + 1),
 			  batchN(N), use_relu(relu)
 		{
@@ -1467,7 +1558,7 @@ template<class D> Matrix<D> backward(const std::list<Layer<D>*>& net, const Matr
 				LOG_ERROR("Invalid conv output shape: H_out={}, W_out={}", H_out, W_out);
 				ERROR_OUT;
 			}
-			this->weights = Matrix<D>::randn(C_out * C_in * kH * kW, 1) * 0.001f;
+			this->weights = init.weights<D>(C_out * C_in * kH * kW, 1, double(C_in) * kH * kW, relu);
 			this->bias    = Matrix<D>::zeros(C_out, 1);
 			this->val     = Matrix<D>("conv_out", C_out * H_out * W_out, N);
 			this->adamW   = adam_state<D>(0.0001, C_out * C_in * kH * kW, 1);
@@ -1645,15 +1736,13 @@ template<class D> Matrix<D> backward(const std::list<Layer<D>*>& net, const Matr
 	public:
 		convtransLayer(int N, int C_in, int H_in, int W_in,
 		               int C_out, int kH, int kW,
-		               int pad = 0, int stride = 1, bool relu = true)
-			: Layer<D>(
-				  C_out * ((H_in - 1) * stride - 2 * pad + kH) *
-				          ((W_in - 1) * stride - 2 * pad + kW),
-				  1, N),
+		               int pad = 0, int stride = 1, bool relu = true, bool /*deterministic*/ = false,
+		               Init init = {})
+			: Layer<D>(size_t(N)),
 			  C_in(C_in), H_in(H_in), W_in(W_in),
 			  C_out(C_out), kH(kH), kW(kW),
 			  pad_h(pad), pad_w(pad), stride_h(stride), stride_w(stride),
-			  H_out((H_in - 1) * stride - 2 * pad + kH),
+			  H_out((H_in - 1) * positive_divisor(stride, "convtransLayer: stride") - 2 * pad + kH),
 			  W_out((W_in - 1) * stride - 2 * pad + kW),
 			  batchN(N), use_relu(relu)
 		{
@@ -1661,7 +1750,8 @@ template<class D> Matrix<D> backward(const std::list<Layer<D>*>& net, const Matr
 				LOG_ERROR("Invalid transposed-conv output shape: H_out={}, W_out={}", H_out, W_out);
 				ERROR_OUT;
 			}
-			this->weights = Matrix<D>::randn(C_in * C_out * kH * kW, 1) * 0.001f;
+			this->weights = init.weights<D>(C_in * C_out * kH * kW, 1,
+			                               double(C_in) * kH * kW / (double(stride) * stride), relu);
 			this->bias    = Matrix<D>::zeros(C_out, 1);
 			this->val     = Matrix<D>("convtrans_out", C_out * H_out * W_out, N);
 			this->adamW   = adam_state<D>(0.0001, C_in * C_out * kH * kW, 1);
@@ -1952,15 +2042,13 @@ template<class D> Matrix<D> backward(const std::list<Layer<D>*>& net, const Matr
 	public:
 		ConvLayer(int N, int C_in, int H_in, int W_in,
 		          int C_out, int kH, int kW,
-		          int pad = 0, int stride = 1, bool relu = true, bool /*deterministic*/ = false)
-			: Layer<D>(
-				  C_out * ((H_in + 2*pad - kH)/stride + 1) *
-				          ((W_in + 2*pad - kW)/stride + 1),
-				  1, N),
+		          int pad = 0, int stride = 1, bool relu = true, bool /*deterministic*/ = false,
+		          Init init = {})
+			: Layer<D>(size_t(N)),
 			  C_in(C_in), H_in(H_in), W_in(W_in),
 			  C_out(C_out), kH(kH), kW(kW),
 			  pad_h(pad), pad_w(pad), stride_h(stride), stride_w(stride),
-			  H_out((H_in + 2*pad - kH)/stride + 1),
+			  H_out((H_in + 2*pad - kH)/positive_divisor(stride, "ConvLayer: stride") + 1),
 			  W_out((W_in + 2*pad - kW)/stride + 1),
 			  batchN(N), use_relu(relu)
 		{
@@ -1969,7 +2057,8 @@ template<class D> Matrix<D> backward(const std::list<Layer<D>*>& net, const Matr
 				ERROR_OUT;
 			}
 
-			this->weights = Matrix<D>::randn(C_out * C_in * kH * kW, 1) * 0.001f;
+			// each output sums C_in*kH*kW inputs
+			this->weights = init.weights<D>(C_out * C_in * kH * kW, 1, double(C_in) * kH * kW, relu);
 			this->bias    = Matrix<D>::zeros(C_out, 1);
 			this->val     = Matrix<D>("conv_out", C_out * H_out * W_out, N);
 			this->adamW   = adam_state<D>(0.0001, C_out * C_in * kH * kW, 1);
@@ -2205,15 +2294,13 @@ template<class D> Matrix<D> backward(const std::list<Layer<D>*>& net, const Matr
 	public:
 		convtransLayer(int N, int C_in, int H_in, int W_in,
 		               int C_out, int kH, int kW,
-		               int pad = 0, int stride = 1, bool relu = true, bool /*deterministic*/ = false)
-			: Layer<D>(
-				  C_out * (((H_in - 1) * stride - 2 * pad + kH)) *
-				          (((W_in - 1) * stride - 2 * pad + kW)),
-				  1, N),
+		               int pad = 0, int stride = 1, bool relu = true, bool /*deterministic*/ = false,
+		               Init init = {})
+			: Layer<D>(size_t(N)),
 			  C_in(C_in), H_in(H_in), W_in(W_in),
 			  C_out(C_out), kH(kH), kW(kW),
 			  pad_h(pad), pad_w(pad), stride_h(stride), stride_w(stride),
-			  H_out((H_in - 1) * stride - 2 * pad + kH),
+			  H_out((H_in - 1) * positive_divisor(stride, "convtransLayer: stride") - 2 * pad + kH),
 			  W_out((W_in - 1) * stride - 2 * pad + kW),
 			  batchN(N), use_relu(relu)
 		{
@@ -2222,7 +2309,9 @@ template<class D> Matrix<D> backward(const std::list<Layer<D>*>& net, const Matr
 				ERROR_OUT;
 			}
 
-			this->weights = Matrix<D>::randn(C_in * C_out * kH * kW, 1) * 0.001f;
+			// each output sums C_in*kH*kW / stride^2 inputs (measured)
+			this->weights = init.weights<D>(C_in * C_out * kH * kW, 1,
+			                               double(C_in) * kH * kW / (double(stride) * stride), relu);
 			this->bias    = Matrix<D>::zeros(C_out, 1);
 			this->val     = Matrix<D>("convtrans_out", C_out * H_out * W_out, N);
 			this->adamW   = adam_state<D>(0.0001, C_in * C_out * kH * kW, 1);
@@ -2702,10 +2791,20 @@ template<class D> Matrix<D> backward(const std::list<Layer<D>*>& net, const Matr
             // vector; the generic reduction path produces this layout.
         }
 
-        void check_input(const Matrix<D>& input) const {
+        // The number of columns (tokens or samples) may change from call to
+        // call: the caches are resized to it. Only the feature count is fixed.
+        void check_input(const Matrix<D>& input) {
+            if (input.num_row() != size_t(dim) || !input.num_col())
+                throw std::invalid_argument("LayerNormLayer: the input has " + std::to_string(input.num_row()) +
+                                            " rows (features) but this layer normalizes " + std::to_string(dim));
+            if (input.num_col() != this->nb) {
+                this->nb = input.num_col();
+                ones_1N = Matrix<D>::ones(1, this->nb);
+                cached_xhat = Matrix<D>("ln_xhat", dim, this->nb);
+                cached_inv = Matrix<D>("ln_inv", 1, this->nb);
+                has_forward = false;
+            }
             check_state();
-            if (!has_shape(input, size_t(dim), this->nb))
-                throw std::invalid_argument("LayerNormLayer input shape mismatch");
         }
 
         // backward/jvp need the caches from a previous forward
@@ -2729,8 +2828,8 @@ template<class D> Matrix<D> backward(const std::list<Layer<D>*>& net, const Matr
         Matrix<D> ones_d1, ones_1N;
         Matrix<D> cached_xhat, cached_inv;
 
-        LayerNormLayer(int features, int batch)
-            : Layer<D>(positive(batch)),
+        explicit LayerNormLayer(int features)
+            : Layer<D>(size_t(1)),  // the caches start with one column and follow the input
               configured_dim(positive(features)),
               dim(configured_dim),
               gamma(Matrix<D>::ones(dim, 1)),
@@ -2738,9 +2837,9 @@ template<class D> Matrix<D> backward(const std::list<Layer<D>*>& net, const Matr
               adam_g(0.0001, dim, 1),
               adam_b(0.0001, dim, 1),
               ones_d1("ln_d1", dim, 1),
-              ones_1N("ln_1N", 1, batch),
-              cached_xhat("ln_xhat", dim, batch),
-              cached_inv("ln_inv", 1, batch) {
+              ones_1N("ln_1N", 1, 1),
+              cached_xhat("ln_xhat", dim, 1),
+              cached_inv("ln_inv", 1, 1) {
             ones_d1.ones();
             ones_1N.ones();
         }
@@ -2859,12 +2958,14 @@ template<class D> Matrix<D> backward(const std::list<Layer<D>*>& net, const Matr
             return backward_impl(std::move(upstream), collect);
         }
         Matrix<D> backward(const Matrix<D>& input, Matrix<D>&& upstream) override {
-            check_input(input);
+            if (!has_shape(input, size_t(dim), this->nb))
+                throw std::invalid_argument("LayerNormLayer backward: the input is not the one of the last eval");
             return backward(std::move(upstream));
         }
 
         Matrix<D> jvp(const Matrix<D>& input, const Matrix<D>& tangent) override {
-            check_input(input);
+            if (!has_shape(input, size_t(dim), this->nb))
+                throw std::invalid_argument("LayerNormLayer jvp: the input is not the one of the last eval");
             return jvp(tangent);
         }
 
@@ -3122,10 +3223,10 @@ template<class D> Matrix<D> backward(const std::list<Layer<D>*>& net, const Matr
 		 */
 		TransformerLayer(int d_model, int d_k, int d_ff, int seq_len, int batch, int heads = 1,
 		                 bool causal = true)
-			: Layer<D>(d_model, 1, seq_len * batch),
+			: Layer<D>(size_t(seq_len) * batch),
 			  d_model(d_model), d_k(d_k), d_ff(d_ff),
 			  seq_len(seq_len), batchN(batch),
-			  num_heads(heads), d_h(d_k / heads), causal(causal),
+			  num_heads(heads), d_h(d_k / positive_divisor(heads, "TransformerLayer: heads")), causal(causal),
 			  // Attention weights
 			  Wq(Matrix<D>::randn(d_k, d_model) * (1.0f / sqrtf((float)d_model))),
 			  Wk(Matrix<D>::randn(d_k, d_model) * (1.0f / sqrtf((float)d_model))),
@@ -3154,7 +3255,7 @@ template<class D> Matrix<D> backward(const std::list<Layer<D>*>& net, const Matr
 			  attn_scores_scratch("attn_scores", seq_len, seq_len * batch * heads),
 			  attn_dAiT_scratch("attn_dAiT", seq_len, seq_len * batch * heads),
 			  attn_dS_scratch("attn_dS", seq_len, seq_len * batch * heads),
-			  ln1(d_model, seq_len * batch), ln2(d_model, seq_len * batch)
+			  ln1(d_model), ln2(d_model)
 		{
 			if (heads <= 0 || d_k % heads != 0) {
 				LOG_ERROR("TransformerLayer: num_heads ({}) must be a positive divisor of d_k ({})", heads, d_k);

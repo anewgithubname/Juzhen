@@ -353,6 +353,15 @@ const Matrix<CUDAfloat> vstack(vector<MatrixView<CUDAfloat>> matrices) {
     return result;
 }
 
+// d_out = d_a .* d_b
+__global__ void productKernel(float *d_out, const float *d_a, const float *d_b, size_t numElements) {
+    size_t i = blockDim.x * blockIdx.x + threadIdx.x;
+
+    if (i < numElements) {
+        d_out[i] = d_a[i] * d_b[i];
+    }
+}
+
 // M3 = M1 .* M2
 Matrix<CUDAfloat> hadmd(const Matrix<CUDAfloat> &M1,
                         const Matrix<CUDAfloat> &M2) {
@@ -361,6 +370,15 @@ Matrix<CUDAfloat> hadmd(const Matrix<CUDAfloat> &M1,
     // check if dimensions match
     if (M1.num_row() != M2.num_row() || M1.num_col() != M2.num_col()) {
         throw std::invalid_argument("Matrix dimensions are not compatible");
+    }
+    // stored alike: one pass, into storage that is not filled first
+    if (M1.transpose == M2.transpose) {
+        Matrix<CUDAfloat> result = Matrix<CUDAfloat>::uninitialized("hadmd", M1.numrow, M1.numcol, M1.transpose);
+        size_t numElem = M1.numrow * M1.numcol;
+        productKernel<<<cudaConfig(numElem)>>>((float *)result.elements.get(), (const float *)M1.elements.get(),
+                                               (const float *)M2.elements.get(), numElem);
+        p.end();
+        return result;
     }
     Matrix<CUDAfloat> result("hadmd", M1.numrow, M1.numcol, M1.transpose);
 

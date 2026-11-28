@@ -265,6 +265,29 @@ template<class D> void utility_checks() {
         for (size_t i = 0; i < 3; ++i) scores_storage.elem(j, i) = scores.elem(i, j);
     close(host(predict_one_hot(Matrix<D>(scores))), expected_one_hot, "predict_one_hot", 0);
     close(host(predict_one_hot(Matrix<D>(scores_storage).T())), expected_one_hot, "transposed predict_one_hot", 0);
+
+    // On CUDA and ROCm the threads of a block share a column: columns longer
+    // and more numerous than a block, and a single row or column.
+    const size_t shapes[][2] = {{1, 1}, {300, 70}, {5, 600}, {1, 257}, {257, 1}, {1030, 3}};
+    for (const auto& shape : shapes) {
+        const size_t rows = shape[0], cols = shape[1];
+        Matrix<float> big("big", rows, cols), big_storage("big storage", cols, rows);
+        for (size_t j = 0; j < cols; ++j)
+            for (size_t i = 0; i < rows; ++i)
+                big_storage.elem(j, i) = big.elem(i, j) = std::sin(0.37f * float(i * 7 + j * 13)) * 5.f;
+        const auto expected_marks = predict_one_hot(big);
+        for (bool transposed : {false, true}) {
+            Matrix<D> x = transposed ? Matrix<D>(big_storage).T() : Matrix<D>(big);
+            auto maxima = host(loss_detail::column_max(x));
+            require(maxima.num_row() == 1 && maxima.num_col() == cols, "column max shape, larger");
+            for (size_t j = 0; j < cols; ++j) {
+                float expected = big.elem(0, j);
+                for (size_t i = 1; i < rows; ++i) expected = std::max(expected, big.elem(i, j));
+                require(maxima.elem(0, j) == expected, "column max value, larger");
+            }
+            close(host(predict_one_hot(x)), expected_marks, "predict_one_hot, larger", 0);
+        }
+    }
 }
 
 template<class D> void checks(const char* backend) {

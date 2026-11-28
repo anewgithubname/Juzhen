@@ -71,6 +71,25 @@ kernel void matrix_product(device const float* A [[buffer(0)]],
     }
 }
 
+// C = B ./ A(optionally transposed); B and C share a layout, as in matrix_product.
+kernel void matrix_quotient(device const float* A [[buffer(0)]],
+                            device const float* B [[buffer(1)]],
+                            device float* C [[buffer(2)]],
+                            constant uint& rows [[buffer(3)]],
+                            constant uint& cols [[buffer(4)]],
+                            constant bool& transpose [[buffer(5)]],
+                            uint2 gid [[thread_position_in_grid]]) {
+
+    const uint r = gid.y;
+    const uint c = gid.x;
+
+    if (r < rows && c < cols) { // Prevent out-of-bounds access
+        const uint srcIdx = r * cols + c;
+        const uint dstIdx = transpose ? (c * rows + r) : srcIdx;
+        C[dstIdx] = B[dstIdx] / A[srcIdx];
+    }
+}
+
 // C = b*B + a*A(optionally transposed), where B and C share the same layout.
 // Grid spans A's physical (rows x cols); in-place callers bind B == C.
 kernel void matrix_add(device const float* A [[buffer(0)]],

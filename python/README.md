@@ -19,6 +19,62 @@ print(model.evaluate(X_test, Y_test))
 - Matrices live in Juzhen's memory pool, on the CPU or with `device="gpu"` on the
   GPU backend of the build. Converting to or from numpy copies.
 - Reading values (`.numpy()`, `.item()`, `print`) waits for the GPU.
+- Comparisons work element by element and give a matrix of 1s and 0s:
+  `(A > 0) * A`, `jz.mean(A == B)`. A numpy array has to be made a matrix
+  first (`jz.array(y)`); for the accuracy of a classifier use
+  `1 - jz.nn.error_rate(scores, labels)`.
+- A 1 x 1 matrix can be used as its number: `f"{jz.mean(A):.3f}"`, `float()`,
+  `round()`, `if jz.max(A) > 1:`.
+- Every function of one matrix is also a method: `A.sum(0)` is `jz.sum(A, 0)`,
+  `A.exp()` is `jz.exp(A)`. Results keep two dimensions (`A.sum(1)` is n x 1).
+- Whole numbers are numpy arrays of integers: class numbers, token ids, and
+  the positions from `jz.argmax` and `jz.topk`. `jz.argmax(scores)` can index
+  (`names[p[0]]`, `X[p]`) and be compared with labels
+  (`np.mean(jz.argmax(scores) == y)`).
+- Numbers are juzhen matrices. Whole numbers that name things are numpy integer
+  arrays or lists: class numbers for a loss (`model.fit(X, y)` with `y` holding
+  0..9 works; one-hot rows still do too) and token ids for a network that starts
+  with `nn.Embedding`.
+- Weights start at a scale that trains: N(0, 2/fan_in) in front of a ReLU,
+  N(0, 1/fan_in) otherwise, zero biases. `init=` on a layer overrides it with a
+  standard deviation.
+
+A language model on token ids is an ordinary `Sequential`. This one learns
+to continue a repeating sequence, with the training step written out:
+
+```python
+import numpy as np
+import juzhen as jz
+from juzhen import nn, optim
+
+vocab, seq_len, batch = 16, 8, 32
+device = "gpu" if jz.has_gpu() else "cpu"
+model = nn.Sequential(
+    nn.Embedding(vocab, 64),             # token ids -> vectors
+    nn.PositionEmbedding(seq_len),       # + a learned vector per position
+    nn.Transformer(64, 64, 256, seq_len, batch, heads=4),
+    nn.LayerNorm(),
+    nn.Linear(vocab, tied=True),         # scores from the embedding table
+    device=device)
+opt = optim.AdamW(model.parameters(), lr=3e-3)
+
+rng = np.random.default_rng(0)
+for step in range(200):
+    start = rng.integers(0, vocab, (batch, 1))
+    ids = (start + np.arange(seq_len + 1)) % vocab     # integers, shape (batch, seq_len + 1)
+    out = model(ids[:, :-1])                           # one row of scores per token
+    loss = nn.softmax_cross_entropy(out, ids[:, 1:])   # the targets are the next ids
+    opt.zero_grad()
+    model.backward(loss.grad)                          # no autograd: the loss hands over its gradient
+    opt.step()
+print(f"loss {loss:.3f}")
+
+# After training: a copy of the weights as they are now, for one sequence at a
+# time. The copy does not follow later training of `model`.
+generator = model.copy(batch_size=1)
+prompt = np.arange(3, 3 + seq_len)[None, :] % vocab
+print("next token:", jz.argmax(generator.predict(prompt))[-1])   # 11
+```
 
 New to the library? Start with the notebook `examples/tutorial.ipynb`.
 
@@ -30,10 +86,13 @@ case; Python cannot tell that `A @ B` is a temporary. On large matrices,
 scale or accumulate in place instead:
 
 ```python
+n = 2000
+A1, A2, A3 = jz.randn(n, n), jz.randn(n, n), jz.zeros(n, n)
+
 A3 += A1 @ A2 / n        # one extra matrix and pass over memory for "/ n"
 
 C = A1 @ A2              # the same result without it
-C /= n                   # in place: *=, /=, += and -= do not allocate
+C /= n                   # in place: += and -= (a number or a matrix), *= and /= (a number)
 A3 += C
 ```
 
@@ -60,7 +119,7 @@ The scripts in `examples/` run on the GPU when the build has one; `--device cpu`
 | `demo_mnist.py` | an MLP on MNIST, step by step | `demo_mnist.cu` |
 | `cnn_mnist.py` | convolutions on MNIST | `demo_cnn_mnist.cu` |
 | `rectified_flow.py` | a generative flow; `hstack`, Euler sampling | `demo_rectified.cu` |
-| `transformer_charlm.py` | a character transformer LM; `one_hot` on the device, `state_dict()` into a batch-1 network | `demo_transformer.cu` |
+| `transformer_charlm.py` | a character transformer LM on token ids: `Embedding`, `PositionEmbedding`, a tied output, `copy(batch_size=1)` for generation | `demo_transformer.cu` (one-hot), `demo_llm_tokens.cu` |
 | `knn.py` | k nearest neighbours with `topk` | `knn.cu` |
 
 See `misc/python_interface_plan.md` for the design.

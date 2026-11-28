@@ -6,6 +6,8 @@
 #include "hipbackend.hpp"
 #include "helper.hpp"
 
+#include <limits>
+
 #ifdef ROCM_HIP
 
 #if defined(__HIPCC__) && __has_include(<hip/hip_runtime.h>) && __has_include(<rocrand/rocrand.h>)
@@ -191,6 +193,21 @@ __global__ void ElemInvInplaceKernel(float* out, std::size_t n, float l) {
     if (idx < n) out[idx] = l / out[idx];
 }
 
+__global__ void AffineKernel(float* out, const float* in, std::size_t n, float s1, float a) {
+    const std::size_t idx = static_cast<std::size_t>(blockIdx.x) * blockDim.x + threadIdx.x;
+    if (idx < n) out[idx] = s1 * in[idx] + a;
+}
+
+__global__ void ElemInvKernel(float* out, const float* in, std::size_t n, float l) {
+    const std::size_t idx = static_cast<std::size_t>(blockIdx.x) * blockDim.x + threadIdx.x;
+    if (idx < n) out[idx] = l / in[idx];
+}
+
+__global__ void ElemDivKernel(float* out, const float* a, const float* b, std::size_t n) {
+    const std::size_t idx = static_cast<std::size_t>(blockIdx.x) * blockDim.x + threadIdx.x;
+    if (idx < n) out[idx] = a[idx] / b[idx];
+}
+
 __global__ void TanhKernel(float* out, const float* in, std::size_t n) {
     const std::size_t idx = static_cast<std::size_t>(blockIdx.x) * blockDim.x + threadIdx.x;
     if (idx < n) out[idx] = tanhf(in[idx]);
@@ -292,6 +309,21 @@ __global__ void SliceExtractKernel(float* dst,
     const std::size_t src_idx = src_transpose ? (sr * src_numrow + sc) : (sc * src_numrow + sr);
     const std::size_t dst_idx = c * dst_numrow + r;
     dst[dst_idx] = src[src_idx];
+}
+
+__global__ void GatherKernel(float* dst,
+                             const float* src,
+                             std::size_t src_numrow,
+                             bool src_transpose,
+                             const std::uint32_t* index,
+                             std::size_t rows,
+                             std::size_t cols) {
+    const std::size_t idx = static_cast<std::size_t>(blockIdx.x) * blockDim.x + threadIdx.x;
+    if (idx >= rows * cols) return;
+
+    const std::size_t sr = index[idx % rows];
+    const std::size_t sc = index[rows + idx / rows];
+    dst[idx] = src[src_transpose ? (sr * src_numrow + sc) : (sc * src_numrow + sr)];
 }
 
 __global__ void SliceAssignKernel(float* dst,
@@ -567,6 +599,188 @@ __global__ void ConvTransReshapeKernel(const float* src, float* dst,
         const int s = col % spatial;
         dst[static_cast<std::size_t>(n) * C * spatial + c_ch * spatial + s] = src[idx];
     }
+}
+
+// ---------------------------------------------------------------------------
+// max, min and argmax along an axis. reduce() gives each stored column to one
+// thread, and for the other direction copies the matrix transposed first;
+// these two kernels share the work on one result among the threads of a block
+// and read the storage as it lies.
+//
+// src holds `count` runs of `length` numbers one after another (the stored
+// columns). A group is a run, or the numbers at one position of every run.
+// Every thread starts from the first number of its group and takes a later
+// one only if it is strictly better, and when the threads' results are merged
+// the earlier of two equal numbers wins. So the result is the one a single
+// pass from the start gives: for ties, for the sign of a zero, and for NaN
+// (one in the first place stays, later ones are passed over).
+//
+// A long group is taken in parts of `chunk` numbers, one part for every block
+// along the grid's second dimension. Each part leaves its result in out_value
+// and where it found it in out_position, and the next pass works on those:
+// `lookup` then holds the places the numbers of src came from. (Every part
+// starts from the group's first number too, so the rule above still holds.)
+constexpr unsigned kExtremeThreads = 256;  // the threads of a block
+
+__device__ inline bool ExtremeWins(float x, int at, float best, int where, bool smallest) {
+    return (smallest ? x < best : x > best) || (x == best && at < where);
+}
+
+// The groups are the runs. blockDim.x threads share a run (thread t takes the
+// numbers t, t + blockDim.x, ... of its part) and a block has blockDim.y
+// runs. The result of part p of run r goes to index r * parts + p.
+__global__ void ExtremePerRunKernel(const float* src, const float* lookup, float* out_value, float* out_position,
+                                    std::size_t length, std::size_t count, std::size_t chunk, bool smallest) {
+    __shared__ float value[kExtremeThreads];
+    __shared__ int where[kExtremeThreads];
+    const unsigned share = blockDim.x;
+    const std::size_t run = static_cast<std::size_t>(blockIdx.x) * blockDim.y + threadIdx.y;
+    const unsigned slot = threadIdx.y * share + threadIdx.x;
+    float best = 0.0f;
+    int at = 0;
+    if (run < count) {
+        const float* v = src + run * length;
+        const std::size_t start = static_cast<std::size_t>(blockIdx.y) * chunk;
+        const std::size_t stop = start + chunk < length ? start + chunk : length;
+        best = v[0];
+        for (std::size_t i = start + threadIdx.x; i < stop; i += share) {
+            const float x = v[i];
+            if (smallest ? x < best : x > best) {
+                best = x;
+                at = static_cast<int>(i);
+            }
+        }
+    }
+    value[slot] = best;
+    where[slot] = at;
+    __syncthreads();
+    for (unsigned half = share >> 1; half > 0; half >>= 1) {
+        if (threadIdx.x < half &&
+            ExtremeWins(value[slot + half], where[slot + half], value[slot], where[slot], smallest)) {
+            value[slot] = value[slot + half];
+            where[slot] = where[slot + half];
+        }
+        __syncthreads();
+    }
+    if (threadIdx.x == 0 && run < count) {
+        const std::size_t to = run * gridDim.y + blockIdx.y;
+        if (out_value) out_value[to] = value[slot];
+        if (out_position)
+            out_position[to] = lookup ? lookup[run * length + where[slot]] : static_cast<float>(where[slot]);
+    }
+}
+
+// The groups lie across the runs, one for every position in a run. A block
+// has blockDim.x neighbouring positions, and blockDim.y threads share a
+// position (thread t takes the runs t, t + blockDim.y, ... of its part). The
+// result of part p at position i goes to index p * length + i.
+__global__ void ExtremeAcrossRunsKernel(const float* src, const float* lookup, float* out_value, float* out_position,
+                                        std::size_t length, std::size_t count, std::size_t chunk, bool smallest) {
+    __shared__ float value[kExtremeThreads];
+    __shared__ int where[kExtremeThreads];
+    const unsigned share = blockDim.y;
+    const std::size_t pos = static_cast<std::size_t>(blockIdx.x) * blockDim.x + threadIdx.x;
+    const unsigned slot = threadIdx.x * share + threadIdx.y;
+    float best = 0.0f;
+    int at = 0;
+    if (pos < length) {
+        const std::size_t start = static_cast<std::size_t>(blockIdx.y) * chunk;
+        const std::size_t stop = start + chunk < count ? start + chunk : count;
+        best = src[pos];
+        for (std::size_t j = start + threadIdx.y; j < stop; j += share) {
+            const float x = src[j * length + pos];
+            if (smallest ? x < best : x > best) {
+                best = x;
+                at = static_cast<int>(j);
+            }
+        }
+    }
+    value[slot] = best;
+    where[slot] = at;
+    __syncthreads();
+    for (unsigned half = share >> 1; half > 0; half >>= 1) {
+        if (threadIdx.y < half &&
+            ExtremeWins(value[slot + half], where[slot + half], value[slot], where[slot], smallest)) {
+            value[slot] = value[slot + half];
+            where[slot] = where[slot + half];
+        }
+        __syncthreads();
+    }
+    if (threadIdx.y == 0 && pos < length) {
+        const std::size_t to = static_cast<std::size_t>(blockIdx.y) * length + pos;
+        if (out_value) out_value[to] = value[slot];
+        if (out_position)
+            out_position[to] = lookup ? lookup[static_cast<std::size_t>(where[slot]) * length + pos]
+                                      : static_cast<float>(where[slot]);
+    }
+}
+
+// How many threads share one result (a power of two, at most `most`), so
+// that each has at least `least` numbers to look at.
+inline unsigned ExtremeShare(std::size_t each, unsigned most, unsigned least) {
+    unsigned share = 1;
+    while (share < most && static_cast<std::size_t>(share) * 2 * least <= each) share <<= 1;
+    return share;
+}
+
+// The numbers of a group that one pass takes as a part. Across the runs 16
+// threads share a part (they read 16 neighbouring positions together), along
+// a run 256 do; a thread then has at most 256 or 1024 numbers. The parts are
+// the grid's second dimension, which holds 65535.
+inline std::size_t ExtremeChunk(std::size_t group, bool across) {
+    std::size_t chunk = across ? 4096 : 262144;
+    while ((group + chunk - 1) / chunk > 65535) chunk *= 2;
+    return chunk;
+}
+
+// ---------------------------------------------------------------------------
+// Sums along an axis, laid out like the two kernels above: the threads of a
+// block share a group, each adds up its numbers, and the block adds those up
+// in pairs; a long group is taken in parts whose sums another pass adds.
+
+// The groups are the runs; the sum of part p of run r goes to index r * parts + p.
+__global__ void SumPerRunKernel(const float* src, float* out, std::size_t length, std::size_t count,
+                                std::size_t chunk) {
+    __shared__ float value[kExtremeThreads];
+    const unsigned share = blockDim.x;
+    const std::size_t run = static_cast<std::size_t>(blockIdx.x) * blockDim.y + threadIdx.y;
+    const unsigned slot = threadIdx.y * share + threadIdx.x;
+    float total = 0.0f;
+    if (run < count) {
+        const float* v = src + run * length;
+        const std::size_t start = static_cast<std::size_t>(blockIdx.y) * chunk;
+        const std::size_t stop = start + chunk < length ? start + chunk : length;
+        for (std::size_t i = start + threadIdx.x; i < stop; i += share) total += v[i];
+    }
+    value[slot] = total;
+    __syncthreads();
+    for (unsigned half = share >> 1; half > 0; half >>= 1) {
+        if (threadIdx.x < half) value[slot] += value[slot + half];
+        __syncthreads();
+    }
+    if (threadIdx.x == 0 && run < count) out[run * gridDim.y + blockIdx.y] = value[slot];
+}
+
+// The groups lie across the runs; the sum of part p at position i goes to index p * length + i.
+__global__ void SumAcrossRunsKernel(const float* src, float* out, std::size_t length, std::size_t count,
+                                    std::size_t chunk) {
+    __shared__ float value[kExtremeThreads];
+    const unsigned share = blockDim.y;
+    const std::size_t pos = static_cast<std::size_t>(blockIdx.x) * blockDim.x + threadIdx.x;
+    const unsigned slot = threadIdx.x * share + threadIdx.y;
+    float total = 0.0f;
+    if (pos < length) {
+        const std::size_t start = static_cast<std::size_t>(blockIdx.y) * chunk;
+        const std::size_t stop = start + chunk < count ? start + chunk : count;
+        for (std::size_t j = start + threadIdx.y; j < stop; j += share) total += src[j * length + pos];
+    }
+    value[slot] = total;
+    __syncthreads();
+    for (unsigned half = share >> 1; half > 0; half >>= 1) {
+        if (threadIdx.y < half) value[slot] += value[slot + half];
+        __syncthreads();
+    }
+    if (threadIdx.y == 0 && pos < length) out[static_cast<std::size_t>(blockIdx.y) * length + pos] = value[slot];
 }
 
 inline int BlocksFor(std::size_t n) {
@@ -940,6 +1154,134 @@ int RocmElemInvInplace(float* inout_device, std::size_t count, float l) {
 #endif
 }
 
+int RocmAffine(float* out_device, const float* in_device, std::size_t count, float s1, float a) {
+#if JUZHEN_ROCM_KERNELS_AVAILABLE
+    hipLaunchKernelGGL(AffineKernel, dim3(BlocksFor(count)), dim3(kThreadsPerBlock), 0, 0,
+                       out_device, in_device, count, s1, a);
+    return HipToInt(hipGetLastError());
+#else
+    (void)out_device;
+    (void)in_device;
+    (void)count;
+    (void)s1;
+    (void)a;
+    LOG_ERROR("ROCm runtime headers not found; RocmAffine is unavailable.");
+    return -1;
+#endif
+}
+
+int RocmElemInv(float* out_device, const float* in_device, std::size_t count, float l) {
+#if JUZHEN_ROCM_KERNELS_AVAILABLE
+    hipLaunchKernelGGL(ElemInvKernel, dim3(BlocksFor(count)), dim3(kThreadsPerBlock), 0, 0,
+                       out_device, in_device, count, l);
+    return HipToInt(hipGetLastError());
+#else
+    (void)out_device;
+    (void)in_device;
+    (void)count;
+    (void)l;
+    LOG_ERROR("ROCm runtime headers not found; RocmElemInv is unavailable.");
+    return -1;
+#endif
+}
+
+int RocmElemDiv(float* out_device, const float* a_device, const float* b_device,
+                std::size_t count) {
+#if JUZHEN_ROCM_KERNELS_AVAILABLE
+    hipLaunchKernelGGL(ElemDivKernel, dim3(BlocksFor(count)), dim3(kThreadsPerBlock), 0, 0,
+                       out_device, a_device, b_device, count);
+    return HipToInt(hipGetLastError());
+#else
+    (void)out_device;
+    (void)a_device;
+    (void)b_device;
+    (void)count;
+    LOG_ERROR("ROCm runtime headers not found; RocmElemDiv is unavailable.");
+    return -1;
+#endif
+}
+
+std::size_t RocmAxisExtremeChunk(std::size_t group, bool across) {
+#if JUZHEN_ROCM_KERNELS_AVAILABLE
+    return ExtremeChunk(group, across);
+#else
+    (void)across;
+    return group;
+#endif
+}
+
+int RocmAxisExtremePass(const float* src_device, const float* lookup_device,
+                        float* out_value_device, float* out_position_device,
+                        std::size_t length, std::size_t count, std::size_t chunk,
+                        bool across, bool smallest) {
+#if JUZHEN_ROCM_KERNELS_AVAILABLE
+    const std::size_t most = static_cast<std::size_t>(std::numeric_limits<int>::max());
+    if (length == 0 || count == 0 || chunk == 0 || length > most || count > most) return -1;
+    const std::size_t group = across ? count : length, others = across ? length : count;
+    const std::size_t parts = (group + chunk - 1) / chunk;
+    if (parts > 65535) return -1;
+    const std::size_t part = group < chunk ? group : chunk;
+    if (across) {
+        const unsigned share = ExtremeShare(part, 16, 16), together = kExtremeThreads / share;
+        hipLaunchKernelGGL(ExtremeAcrossRunsKernel,
+                           dim3(static_cast<unsigned>((others + together - 1) / together), static_cast<unsigned>(parts)),
+                           dim3(together, share), 0, 0, src_device, lookup_device, out_value_device,
+                           out_position_device, length, count, chunk, smallest);
+    } else {
+        const unsigned share = ExtremeShare(part, kExtremeThreads, 8), together = kExtremeThreads / share;
+        hipLaunchKernelGGL(ExtremePerRunKernel,
+                           dim3(static_cast<unsigned>((others + together - 1) / together), static_cast<unsigned>(parts)),
+                           dim3(share, together), 0, 0, src_device, lookup_device, out_value_device,
+                           out_position_device, length, count, chunk, smallest);
+    }
+    return HipToInt(hipGetLastError());
+#else
+    (void)src_device;
+    (void)lookup_device;
+    (void)out_value_device;
+    (void)out_position_device;
+    (void)length;
+    (void)count;
+    (void)chunk;
+    (void)across;
+    (void)smallest;
+    LOG_ERROR("ROCm runtime headers not found; RocmAxisExtremePass is unavailable.");
+    return -1;
+#endif
+}
+
+int RocmAxisSumPass(const float* src_device, float* out_device, std::size_t length, std::size_t count,
+                    std::size_t chunk, bool across) {
+#if JUZHEN_ROCM_KERNELS_AVAILABLE
+    if (length == 0 || count == 0 || chunk == 0) return -1;
+    const std::size_t group = across ? count : length, others = across ? length : count;
+    const std::size_t parts = (group + chunk - 1) / chunk;
+    if (parts > 65535) return -1;
+    const std::size_t part = group < chunk ? group : chunk;
+    if (across) {
+        const unsigned share = ExtremeShare(part, 16, 16), together = kExtremeThreads / share;
+        hipLaunchKernelGGL(SumAcrossRunsKernel,
+                           dim3(static_cast<unsigned>((others + together - 1) / together), static_cast<unsigned>(parts)),
+                           dim3(together, share), 0, 0, src_device, out_device, length, count, chunk);
+    } else {
+        const unsigned share = ExtremeShare(part, kExtremeThreads, 8), together = kExtremeThreads / share;
+        hipLaunchKernelGGL(SumPerRunKernel,
+                           dim3(static_cast<unsigned>((others + together - 1) / together), static_cast<unsigned>(parts)),
+                           dim3(share, together), 0, 0, src_device, out_device, length, count, chunk);
+    }
+    return HipToInt(hipGetLastError());
+#else
+    (void)src_device;
+    (void)out_device;
+    (void)length;
+    (void)count;
+    (void)chunk;
+    (void)across;
+    LOG_ERROR("ROCm runtime headers not found; RocmAxisSumPass is unavailable.");
+    return -1;
+#endif
+}
+
 int RocmCopy(float* dst_device, const float* src_device, std::size_t count) {
 #if JUZHEN_ROCM_KERNELS_AVAILABLE
     return HipToInt(hipMemcpy(dst_device, src_device, count * sizeof(float), hipMemcpyDeviceToDevice));
@@ -1116,6 +1458,30 @@ int RocmSliceExtract(float* dst_device,
     (void)rows;
     (void)cols;
     LOG_ERROR("ROCm runtime headers not found; RocmSliceExtract is unavailable.");
+    return -1;
+#endif
+}
+
+int RocmGather(float* dst_device,
+               const float* src_device,
+               std::size_t src_numrow,
+               bool src_transpose,
+               const std::uint32_t* index_device,
+               std::size_t rows,
+               std::size_t cols) {
+#if JUZHEN_ROCM_KERNELS_AVAILABLE
+    hipLaunchKernelGGL(GatherKernel, dim3(BlocksFor(rows * cols)), dim3(kThreadsPerBlock), 0, 0,
+                       dst_device, src_device, src_numrow, src_transpose, index_device, rows, cols);
+    return HipToInt(hipGetLastError());
+#else
+    (void)dst_device;
+    (void)src_device;
+    (void)src_numrow;
+    (void)src_transpose;
+    (void)index_device;
+    (void)rows;
+    (void)cols;
+    LOG_ERROR("ROCm runtime headers not found; RocmGather is unavailable.");
     return -1;
 #endif
 }

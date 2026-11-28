@@ -402,9 +402,9 @@ int compute() {
         cout << "Training: batch " << batch << " x seq " << seq_len << " = " << N
              << " tokens/step, steps " << steps << endl << endl;
 
-        LinearLayer<FLOAT> embed(cfg.d_model, in_dim, N);
+        LinearLayer<FLOAT> embed(cfg.d_model, in_dim, N, Init::normal(0.001f));
         auto blocks = make_blocks(batch);
-        LinearLayer<FLOAT> proj(V, cfg.d_model, N);
+        LinearLayer<FLOAT> proj(V, cfg.d_model, N, Init::normal(0.001f));
 
         // batch=1: snapshots store weights only, skip big activation caches
         LinearLayer<FLOAT> best_embed(cfg.d_model, in_dim, 1);

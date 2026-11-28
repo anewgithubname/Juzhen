@@ -51,6 +51,28 @@ int RocmLogInplace(float* dst_device, std::size_t count);
 int RocmAxpby(float* out_device, const float* a_device, const float* b_device,
               std::size_t count, float s1, float s2);
 int RocmAffineInplace(float* inout_device, std::size_t count, float s1, float a);
+// out = s1 * in + a, out = l / in, out = a ./ b: one pass into another buffer
+int RocmAffine(float* out_device, const float* in_device, std::size_t count, float s1, float a);
+int RocmElemInv(float* out_device, const float* in_device, std::size_t count, float l);
+int RocmElemDiv(float* out_device, const float* a_device, const float* b_device,
+                std::size_t count);
+// max, min and argmax along an axis (see hipkernels.cpp). src holds `count`
+// runs of `length` numbers one after another; a group is a run, or with
+// `across` the numbers at one position of every run. A pass takes a group in
+// parts of `chunk` numbers (RocmAxisExtremeChunk says how many, for a group
+// of `group` numbers) and leaves, for every part, the largest (or smallest)
+// number in out_value and its place in the group in out_position; either may
+// be null. With one part these are the results. With more, they are laid out
+// as the src of the next pass, which takes them with lookup = the places.
+std::size_t RocmAxisExtremeChunk(std::size_t group, bool across);
+int RocmAxisExtremePass(const float* src_device, const float* lookup_device,
+                        float* out_value_device, float* out_position_device,
+                        std::size_t length, std::size_t count, std::size_t chunk,
+                        bool across, bool smallest);
+// The same for sums: out gets the sum of every part of every group, laid out
+// as the src of the next pass (with one part, the sums themselves).
+int RocmAxisSumPass(const float* src_device, float* out_device, std::size_t length, std::size_t count,
+                    std::size_t chunk, bool across);
 int RocmHadamard(float* out_device, const float* a_device, const float* b_device,
                  std::size_t count);
 int RocmHadamardInplace(float* inout_device, const float* other_device,
@@ -86,6 +108,15 @@ int RocmSliceExtract(float* dst_device,
                      std::size_t cstart,
                      std::size_t rows,
                      std::size_t cols);
+// dst(i, j) = src(row i of the list, column j of the list), dst column-major
+// rows x cols. index_device holds the row numbers, then the column numbers.
+int RocmGather(float* dst_device,
+               const float* src_device,
+               std::size_t src_numrow,
+               bool src_transpose,
+               const std::uint32_t* index_device,
+               std::size_t rows,
+               std::size_t cols);
 int RocmSliceAssign(float* dst_device,
                     std::size_t dst_numrow,
                     bool dst_transpose,

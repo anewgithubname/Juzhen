@@ -36,9 +36,14 @@
 #include <sstream>
 #include <fstream>
 #include <cstring>
+#include <type_traits>
 
 template <class D>
 class Matrix;
+
+// What axis_extreme() looks for along an axis: the largest entry, the
+// smallest, or the position of the largest.
+enum class AxisExtreme { Max, Min, ArgMax };
 
 /**
  * @brief non-owning view of a matrix.
@@ -77,6 +82,49 @@ class MatrixView {
     friend const Matrix<CUDAfloat> vstack(
         std::vector<MatrixView<CUDAfloat>> matrices);
 };
+
+// out = f(a, b), element by element, for two matrices of the same shape.
+// a and out are stored the same way (numrow x numcol, column-major, and out
+// may be a itself); b is stored either like them or as their transpose.
+// Stored alike, it is one pass over the storage. Otherwise b is read against
+// its storage order, and the work goes tile by tile so that b's tile stays in
+// the cache.
+template <class D, class F>
+inline void zip_storage(D *out, const D *a, const D *b, size_t numrow,
+                        size_t numcol, bool b_is_transposed, F f) {
+    const size_t n = numrow * numcol;
+    if (!b_is_transposed) {
+        if (out == a && out != b) {
+            // In place (A += B). The loop below is compiled with a test for
+            // overlapping storage that sends this case to its one-at-a-time
+            // version; here the compiler is told that only b is separate.
+            D *__restrict o = out;
+            const D *__restrict q = b;
+            for (size_t k = 0; k < n; k++) o[k] = f(o[k], q[k]);
+            return;
+        }
+        for (size_t k = 0; k < n; k++) out[k] = f(a[k], b[k]);
+        return;
+    }
+    // A += A.T: b is the storage being written; read it from a copy.
+    std::vector<D> kept;
+    if (b == out) {
+        kept.assign(b, b + n);
+        b = kept.data();
+    }
+    // 16 x 16: small enough that the tile of b stays cached even when the
+    // number of rows is a power of two and its pieces share cache sets.
+    const size_t tile = 16;
+    for (size_t j0 = 0; j0 < numcol; j0 += tile) {
+        const size_t j1 = std::min(j0 + tile, numcol);
+        for (size_t i0 = 0; i0 < numrow; i0 += tile) {
+            const size_t i1 = std::min(i0 + tile, numrow);
+            for (size_t j = j0; j < j1; j++)
+                for (size_t i = i0; i < i1; i++)
+                    out[j * numrow + i] = f(a[j * numrow + i], b[i * numcol + j]);
+        }
+    }
+}
 
 template <class D>
 class Matrix {
@@ -152,11 +200,12 @@ class Matrix {
     void add(const Matrix<D> &B, D s1, D s2);
     Matrix<D> add(D b, D s1) const;  // using single for loop
     void add(D b, D s1);
-    Matrix<D> scale(D s1) const { return add(0, s1); }
-    void scale(D s1) { add(0, s1); }
+    Matrix<D> scale(D s1) const;  // a multiplication alone, not s1*A + 0
+    void scale(D s1);
 
     void eleminv(double l);
     Matrix<D> eleminv(double l) const;
+    Matrix<D> elemdiv(const Matrix<D> &B) const;  // this ./ B in one pass
 
     D norm() const;   // using single for loop
     const Matrix<D> T() const;
@@ -182,6 +231,8 @@ class Matrix {
     // Matrix's friends
     template <class Data>
     friend Matrix<Data> sum(const Matrix<Data> &M, int dim);
+    template <class Data>
+    friend Matrix<Data> sum_direct(const Matrix<Data> &M, int dim);
     template <class Data>
     friend Matrix<Data> exp(const Matrix<Data> &M);
     template <class Data>
@@ -234,6 +285,10 @@ class Matrix {
     friend Matrix<Data> vstack(std::vector<MatrixView<Data>> matrices);
     template <class Data>
     friend Matrix<Data> hadmd(const Matrix<Data> &M1, const Matrix<Data> &M2);
+    template <class Data>
+    friend Matrix<Data> hadmd(const Matrix<Data> &M1, Matrix<Data> &&M2);
+    template <class Data>
+    friend Matrix<Data> hadmd(Matrix<Data> &&M1, const Matrix<Data> &M2);
     friend Matrix<float> topk(const Matrix<MPSfloat>& M, int k, int dim);
 
     template <class Data>
@@ -383,17 +438,10 @@ template <class D>
 Matrix<D> Matrix<D>::slice(const idxlist &rowidx, const idxlist &colidx) const {
     // TODO: the size of matrix is int, which may not be enough
     Matrix<D> M("submatrix", rowidx.size(), colidx.size(), 0);
-    size_t i = 0;
-    for (auto it = rowidx.begin(); it != rowidx.end(); it++) {
-        size_t r = *it;
-        size_t j = 0;
-        for (auto it2 = colidx.begin(); it2 != colidx.end(); it2++) {
-            size_t c = *it2;
-            M.elem(i, j) = elem(r, c);
-            j++;
-        }
-        i++;
-    }
+    // column by column, so that the result is written in storage order
+    D *out = M.elements.get();
+    for (size_t c : colidx)
+        for (size_t r : rowidx) *out++ = elem(r, c);
     return M;
 }
 
@@ -424,16 +472,15 @@ Matrix<D> Matrix<D>::add(const Matrix<D> &B, D s1, D s2) const {
         throw std::invalid_argument("Matrix dimensions are not compatible");
     }
 
-    Matrix<D> C("add", num_row(), num_col(), 0);
-
-    for (size_t j = 0; j < num_col(); j++) {
-        for (size_t i = 0; i < num_row(); i++) {
-            // NOTE: Perhaps there is better way of doing this
-            //  considering the cache hit rate.
-            // NOTE: there was a mistake here
-            C.elem(i, j) = s1 * elem(i, j) + s2 * B.elem(i, j);
-        }
-    }
+    // The result is stored like the two operands when they are stored alike
+    // (transposed or not), and without the transpose flag otherwise.
+    const bool swap = transpose && !B.transpose;
+    const Matrix<D> &x = swap ? B : *this, &y = swap ? *this : B;
+    const D sx = swap ? s2 : s1, sy = swap ? s1 : s2;
+    Matrix<D> C("add", x.numrow, x.numcol, x.transpose);
+    zip_storage(C.elements.get(), x.elements.get(), y.elements.get(), x.numrow,
+                x.numcol, x.transpose != y.transpose,
+                [sx, sy](D p, D q) { return sx * p + sy * q; });
     return C;
 }
 
@@ -445,23 +492,28 @@ void Matrix<D>::add(const Matrix<D> &B, D s1, D s2) {
         throw std::invalid_argument("Matrix dimensions are not compatible");
     }
 
-    for (size_t j = 0; j < num_col(); j++) {
-        for (size_t i = 0; i < num_row(); i++) {
-            // NOTE: Perhaps there is better way of doing this
-            //  considering the cache hit rate.
-            // NOTE: there was a mistake here
-            elem(i, j) = s1 * elem(i, j) + s2 * B.elem(i, j);
-        }
-    }
+    zip_storage(elements.get(), elements.get(), B.elements.get(), numrow,
+                numcol, transpose != B.transpose,
+                [s1, s2](D p, D q) { return s1 * p + s2 * q; });
 }
 
 // C = s1*A + b
 template <class D>
 Matrix<D> Matrix<D>::add(D b, D s1) const {
     Matrix<D> C("add", numrow, numcol, transpose);
-    size_t numelems = num_row() * num_col();
-    for (size_t i = 0; i < numelems; i++) {
-        C.elements[i] = s1 * elements[i] + b;
+    // plain pointers: through the shared pointers the loop is vectorized in
+    // some places it is inlined and not in others
+    const size_t numelems = numrow * numcol;
+    const D *in = elements.get();
+    D *__restrict out = C.elements.get();
+    // A + b and b - A are one operation per element, not a product and a sum
+    // (the values are the same: 1*x is x and -1*x + b is b - x exactly)
+    if (s1 == D(1)) {
+        for (size_t i = 0; i < numelems; i++) out[i] = in[i] + b;
+    } else if (s1 == D(-1)) {
+        for (size_t i = 0; i < numelems; i++) out[i] = b - in[i];
+    } else {
+        for (size_t i = 0; i < numelems; i++) out[i] = s1 * in[i] + b;
     }
     return C;
 }
@@ -469,23 +521,82 @@ Matrix<D> Matrix<D>::add(D b, D s1) const {
 // A = s1*A + b
 template <class D>
 void Matrix<D>::add(D b, D s1) {
-    size_t numelems = num_row() * num_col();
-    for (size_t i = 0; i < numelems; i++) {
-        elements[i] = s1 * elements[i] + b;
+    const size_t numelems = numrow * numcol;
+    D *p = elements.get();
+    if (s1 == D(1)) {
+        for (size_t i = 0; i < numelems; i++) p[i] = p[i] + b;
+    } else if (s1 == D(-1)) {
+        for (size_t i = 0; i < numelems; i++) p[i] = b - p[i];
+    } else {
+        for (size_t i = 0; i < numelems; i++) p[i] = s1 * p[i] + b;
     }
 }
 
+// C = s1*A
+template <class D>
+Matrix<D> Matrix<D>::scale(D s1) const {
+    Matrix<D> C("scale", numrow, numcol, transpose);
+    const size_t numelems = numrow * numcol;
+    const D *in = elements.get();
+    D *__restrict out = C.elements.get();
+    for (size_t i = 0; i < numelems; i++) {
+        out[i] = s1 * in[i];
+    }
+    return C;
+}
+
+// A = s1*A
+template <class D>
+void Matrix<D>::scale(D s1) {
+    const size_t numelems = numrow * numcol;
+    D *p = elements.get();
+    for (size_t i = 0; i < numelems; i++) {
+        p[i] = s1 * p[i];
+    }
+}
+
+// The division is done in float for a float matrix (as on the GPUs): dividing
+// in double, one element at a time, is several times slower.
 template <class D>
 void Matrix<D>::eleminv(double l) {
-    for (size_t i = 0; i < numrow * numcol; i++) elements[i] = l / elements[i];
+    using Q = std::conditional_t<std::is_same_v<D, float>, float, double>;
+    const Q s = (Q)l;
+    const size_t n = numrow * numcol;
+    D *p = elements.get();
+    for (size_t i = 0; i < n; i++) p[i] = s / p[i];
 }
 
 template <class D>
 Matrix<D> Matrix<D>::eleminv(double l) const {
     Matrix<D> M((name + "reci").c_str(), numrow, numcol, transpose);
-    for (size_t i = 0; i < numrow * numcol; i++)
-        M.elements[i] = l / elements[i];
+    using Q = std::conditional_t<std::is_same_v<D, float>, float, double>;
+    const Q s = (Q)l;
+    const size_t n = numrow * numcol;
+    const D *in = elements.get();
+    D *__restrict out = M.elements.get();
+    for (size_t i = 0; i < n; i++) out[i] = s / in[i];
     return M;
+}
+
+// this ./ B in one pass over the storage. The result is stored like the two
+// operands when they are stored alike, and without the transpose flag
+// otherwise (see Matrix<D>::add).
+template <class D>
+Matrix<D> Matrix<D>::elemdiv(const Matrix<D> &B) const {
+    if (num_row() != B.num_row() || num_col() != B.num_col()) {
+        throw std::invalid_argument("Matrix dimensions are not compatible");
+    }
+    if (transpose && !B.transpose) {
+        Matrix<D> C("elemdiv", B.numrow, B.numcol, B.transpose);
+        zip_storage(C.elements.get(), B.elements.get(), elements.get(), B.numrow,
+                    B.numcol, true, [](D q, D p) { return p / q; });
+        return C;
+    }
+    Matrix<D> C("elemdiv", numrow, numcol, transpose);
+    zip_storage(C.elements.get(), elements.get(), B.elements.get(), numrow,
+                numcol, transpose != B.transpose,
+                [](D p, D q) { return p / q; });
+    return C;
 }
 
 // Helpers for the existing three-native-int matrix format. Keep stream reads

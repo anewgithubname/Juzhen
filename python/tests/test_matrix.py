@@ -181,8 +181,8 @@ class TestFunctions:
             close(jz.max(M, 1), m.max(1, keepdims=True))
             close(jz.min(M, 0), m.min(0, keepdims=True))
             close(jz.min(M, 1), m.min(1, keepdims=True))
-            close(jz.argmax(M), m.argmax(1)[:, None])
-            close(jz.argmax(M, 0), m.argmax(0)[None, :])
+            assert jz.argmax(M).tolist() == m.argmax(1).tolist()
+            assert jz.argmax(M, 0).tolist() == m.argmax(0).tolist()
         assert jz.max(A).item() == pytest.approx(a.max())
         assert jz.min(A).item() == pytest.approx(a.min())
         close(jz.abs(A), np.abs(a))
@@ -192,10 +192,10 @@ class TestFunctions:
         a, A = pair(rng, device, (6, 9))
         order = np.argsort(-a if largest else a, axis=1, kind="stable")[:, :4]
         values, positions = jz.topk(A, 4, largest=largest)
-        close(positions, order)
+        assert positions.tolist() == order.tolist()
         close(values, np.take_along_axis(a, order, 1))
         values, positions = jz.topk(A.T, 4, axis=0, largest=largest)
-        close(positions, order.T)
+        assert positions.tolist() == order.T.tolist()
         close(values, np.take_along_axis(a, order, 1).T)
         assert A.numpy() == pytest.approx(a)  # the input is left alone
         with pytest.raises(ValueError, match="k must be"):
@@ -281,3 +281,278 @@ class TestDevices:
         jz.empty_cache()
         jz.synchronize()
         close(A + A, 2 * a)
+
+
+class TestNumbersMethodsPositions:
+    def test_one_by_one_matrix_is_a_number(self, device, rng):
+        a, A = pair(rng, device, (4, 5))
+        s, total = jz.sum(A), float(a.sum())
+        assert f"{s:.2f}" == f"{total:.2f}" and "{:9.3e}".format(s) == f"{total:9.3e}"
+        assert f"{s}" == str(s) == repr(s)  # without a format it prints as a matrix
+        assert round(s, 2) == pytest.approx(round(total, 2)) and isinstance(round(s, 2), float)
+        assert round(s) == round(total) and isinstance(round(s), int)
+        assert int(s) == int(total) and float(s) == pytest.approx(total, abs=1e-5)
+        assert (s > total - 1) and not (s > total + 1) and max(s, total + 1) == total + 1
+        assert int(jz.sum(A > 0)) == int((a > 0).sum())
+        assert f"{jz.mean(A):.4f}" == f"{a.mean():.4f}"
+
+    def test_a_larger_matrix_is_not_a_number(self, device, rng):
+        _, A = pair(rng, device, (4, 5))
+        for use, what in ((lambda: f"{A:.2f}", r"the format '\.2f'"), (lambda: round(A), r"round\(\)"),
+                          (lambda: round(A, 1), r"round\(\)"), (lambda: int(A), r"int\(\)"),
+                          (lambda: float(A), r"float\(\)")):
+            with pytest.raises(TypeError, match=what + r" needs one number, and this matrix is 4 x 5.*jz\.sum\(A\)"):
+                use()
+        assert f"{A}" == repr(A)
+
+    def test_methods_are_the_functions(self, device, rng):
+        a, A = pair(rng, device, (4, 5))
+        for name in ("sum", "mean", "max", "min"):
+            function, method = getattr(jz, name), getattr(A, name)
+            close(method(), function(A))
+            close(method(0), function(A, 0))
+            close(method(axis=1), function(A, 1))
+        for name in ("exp", "tanh", "sin", "cos", "square", "abs", "relu", "sigmoid", "softmax", "logsumexp"):
+            close(getattr(A, name)(), getattr(jz, name)(A))
+        close(A.abs().sqrt(), np.sqrt(np.abs(a)))
+        close(A.abs().log(), np.log(np.abs(a)))
+        close(A.softmax(axis=0), jz.softmax(A, 0))
+        close(abs(A), np.abs(a))
+        close(A - A.mean(axis=0), a - a.mean(0))  # the numpy habit
+        assert A.sum(1).shape == (4, 1) and A.sum(1).device == device
+        assert A.argmax().tolist() == a.argmax(1).tolist() and A.argmax(0).tolist() == a.argmax(0).tolist()
+        values, positions = A.topk(2)
+        close(values, jz.topk(A, 2)[0])
+        assert positions.tolist() == jz.topk(A, 2)[1].tolist()
+        assert "jz.sum(A, ...)" in A.sum.__doc__
+
+    def test_numpy_functions_still_compute_in_numpy(self, device, rng):
+        # np.sum(A) looks for A.sum and calls it with out=None: the answer stays numpy's
+        a, A = pair(rng, device, (4, 5))
+        for f in (np.sum, np.mean, np.max, np.min, np.argmax):
+            for axis in (None, 0, 1):
+                got, want = f(A, axis=axis), f(a, axis=axis)
+                assert not isinstance(got, jz.Matrix) and np.shape(got) == np.shape(want)
+                np.testing.assert_allclose(got, want, rtol=1e-5, atol=1e-5)
+        np.testing.assert_allclose(np.exp(A), np.exp(a), rtol=1e-5)
+        np.testing.assert_allclose(np.std(A), np.std(a), rtol=1e-5)
+
+    def test_positions_are_numpy_integers(self, device, rng):
+        scores = jz.array(rng.standard_normal((6, 3)), device=device)
+        s = scores.numpy()
+        y = s.argmax(1)
+        y[0] = (y[0] + 1) % 3  # 5 of 6 right
+        p = jz.argmax(scores)
+        assert isinstance(p, np.ndarray) and p.dtype == np.int64 and p.shape == (6,)
+        assert jz.argmax(scores, 0).shape == (3,)
+        assert np.mean(p == y) == pytest.approx(5 / 6)          # accuracy, written the numpy way
+        assert ["cat", "dog", "bird"][p[0]] == ["cat", "dog", "bird"][s[0].argmax()]
+        close(scores[p], s[p])                                   # rows of a matrix
+        close(jz.nn.softmax_cross_entropy(scores, p).value, jz.nn.softmax_cross_entropy(scores, s.argmax(1)).value)
+        assert (jz.argmax(jz.nn.one_hot(y, 3, device=device)) == y).all()   # one-hot back to class numbers
+        assert ((scores == jz.max(scores, 1)).numpy().argmax(1) == p).all()  # the same on the device
+        values, positions = jz.topk(scores, 2, axis=0, largest=False)
+        assert isinstance(values, jz.Matrix) and positions.dtype == np.int64 and positions.shape == (2, 3)
+        assert y[positions].shape == (2, 3)                      # labels of the nearest, as in knn.py
+        with pytest.raises(ValueError, match=r"axis 1 \(each row.*np\.argmax\(A\.numpy\(\)\)"):
+            jz.argmax(scores, None)
+        values, positions = jz.topk(jz.array([[np.nan, np.nan, 1.0]], device=device), 2)
+        assert positions.tolist() == [[2, -1]] and np.isnan(values.numpy()[0, 1])
+
+
+def plain(a, device):
+    """a as a matrix stored column by column, as jz.randn and a matrix product give it."""
+    M = jz.zeros(*a.shape, device=device)
+    M += jz.array(a, device=device)
+    assert a.shape[0] == 1 or a.shape[1] == 1 or M.numpy().flags["F_CONTIGUOUS"]
+    return M
+
+
+class TestStorageOrders:
+    """A matrix from numpy is stored row by row, one made by juzhen column by column; every pairing must agree."""
+
+    @pytest.mark.parametrize("shape", [(1, 1), (1, 9), (7, 1), (37, 53), (70, 70)])
+    def test_elementwise_in_every_pairing(self, device, rng, shape):
+        a = rng.standard_normal(shape).astype(np.float32)
+        b = rng.standard_normal(shape).astype(np.float32) + 3
+        for A in (jz.array(a, device=device), plain(a, device)):
+            for B in (jz.array(b, device=device), plain(b, device)):
+                close(A + B, a + b)
+                close(A - B, a - b)
+                close(A * B, a * b)
+                close(A / B, a / b)
+                close(A < B, a < b)
+                C = A.copy()
+                C += B
+                close(C, a + b)
+                C -= B
+                close(C, a, tol=1e-4)
+                close(A, a)   # the operands are left alone
+                close(B, b)
+
+    @pytest.mark.parametrize("n", [1, 3, 70])
+    def test_in_place_with_its_own_transpose(self, device, rng, n):
+        # the right side is the storage being written: this used to give wrong numbers on the CPU
+        a = rng.standard_normal((n, n)).astype(np.float32)
+        for make in (lambda: jz.array(a, device=device), lambda: plain(a, device)):
+            A = make()
+            A += A.T
+            close(A, a + a.T)
+            A = make()
+            A -= A.T
+            close(A, a - a.T)
+            A = make()
+            B = A.T
+            B += A
+            close(A, a + a.T)       # B is a view of A
+            A = make()
+            A += A
+            close(A, 2 * a)
+            A = make()
+            close(A + A.T, a + a.T)
+            close(A * A.T, a * a.T)
+            close(A, a)
+
+    def test_rows_and_columns_by_number(self, device, rng):
+        a = rng.standard_normal((50, 23)).astype(np.float32)
+        rows = np.array([49, 0, 7, 7, -1, 12])
+        cols = [22, 3, 3, 0]
+        for A, expected in ((jz.array(a, device=device), a), (plain(a, device), a),
+                            (jz.array(a.T.copy(), device=device).T, a)):
+            for picked, want in ((A[rows], expected[rows]), (A[rows.tolist()], expected[rows]),
+                                 (A[:, cols], expected[:, cols]), (A[rows, cols], expected[np.ix_(rows, cols)]),
+                                 (A[::7], expected[::7]), (A[::-1, ::3], expected[::-1, ::3]),
+                                 (A[5, cols], expected[5:6, cols]), (A[rows, 2], expected[rows, 2:3]),
+                                 (A.T[cols], expected.T[cols]), (A.T[:, rows], expected.T[:, rows])):
+                assert picked.device == device
+                close(picked, want)
+            close(A, expected)
+        big = rng.standard_normal((3000, 40)).astype(np.float32)
+        order = rng.permutation(3000)
+        close(jz.array(big, device=device)[order], big[order])
+
+
+class TestOnePass:
+    """Quotients, multiples, the largest and smallest along an axis and sums, in both storage orders."""
+
+    SHAPES = [(1, 1), (1, 9), (7, 1), (16, 16), (37, 53), (70, 70), (129, 65)]
+
+    @pytest.mark.parametrize("shape", SHAPES)
+    def test_quotients_and_multiples(self, device, rng, shape):
+        a = rng.standard_normal(shape).astype(np.float32)
+        b = np.abs(rng.standard_normal(shape)).astype(np.float32) + 0.5
+        for A in (jz.array(a, device=device), plain(a, device)):
+            for B in (jz.array(b, device=device), plain(b, device)):
+                close(A / B, a / b)
+                close(A * B, a * b)
+                close((A + 1) / (B + 1), (a + 1) / (b + 1))   # temporaries on both sides
+                close(A, a)
+                close(B, b)
+            close(2.5 * A, 2.5 * a)
+            close(A * -3, a * -3)
+            close(A / 4, a / 4)
+            close(A + 1.5, a + 1.5)
+            close(1.5 - A, 1.5 - a)
+            close(-A, -a)
+            close(A, a)   # none of these writes into A
+        for B in (jz.array(b, device=device), plain(b, device)):
+            close(2 / B, 2 / b)
+            close(1 / B, 1 / b)
+            close(B, b)
+
+    # on a GPU the threads of a block share a row or a column: shapes that do not fill the blocks, that need
+    # more than one, that have a single group or a single entry in a group, and rows and columns long enough
+    # to be taken in parts (on ROCm more than 4096 across the stored columns and more than 262144 along one;
+    # on CUDA more than 1024 and 16384, and 2 x 1100000 takes three passes there)
+    LONGER = [(300, 17), (17, 300), (513, 257), (1100, 1000), (2, 5000), (5000, 2), (1, 3000), (3000, 1),
+              (3, 9001), (9001, 3), (2, 270000), (270000, 2), (1, 300000), (300000, 1), (2, 1100000)]
+
+    @pytest.mark.parametrize("shape", SHAPES + LONGER)
+    def test_largest_and_smallest_along_an_axis(self, device, rng, shape):
+        normal = rng.standard_normal(shape).astype(np.float32)
+        ties = rng.integers(-3, 3, shape).astype(np.float32)
+        for a in (normal, ties, normal - 100, -ties + 50):   # also all negative and all positive
+            for A in (jz.array(a, device=device), plain(a, device), jz.array(a.T.copy(), device=device).T):
+                for axis in (0, 1):
+                    close(jz.max(A, axis), a.max(axis, keepdims=True))
+                    close(jz.min(A, axis), a.min(axis, keepdims=True))
+                    assert jz.argmax(A, axis).tolist() == a.argmax(axis).tolist()   # of equal ones, the first
+                assert jz.max(A).item() == a.max()
+                assert jz.min(A).item() == a.min()
+                close(A, a)
+
+    def test_the_extremes_wherever_they_are(self, device):
+        # the largest value in every position of a row longer than the 16 lanes, and of a short one
+        for n in (5, 16, 37):
+            for at in range(n):
+                a = np.zeros((2, n), dtype=np.float32)
+                a[0, at], a[1, at] = 7, -7
+                for A in (jz.array(a, device=device), plain(a, device)):
+                    assert jz.max(A, 1).numpy().ravel().tolist() == [7, 0]
+                    assert jz.min(A, 1).numpy().ravel().tolist() == [0, -7]
+                    assert jz.max(A.T, 0).numpy().ravel().tolist() == [7, 0]
+
+    @pytest.mark.parametrize("shape", SHAPES + LONGER)
+    def test_sums_of_whole_numbers_are_exact(self, device, rng, shape):
+        # whole numbers add up exactly in any order, so every entry must have been taken once (on CUDA and
+        # ROCm the threads of a block share a row or a column, and a long one is added up in parts); a NaN or
+        # an infinity stays in its own row and column
+        a = rng.integers(-5, 5, shape).astype(np.float32)
+        for value in (None, np.nan, np.inf, -np.inf):
+            for place in ((0, 0), (shape[0] // 2, shape[1] - 1)) if value is not None else (None,):
+                b = a.copy()
+                if place is not None:
+                    b[place] = value
+                for B in (jz.array(b, device=device), plain(b, device), jz.array(b.T.copy(), device=device).T):
+                    for axis in (0, 1):
+                        np.testing.assert_array_equal(jz.sum(B, axis).numpy(), b.sum(axis, keepdims=True))
+                    if value is None:
+                        assert jz.sum(B).item() == b.sum()
+
+    @pytest.mark.parametrize("shape", [(2, 5), (3, 40), (2, 700), (700, 3), (300, 300), (2, 9001), (9001, 2),
+                                       (2, 270000), (270000, 2)])
+    def test_nan_as_in_one_pass_from_the_start(self, device, rng, shape):
+        # a NaN in the first place of a row or column is its result; later ones are passed over
+        a = rng.integers(-5, 5, shape).astype(np.float32)
+        for axis in (0, 1):
+            for place in sorted({0, 1, shape[axis] // 2, shape[axis] - 1} | ({4096, 262144} & set(range(shape[axis])))):
+                b = a.copy()
+                if axis == 0:
+                    b[place, :] = np.nan
+                else:
+                    b[:, place] = np.nan
+                for B in (jz.array(b, device=device), plain(b, device), jz.array(b.T.copy(), device=device).T):
+                    largest, smallest, where = jz.max(B, axis).numpy(), jz.min(B, axis).numpy(), jz.argmax(B, axis)
+                    if place == 0:
+                        assert np.isnan(largest).all() and np.isnan(smallest).all() and not where.any()
+                    else:
+                        assert (largest == np.nanmax(b, axis, keepdims=True)).all()
+                        assert (smallest == np.nanmin(b, axis, keepdims=True)).all()
+                        assert where.tolist() == np.nanargmax(b, axis).tolist()
+
+    @pytest.mark.parametrize("shape", SHAPES)
+    def test_a_matrix_times_one_column(self, device, rng, shape):
+        # Metal has a kernel of its own for a single column on the right
+        a = rng.standard_normal(shape).astype(np.float32)
+        v = rng.standard_normal((shape[1], 1)).astype(np.float32)
+        w = rng.standard_normal((shape[0], 1)).astype(np.float32)
+        for A in (jz.array(a, device=device), plain(a, device), jz.array(a.T.copy(), device=device).T):
+            for V in (jz.array(v, device=device), plain(v, device), jz.array(v.T.copy(), device=device).T):
+                close(A @ V, a @ v, tol=1e-4)
+                close(A @ (V + 1), a @ (v + 1), tol=1e-4)      # a temporary on the right
+                close(V, v)
+            for W in (jz.array(w, device=device), plain(w, device)):
+                close(A.T @ W, a.T @ w, tol=1e-4)
+                close(W.T @ A, w.T @ a, tol=1e-4)              # a row on the left: the general product
+            close(A, a)
+
+    @pytest.mark.parametrize("shape", [(1, 1), (1, 9), (7, 1), (16, 16), (37, 53), (300, 17), (1100, 1000)])
+    def test_sums(self, device, rng, shape):
+        # 1100 x 1000 is above the size up to which the CPU sums directly on Windows
+        a = rng.standard_normal(shape).astype(np.float32)
+        for A in (jz.array(a, device=device), plain(a, device)):
+            close(jz.sum(A, 0), a.sum(0, keepdims=True, dtype=np.float64), tol=1e-4)
+            close(jz.sum(A, 1), a.sum(1, keepdims=True, dtype=np.float64), tol=1e-4)
+            assert jz.sum(A).item() == pytest.approx(a.sum(dtype=np.float64), rel=1e-4, abs=1e-2)
+            close(jz.mean(A, 0), a.mean(0, keepdims=True, dtype=np.float64), tol=1e-4)
+            close(A, a)

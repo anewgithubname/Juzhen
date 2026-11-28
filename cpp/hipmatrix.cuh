@@ -98,6 +98,7 @@ class Matrix<ROCMfloat> {
 
     void eleminv(double l);
     Matrix<ROCMfloat> eleminv(double l) const;
+    Matrix<ROCMfloat> elemdiv(const Matrix<ROCMfloat>& B) const;  // this ./ B
 
     float norm() const;
     const Matrix<ROCMfloat> T() const;
@@ -111,8 +112,13 @@ class Matrix<ROCMfloat> {
     void rows(size_t rstart, size_t rend, const Matrix<ROCMfloat>& M);
     Matrix<ROCMfloat> columns(size_t cstart, size_t cend) const;
     void columns(size_t cstart, size_t cend, const Matrix<ROCMfloat>& M);
+    // Indexed gather on the device: result(i, j) = (*this)(rowidx[i], colidx[j]).
+    Matrix<ROCMfloat> slice(const idxlist& rowidx, const idxlist& colidx) const;
+    Matrix<ROCMfloat> rows(idxlist rlist) const { return slice(rlist, seq(num_col())); }
+    Matrix<ROCMfloat> columns(idxlist clist) const { return slice(seq(num_row()), clist); }
 
     friend Matrix<ROCMfloat> sum(const Matrix<ROCMfloat>& M, int dim);
+    friend Matrix<ROCMfloat> axis_extreme(const Matrix<ROCMfloat>& M, int dim, AxisExtreme what);
     friend Matrix<ROCMfloat> hadmd(const Matrix<ROCMfloat>& M1,
                                    const Matrix<ROCMfloat>& M2);
     friend Matrix<ROCMfloat> hadmd(const Matrix<ROCMfloat>& M1,
@@ -149,6 +155,10 @@ class Matrix<ROCMfloat> {
 };
 
 Matrix<ROCMfloat> sum(const Matrix<ROCMfloat>& M, int dim);
+// The largest or smallest entry of every column (dim 0: 1 x cols) or of every
+// row (dim 1: rows x 1), or the position of the largest. In parallel on the
+// device, whichever way the matrix is stored; see hipkernels.cpp.
+Matrix<ROCMfloat> axis_extreme(const Matrix<ROCMfloat>& M, int dim, AxisExtreme what);
 std::ostream& operator<<(std::ostream& os, const Matrix<ROCMfloat>& M);
 Matrix<ROCMfloat> exp(const Matrix<ROCMfloat>& M);
 Matrix<ROCMfloat> exp(Matrix<ROCMfloat>&& M);

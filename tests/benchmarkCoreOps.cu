@@ -85,7 +85,7 @@ Result conv2d(int w, int n) {
 
 Result layernorm(int w, int n) {
     constexpr int dim=256, tokens=512;
-    LayerNormLayer<Backend> layer(dim, tokens);
+    LayerNormLayer<Backend> layer(dim);
     auto input = Matrix<Backend>::randn(dim, tokens);
     Matrix<Backend> out("bench_ln", dim, tokens);
     const double ms = measure_ms([&] { out = layer.forward(input); }, w, n);

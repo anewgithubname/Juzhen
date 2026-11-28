@@ -14,12 +14,23 @@ Data is one sample per row (N x d), like numpy. Converting to or from numpy
 always copies. Reading values (``.numpy()``, ``.item()``, ``print``) waits for
 the GPU to finish, so do it every few steps rather than every step.
 
+Comparisons work element by element and give a matrix of 1s and 0s:
+``(A > 0) * A``, ``jz.mean(A == B)``. ``if A == B:`` is an error unless the
+matrices are 1 x 1; write ``(A == B).numpy().all()``.
+
+A 1 x 1 matrix can be used where its number is wanted: ``f"{jz.mean(A):.3f}"``,
+``float()``, ``int()``, ``round()``, ``if jz.max(A) > 1:``. Functions of one
+matrix can also be written as methods: ``A.sum(0)`` is ``jz.sum(A, 0)``.
+Whole numbers (class numbers, token ids, the positions from ``argmax`` and
+``topk``) are numpy arrays of integers.
+
 Each function here is a thin layer over the C++ code in cpp/ and ml/; see
 python/src/core.cu for how a Python call reaches it.
 """
 
 import abc
 import atexit
+import math
 import os
 
 import numpy as np
@@ -34,7 +45,6 @@ if os.name == "nt":
             os.add_dll_directory(_dir)
 
 from . import _core
-from ._core import abs, cos, exp, log, relu, sin, sqrt, square, tanh
 
 __all__ = [
     "Matrix", "array", "zeros", "ones", "randn", "rand", "zeros_like", "ones_like",
@@ -69,6 +79,125 @@ class Matrix(abc.ABC):
 Matrix.register(_core.cpu.Matrix)
 if _core.has_gpu:
     Matrix.register(_core.gpu.Matrix)
+
+def _array_ufunc(self, ufunc, method, *inputs, **kwargs):
+    """What numpy does when a matrix meets a numpy operator or function.
+
+    number * A, number + A, number < A, ... with a numpy number give a matrix,
+    as with a Python number (numpy used to make an array behind the user's
+    back). A numpy array combined or compared with a matrix is refused: one
+    of them has to be converted on purpose. Anything else (np.exp(A),
+    np.sum(A)) computes in numpy on a copy of the values, as before.
+    """
+    if method == "__call__" and len(inputs) == 2 and not kwargs and ufunc in _OPERATORS:
+        left, right = inputs
+        other = right if left is self else left
+        if isinstance(other, np.ndarray) and other.ndim > 0:
+            if ufunc in _COMPARISONS:
+                # numpy would compare an n x 1 matrix with n labels as an n x n table
+                raise TypeError("cannot compare a numpy array with a juzhen matrix; make it a matrix first: "
+                                f"jz.array(a, device='{self.device}'), which turns a 1-D array of n values "
+                                "into n x 1. For the accuracy of a classifier use "
+                                "1 - nn.error_rate(scores, labels)")
+            raise TypeError("cannot combine a juzhen matrix with a numpy array; make it a matrix first: "
+                            f"jz.array(a, device='{self.device}')")
+        if isinstance(other, (np.number, np.ndarray, int, float)) and not isinstance(other, bool):
+            number = float(other)
+            return _OPERATORS[ufunc](number if left is other else left, number if right is other else right)
+    converted = [x.numpy() if isinstance(x, Matrix) else x for x in inputs]
+    return getattr(ufunc, method)(*converted, **kwargs)
+
+
+_COMPARISONS = {np.equal: lambda a, b: a == b, np.not_equal: lambda a, b: a != b,
+                np.less: lambda a, b: a < b, np.less_equal: lambda a, b: a <= b,
+                np.greater: lambda a, b: a > b, np.greater_equal: lambda a, b: a >= b}
+_OPERATORS = {np.add: lambda a, b: a + b, np.subtract: lambda a, b: a - b,
+              np.multiply: lambda a, b: a * b, np.true_divide: lambda a, b: a / b, **_COMPARISONS}
+_core.cpu.Matrix.__array_ufunc__ = _array_ufunc
+if _core.has_gpu:
+    _core.gpu.Matrix.__array_ufunc__ = _array_ufunc
+
+_MATRIX_TYPES = (_core.cpu.Matrix, _core.gpu.Matrix) if _core.has_gpu else (_core.cpu.Matrix,)
+_NUMBERS = (int, float, np.integer, np.floating)
+
+
+def _not_a_matrix(name, x):
+    """The TypeError for jz.name(x) when x is not a matrix: what came, and what to write."""
+    text = f"jz.{name} takes a juzhen matrix, got "
+    if isinstance(x, (np.ndarray, list, tuple)):
+        kind = "numpy array" if isinstance(x, np.ndarray) else type(x).__name__
+        return TypeError(f"{text}a {kind}; make it a matrix first: jz.{name}(jz.array(a)), or "
+                         "jz.array(a, device='gpu') for the GPU")
+    if isinstance(x, _NUMBERS) and not isinstance(x, bool):
+        return TypeError(f"{text}the number {x}; use Python's math module for one number, or "
+                         f"jz.array({x}) for a 1 x 1 matrix")
+    if isinstance(x, nn.Loss):
+        return TypeError(f"{text}a Loss; its 1 x 1 matrix is loss.value")
+    return TypeError(f"{text}{'None' if x is None else 'a ' + type(x).__name__}")
+
+
+def _axis_error(name, axis, choices):
+    """The error for an axis that jz.name does not take (choices: the ones it does, in words)."""
+    hint = ""
+    if name in ("max", "min") and (type(axis) in _MATRIX_TYPES or isinstance(axis, (float, np.ndarray))):
+        hint = (f". jz.{name}(A, axis) is the {'largest' if name == 'max' else 'smallest'} value along an axis; "
+                "the larger of two matrices, element by element, is B + jz.relu(A - B) (the smaller: "
+                "B - jz.relu(B - A))")
+    shown = "a matrix" if type(axis) in _MATRIX_TYPES else repr(axis)
+    return ValueError(f"jz.{name}: axis must be {choices}, got {shown}{hint}")
+
+
+_ROW_OR_COLUMN = "0 (down each column) or 1 (along each row)"
+_ANY_AXIS = "0 (down each column), 1 (along each row) or None (everything)"
+
+
+def _call(function, m, axis, choices=_ROW_OR_COLUMN, name=None):
+    """_core.function(m, axis), with a sentence instead of the binding's list of overloads.
+
+    name is the juzhen function the user called, when it is not function.
+    """
+    try:
+        return getattr(_core, function)(m, axis)
+    except TypeError:
+        if type(m) not in _MATRIX_TYPES:
+            raise _not_a_matrix(name or function, m) from None
+        if isinstance(axis, bool) or not isinstance(axis, (int, np.integer)):
+            raise _axis_error(name or function, axis, choices) from None
+        raise
+
+
+def _reduce(function, m, axis, name=None):
+    """sum, max or min over an axis, or over everything for axis=None."""
+    if axis is None:
+        return _call(function, _call(function, m, 0, _ANY_AXIS, name), 1)
+    return _call(function, m, axis, _ANY_AXIS, name)
+
+
+def _elementwise(name, doc):
+    function = getattr(_core, name)
+
+    def f(m):
+        try:
+            return function(m)
+        except TypeError:
+            if type(m) in _MATRIX_TYPES:
+                raise
+            raise _not_a_matrix(name, m) from None
+
+    f.__name__ = f.__qualname__ = name
+    f.__doc__ = doc + " of every element: a new matrix on m's device."
+    return f
+
+
+exp = _elementwise("exp", "e to the power")
+log = _elementwise("log", "The natural logarithm")
+tanh = _elementwise("tanh", "The hyperbolic tangent")
+sin = _elementwise("sin", "The sine")
+cos = _elementwise("cos", "The cosine")
+sqrt = _elementwise("sqrt", "The square root")
+square = _elementwise("square", "The square")
+abs = _elementwise("abs", "The absolute value")
+relu = _elementwise("relu", "max(x, 0)")
 
 
 def backend():
@@ -117,22 +246,40 @@ def array(data, device="cpu"):
     return _device(device).from_numpy(_as_2d(data))
 
 
-def zeros(rows, cols, device="cpu"):
-    return _device(device).zeros(rows, cols)
+def _shape(rows, cols, what):
+    """rows and cols of a new matrix as two positive ints."""
+    if isinstance(rows, (tuple, list)):
+        raise TypeError(f"jz.{what}(rows, cols) takes two numbers, not a shape: write "
+                        f"jz.{what}({', '.join(map(str, rows))})")
+    if cols is None:
+        raise TypeError(f"jz.{what}(rows, cols) takes two numbers: every juzhen matrix has rows and columns; "
+                        f"for a column of {rows} values write jz.{what}({rows}, 1)")
+    for name, value in (("rows", rows), ("cols", cols)):
+        if isinstance(value, bool) or not isinstance(value, (int, float, np.integer, np.floating)) \
+                or not math.isfinite(value) or value != int(value) or value < 1:
+            raise ValueError(f"jz.{what}: {name} must be a positive whole number, got {value!r} "
+                             "(a juzhen matrix cannot be empty)")
+    return int(rows), int(cols)
 
 
-def ones(rows, cols, device="cpu"):
-    return _device(device).ones(rows, cols)
+def zeros(rows, cols=None, device="cpu"):
+    """A rows x cols matrix of zeros."""
+    return _device(device).zeros(*_shape(rows, cols, "zeros"))
 
 
-def randn(rows, cols, device="cpu"):
+def ones(rows, cols=None, device="cpu"):
+    """A rows x cols matrix of ones."""
+    return _device(device).ones(*_shape(rows, cols, "ones"))
+
+
+def randn(rows, cols=None, device="cpu"):
     """Standard normal samples; jz.manual_seed() makes them repeatable."""
-    return _device(device).randn(rows, cols)
+    return _device(device).randn(*_shape(rows, cols, "randn"))
 
 
-def rand(rows, cols, device="cpu"):
+def rand(rows, cols=None, device="cpu"):
     """Uniform samples in [0, 1); jz.manual_seed() makes them repeatable."""
-    return _device(device).rand(rows, cols)
+    return _device(device).rand(*_shape(rows, cols, "rand"))
 
 
 def zeros_like(m):
@@ -144,6 +291,9 @@ def ones_like(m):
 
 
 def sigmoid(m):
+    """1 / (1 + exp(-x)) of every element."""
+    if type(m) not in _MATRIX_TYPES:
+        raise _not_a_matrix("sigmoid", m)
     return 1 / (1 + exp(-m))
 
 
@@ -152,58 +302,78 @@ def sum(m, axis=None):
 
     The result stays a matrix on m's device; use .item() for a number.
     """
-    if axis is None:
-        return _core.sum(_core.sum(m, 0), 1)
-    return _core.sum(m, axis)
+    return _reduce("sum", m, axis)
 
 
 def mean(m, axis=None):
     """Mean over axis 0, axis 1 or all; a matrix like sum()."""
+    total = _reduce("sum", m, axis, "mean")
     rows, cols = m.shape
-    count = rows * cols if axis is None else (rows if axis == 0 else cols)
-    return sum(m, axis) / count
+    return total / (rows * cols if axis is None else (rows if axis == 0 else cols))
 
 
 def max(m, axis=None):
     """Largest value over axis 0 (1 x cols), axis 1 (rows x 1) or all (1 x 1)."""
-    if axis is None:
-        return _core.max(_core.max(m, 0), 1)
-    return _core.max(m, axis)
+    return _reduce("max", m, axis)
 
 
 def min(m, axis=None):
     """Smallest value over axis 0 (1 x cols), axis 1 (rows x 1) or all (1 x 1)."""
-    if axis is None:
-        return _core.min(_core.min(m, 0), 1)
-    return _core.min(m, axis)
+    return _reduce("min", m, axis)
+
+
+def _positions(m):
+    """A matrix of positions as a numpy array of integers (waits for the GPU)."""
+    return m.numpy().astype(np.int64)
 
 
 def argmax(m, axis=1):
-    """Position of the largest value in each row (axis=1, rows x 1) or column (axis=0).
+    """Position of the largest value in each row (axis=1, the default) or column (axis=0).
 
-    Positions are stored as floats, like every juzhen matrix; take
-    ``.numpy().astype(int)`` for integers.
+    Positions are whole numbers, and whole numbers are numpy arrays in juzhen
+    (as class numbers and token ids are): the result is a 1-D array of
+    integers, one per row. It can index a matrix or an array (``X[p]``,
+    ``names[p[0]]``), be compared with labels (``np.mean(p == y)``) and be
+    given to the losses. Reading it waits for the GPU. For a matrix of 1s and
+    0s that marks the largest values on the device, write
+    ``A == jz.max(A, 1)``.
     """
-    return _core.argmax(m, axis)
+    if axis is None:
+        raise ValueError("argmax works along axis 1 (each row, the default) or axis 0 (each column); for the "
+                         "position in the whole matrix read as one row, as numpy counts it, use "
+                         "np.argmax(A.numpy())")
+    return _positions(_call("argmax", m, axis)).ravel()
 
 
 def topk(m, k, axis=1, largest=True):
     """The k largest (or smallest) values of each row (axis=1) or column (axis=0).
 
     Returns (values, positions), both rows x k for axis=1 (k x cols for
-    axis=0), sorted from the best. Positions are floats, as in argmax().
+    axis=0), sorted from the best. The values are a matrix; the positions are
+    a numpy array of integers, as in argmax(). A row with fewer than k numbers
+    (NaN is skipped) is filled with NaN and position -1.
     """
-    return _core.topk(m, int(k), axis, bool(largest))
+    if isinstance(k, bool) or not isinstance(k, _NUMBERS) or k != int(k):
+        raise ValueError(f"jz.topk: k must be a whole number (how many values to keep), got {k!r}")
+    if not isinstance(largest, (bool, np.bool_)):
+        raise TypeError(f"jz.topk: largest must be True or False, got {largest!r}")
+    try:
+        values, positions = _core.topk(m, int(k), axis, bool(largest))
+    except TypeError:
+        if type(m) not in _MATRIX_TYPES:
+            raise _not_a_matrix("topk", m) from None
+        raise _axis_error("topk", axis, _ROW_OR_COLUMN) from None
+    return values, _positions(positions)
 
 
 def softmax(m, axis=1):
     """exp(m) normalized to sum to one along each row (axis=1) or column (axis=0)."""
-    return _core.softmax(m, axis)
+    return _call("softmax", m, axis)
 
 
 def logsumexp(m, axis=1):
     """log(sum(exp(m))) of each row (axis=1, rows x 1) or column (axis=0), computed stably."""
-    return _core.logsumexp(m, axis)
+    return _call("logsumexp", m, axis)
 
 
 def _same_device(matrices, what):
@@ -231,6 +401,54 @@ def vstack(matrices):
     return core.stack(matrices, False)
 
 
+def _number(m, what):
+    """The value of a 1 x 1 matrix, wanted by what (waits for the GPU)."""
+    if m.shape != (1, 1):
+        rows, cols = m.shape
+        raise TypeError(f"{what} needs one number, and this matrix is {rows} x {cols}; take one value "
+                        "(A[0, 0]) or reduce it first (jz.sum(A), jz.mean(A), jz.max(A))")
+    return m.item()
+
+
+def _format(m, spec):
+    # f"{A}" prints the matrix; f"{s:.3f}" formats the number of a 1 x 1 matrix
+    return format(_number(m, f"the format '{spec}'"), spec) if spec else str(m)
+
+
+def _round(m, digits=None):
+    return round(_number(m, "round()"), digits)
+
+
+def _method(name, function):
+    """jz.name(A, ...) as the method A.name(...)."""
+    def method(self, *args, **kwargs):
+        if "out" in kwargs:
+            # numpy's functions look for a method of their name: np.sum(A)
+            # calls A.sum(axis=None, out=None). They keep doing what they did
+            # before the methods existed, computing in numpy on a copy.
+            return getattr(np, name)(self.numpy(), *args, **kwargs)
+        return function(self, *args, **kwargs)
+
+    method.__name__ = method.__qualname__ = name
+    method.__doc__ = f"A.{name}(...) is jz.{name}(A, ...)."
+    return method
+
+
+# Every function of one matrix can also be written as a method, and a 1 x 1
+# matrix can stand where its number is wanted, as a Loss can.
+_METHODS = {"sum": sum, "mean": mean, "max": max, "min": min, "argmax": argmax, "topk": topk,
+            "softmax": softmax, "logsumexp": logsumexp, "exp": exp, "log": log, "tanh": tanh, "sin": sin,
+            "cos": cos, "sqrt": sqrt, "square": square, "abs": abs, "relu": relu, "sigmoid": sigmoid}
+for _class in [_core.cpu.Matrix] + ([_core.gpu.Matrix] if _core.has_gpu else []):
+    for _name, _function in _METHODS.items():
+        setattr(_class, _name, _method(_name, _function))
+    _class.__abs__ = _method("abs", abs)
+    _class.__float__ = lambda m: _number(m, "float()")
+    _class.__int__ = lambda m: int(_number(m, "int()"))
+    _class.__round__ = _round
+    _class.__format__ = _format
+
+
 # Shuffling in juzhen.data uses this generator, so manual_seed() covers it too.
 _rng = np.random.default_rng()
 
@@ -238,6 +456,8 @@ _rng = np.random.default_rng()
 def manual_seed(seed):
     """Seed every random number generator juzhen uses (CPU, GPU, data shuffling)."""
     global _rng
+    if isinstance(seed, bool) or not isinstance(seed, (int, np.integer)) or not 0 <= seed < 2 ** 31:
+        raise ValueError(f"manual_seed takes a whole number from 0 to {2 ** 31 - 1}, got {seed!r}")
     _core.manual_seed(int(seed))
     _rng = np.random.default_rng(int(seed))
 

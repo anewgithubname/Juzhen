@@ -53,6 +53,65 @@ and already contain any desired normalization: no batch averaging is applied, an
 a zero weight removes its column from both the loss and the gradient. When only
 the gradient is needed, write `network.backward(softmax_cross_entropy(logits, labels).grad)`.
 
+The three label-taking functions also accept class numbers: a host `Matrix<int>`
+with one entry per column of the logits, read in storage order (`1 x N`, or
+`seq_len x batch` with one sequence per column), as `DataLoader<float, int>`
+returns them. The one-hot matrix is then never built.
+
+| Function | Value |
+|---|---|
+| `softmax_cross_entropy(logits, labels, ignore_index = -100)` | mean over the labels that are not `ignore_index` (0 and a zero gradient when none counts) |
+| `masked_softmax_cross_entropy(logits, labels, weights, ignore_index = -100)` | sum over columns of w × cross-entropy, as the one-hot form |
+| `error_rate(scores, labels, ignore_index = -100)` | fraction of the counted columns whose largest score is not the label |
+
+## Token layers
+
+`ml/embedding.hpp` has the layers of a language model on integer token ids. They
+are ordinary layers: `Sequential`, `parameters()`, `AdamW` and `save_checkpoint`
+need nothing extra.
+
+| Layer | What it does | Parameter |
+|---|---|---|
+| `EmbeddingLayer<D>(vocab, dim)` | the input layer: column j of the output is table row `ids[j]` | `weight`, vocab × dim |
+| `PositionEmbeddingLayer<D>(seq_len, dim)` | adds a learned vector by position (column n is position n mod seq_len) | `weight`, seq_len × dim |
+| `TiedLinearLayer<D>(embedding)` | output layer: logits = table × x, no bias | none: it uses the embedding's table |
+
+```cpp
+EmbeddingLayer<D> token(vocab, dim);
+PositionEmbeddingLayer<D> position(seq, dim);
+TransformerLayer<D> block(dim, dim, 4 * dim, seq, batch, heads, true);
+TiedLinearLayer<D> output(token);
+Sequential<D> network{&output, &block, &position, &token};   // output first, as always
+AdamW<D> optimizer(network.parameters(), options);            // the table is registered once
+
+Matrix<int> x("x", seq, batch), y("y", seq, batch);           // one sequence per column
+auto [loss, dlogits] = softmax_cross_entropy(network.eval(x), y);
+network.backward(std::move(dlogits));
+optimizer.step();
+```
+
+A network takes a `Matrix<int>` exactly when its input layer is an
+`EmbeddingLayer`; `backward` then returns the gradient with respect to the
+embedded tokens, since ids have none. A `Sequential`, `parameters()`,
+`backward()`, `save_checkpoint` and `load_checkpoint` reject a list in which the
+id layer is not the input layer, or in which a tied layer's embedding is missing
+(the table would silently be left out of the optimizer and the checkpoint). The
+table gradient is accumulated in a fixed order on every backend, so a GPU run
+repeats bit for bit. `examples/demo_llm_tokens.cu` is a complete small model;
+`tests/testTokenLayers.cu` checks every backend against the CPU.
+
+## Initial weights
+
+Each layer draws its weights by its own rule: N(0, 2/fan_in) in front of a ReLU
+(`ReluLayer`, convolutions with `relu = true`), N(0, 1/fan_in) otherwise
+(`Layer`, `LinearLayer`, convolutions without ReLU), N(0, 0.02²) for the two
+embedding tables; biases start at zero. fan_in is the number of inputs of a dense
+layer, C_in·kH·kW for a convolution and C_in·kH·kW / stride² for a transposed
+convolution. `TransformerLayer` and `LayerNormLayer` are unchanged. The last
+constructor argument overrides the rule: `LinearLayer<D> head(V, d, n, Init::normal(0.02f))`
+draws N(0, 0.02²), and `Init::normal(0)` gives zeros without drawing a random
+number.
+
 `eval` returns the final layer value. `backward(upstream)` takes the gradient of
 the loss with respect to that value, for example a loss function's `grad`; scaling
 it scales every gradient. Backward uses cached values and does not reevaluate layers. Repeated backward calls accumulate

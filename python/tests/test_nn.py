@@ -73,7 +73,7 @@ class TestLayers:
         np.testing.assert_allclose(jvp.numpy(), numeric, rtol=2e-2, atol=2e-3)
 
     def test_layernorm(self, device, rng):
-        net = nn.Sequential(nn.LayerNorm(6, batch_size=4), device=device)
+        net = nn.Sequential(nn.LayerNorm(6), device=device)
         x = rng.standard_normal((4, 6)).astype(np.float32) * 3 + 1
         y = net(jz.array(x, device=device)).numpy()
         expected = (x - x.mean(1, keepdims=True)) / np.sqrt(x.var(1, keepdims=True) + 1e-5)
@@ -147,7 +147,7 @@ class TestLayers:
     def test_input_layout_does_not_matter(self, device, rng):
         # vstack gives the other storage order than a numpy import; layers
         # that read storage directly (LayerNorm, Transformer) must not care
-        net = nn.Sequential(nn.Linear(4, 4), nn.LayerNorm(batch_size=6),
+        net = nn.Sequential(nn.Linear(4, 4), nn.LayerNorm(),
                             nn.Transformer(4, 4, 8, seq_len=3, batch_size=2), device=device)
         randomize(net, rng, 0.3)
         x = rng.standard_normal((6, 4)).astype(np.float32)

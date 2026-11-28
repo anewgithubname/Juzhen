@@ -28,7 +28,7 @@ int compute(){try{
         hy.elem(0,j)=2.f*hx.elem(0,j)-hx.elem(1,j)+.3f;
     }
     Matrix<Backend> x(hx),y(hy);
-    LinearLayer<Backend> linear(1,2,32);
+    LinearLayer<Backend> linear(1,2,32,Init::normal(0)); // starts at zero: no random numbers
     AdamWOptions options;
     options.lr=.03f;
     options.weight_decay=0; // Adam without weight decay.

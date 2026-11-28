@@ -400,3 +400,66 @@ for epoch in range(5):
 发现的问题：
 - 默认初始化（权重 N(0, 0.001²)，和 C++ 一样）对深的 ReLU 网络太小：rectified flow 的 4 层网络输出几乎恒为零，能不能训练起来看运气（4090 上卡住，ROCm 上碰巧能训练）。`rectified_flow.py` 改用 He 初始化。C++ 的 `demo_rectified` 用同样的默认初始化，也有这个风险。
 - C++ 的 `demo_transformer.cu` 和 `demo_rectified.cu` 只为 CUDA 和 Metal 选 GPU 类型，ROCm 构建下其实跑在 CPU 上。Python 版没有这个问题。
+
+## 15. 整数 token 与初学者默认值（2026-11-26）
+
+接口先给所有者看过并确认，再实现。四个设计方案、三位评审，选中的方案先做成原型，在 CPU 和 ROCm 上跑通后才进仓库。
+
+已定：
+- **整数不是矩阵。** 数值是 juzhen 矩阵（float32）；token 编号、类别编号是 numpy 整数数组或列表，每次调用时在主机上检查并拷贝。没有新的“编号”类型，C++ 里用已有的 `Matrix<int>`。浮点数组、布尔数组、juzhen 矩阵都不会被当成编号。
+- **嵌入层是网络的第一层。** `nn.Embedding(vocab, dim)` 之后网络的输入就是编号，形状 `(batch, seq_len)`；`parameters()`、优化器、`state_dict`、checkpoint 都不需要额外登记。位置向量是单独一层 `nn.PositionEmbedding(seq_len)`（也能接在非 token 的输入后面；忘写时构造网络会给一个警告）。`nn.Linear(V, tied=True)` 复用嵌入表做输出层，没有自己的参数。嵌入表在 Python 和 C++ 里都是 `(vocab, dim)`。
+- **损失不加新名字。** `softmax_cross_entropy`、`masked_softmax_cross_entropy`、`error_rate`、`fit`、`evaluate` 同时接受类别编号和 one-hot 矩阵；`ignore_index=-100`。整数数组永远是类别编号。
+- **默认初始化改在 C++ 构造函数里**（§14 记录的问题）：带 ReLU 的层 N(0, 2/fan_in)，其余 N(0, 1/fan_in)，偏置为 0，嵌入表 0.02，Transformer 和 LayerNorm 不变。`init=` 取 `"auto"` 或一个标准差。带种子的结果因此都变了一次；README 的 FID 表、TinyStories 基准和 notebook 输出是旧默认值下得到的。
+- **`LayerNorm` 不再有 batch 参数**（C++ 里按输入的列数调整缓存），`batch_size` 只剩“每批的样本数”一个意思。`evaluate()` 在固定 batch 的网络上把最后一批补齐、只统计真实样本。`net.copy(batch_size=1)` 给出生成用的单序列网络。
+- **`Loss` 是一个小类**，可以直接当数字用（`f"{loss:.4f}"`、`loss < 0.1`），仍可写 `value, grad = loss`；拿它做算术或调 `loss.backward()` 会说明该怎么写。
+- **报错在知道 Python 形状的地方生成**（`nn.py` 在进 C++ 之前检查）；C++ 的 `ERROR_OUT` 带上紧挨着的 `LOG_ERROR` 的原因；`load_checkpoint` 说明第一处不匹配。
+- GPU 上嵌入表的梯度累加用“按编号分组、每格一个写入者”的做法，不用 `atomicAdd`，同一个种子结果可重复。Metal 先用现有运算（设备 gather、主机累加、one-hot 组合的损失），不写新着色器。
+
+这次没做：矩阵之间的 `==` 和布尔掩码、`Sequential` 嵌套、跨设备加载 checkpoint、把 batch 大小放到 `Sequential` 上只说一次、采样器和学习率调度、4090 分支上的 text8/BPE/TinyStories/grokking 实验程序、把现有 one-hot 的 C++ 语言模型示例改成 token 层。
+
+接口检查（2026-11-26）之后补上的，都是“结果错了但不报错”的情况：
+- **矩阵的比较是逐元素的。** `==`、`!=`、`<`、`<=`、`>`、`>=` 给出 0/1 矩阵，可以直接参加运算（`(A > 0) * A`、`jz.mean(A == B)`）。和 numpy 数组或列表比较会报错并说明先用 `jz.array` 转换；多于一个元素的矩阵不能当真假值用（`if A == B:` 报错）。两个矩阵的比较是用差算的，所以同一位置都是同号无穷大时算作不相等。布尔掩码取下标仍然没有。
+- **`fit()` 和 `evaluate()` 先看数据。** X、Y 里有 nan 或 inf 就报错并指出位置（ReLU 会把 nan 变成 0，以前训练能照常结束）。交叉熵下的浮点 Y 必须每行是 one-hot 或概率，否则报错并提示 `loss="mse"`。手写的训练循环没有这层检查。
+- **`backward()` 只认最后一次调用。** 损失函数记下梯度出自网络的哪一次调用（弱引用，不占内存）；网络之后又被调用过，再拿这个梯度反向就报错。用户自己算的梯度不跟踪。
+- `jz.zeros` 等拒绝空矩阵；`Embedding`、`PositionEmbedding` 的 `init` 只能按名字传（`PositionEmbedding(seq_len, dim)` 以前把 `dim` 当成标准差）；`AdamW` 的参数接受 numpy 数字；`ignore_index` 必须是整数。
+
+同一次检查之后补上的三处写法（都在 `python/juzhen/__init__.py`，没有动 C++）：
+- **1×1 矩阵可以当数用。** `f"{jz.mean(A):.3f}"`、`float()`、`int()`、`round()`、比较都可以，和 `Loss` 一致；多于一个元素的矩阵这样用会报错并说明先取一个元素或先求和。不带格式的 `f"{A}"` 仍然打印整个矩阵。1×1 矩阵不能直接当下标（没有 `__index__`），要写 `int(s)`。
+- **单个矩阵的函数都有方法写法。** `A.sum(0)` 就是 `jz.sum(A, 0)`，还有 `mean`、`max`、`min`、`argmax`、`topk`、`softmax`、`logsumexp` 和逐元素函数。结果仍然是二维的，没有 `keepdims`。numpy 的 `np.sum(A)` 会去找 `A.sum` 并带上 `out=`，这种调用仍然在 numpy 里算（和加方法之前一样）。
+- **位置是整数，整数是 numpy 数组。** `jz.argmax` 返回一维整数数组（每行一个），`jz.topk` 的位置是二维整数数组，值仍然是矩阵。这样 `np.mean(jz.argmax(scores) == y)`、`names[p[0]]`、`X[p]` 都直接成立。代价是每次调用要等 GPU 并把 N 个数取回主机；要留在设备上的写法是 `A == jz.max(A, 1)`（0/1 矩阵）。没有让矩阵本身当下标，因为比较的结果也是 0/1 矩阵，`X[y == 2]` 会被悄悄当成行号 0 和 1。
+
+再之后把绑定层的“重载列表”报错（nanobind 列出 C++ 签名）换成了一句话：
+- **函数收到的不是矩阵。** `jz.exp(numpy 数组)`、`jz.sqrt(2.0)` 等说明收到了什么、该怎么写；`axis` 写错（浮点数、元组、矩阵）说明可用的取值，`jz.max(A, B)` 还说明逐元素取大的写法。这些检查只在绑定拒绝之后才运行，正常调用不多花时间。
+- **运算符。** 矩阵遇到不认识的类型时返回 `NotImplemented`，由 Python 给出它自己的短句；`A @ 2`、`A ** B`、`A *= B`（原地乘除只接受数）各有一句说明。
+- **下标。** `A[None]`、`A[...]`、浮点数、二维整数数组都说明矩阵接受哪些下标；越界的报错写明是行还是列、下标和大小。
+- **参数列表。** `net.parameters()` 接受负下标和名字（`ps["layer0.weight"]`），越界和切片各有一句话。
+- **卷积层的参数在写下这一层时就检查**（通道数、核和图像大小、padding、relu），接受 `28 / 2`、numpy 整数这类取值；相邻两个卷积层按“通道 × 高 × 宽”比较，特征数碰巧相等而图像不同的写法不再被接受。
+- 其他：`AdamW(矩阵)`、`save_checkpoint` 的 epoch 和 step、`manual_seed`、`net.build`、`create()` 没有返回 C++ 层的 Python 子类。
+
+两处慢路径（都在库里，C++ 用户同样受益）：
+- **CPU 上矩阵之间的 `+`、`-`、`.*`。** `Matrix<D>::add` 和 `hadmd` 原来按逻辑下标逐个取数；从 numpy 导入的矩阵带转置标记（按行存），两个这样的矩阵相加等于逆着存储顺序读两遍。现在两个操作数存储顺序相同时一趟扫过存储，结果沿用这个顺序（两个都带标记时结果也带标记，以前结果总是不带）；顺序不同时按 16×16 的小块走。同一段代码还修了一个错：`A += A.T`（右边就是正在写的存储）在 CPU 上给出错误的数。
+- **GPU 上按行号取行。** 绑定层原来把整个矩阵取回主机再挑行。现在在设备上做：CUDA 和 Metal 用库里已有的 `slice(行号, 列号)`，ROCm 新加了同名函数和一个内核。结果保持原矩阵的存储顺序。
+
+和 PyTorch 的对比（`python/benchmarks/linalg_vs_torch.py`，16 种基础运算，同一份数据，结果互相核对）找出的四处，改完后都是一遍：
+- **CPU 上 `A / B`。** 原来先用双精度除法算倒数矩阵再逐元素乘；现在 `Matrix<D>::elemdiv` 一遍单精度除法（`operator/` 在有 `elemdiv` 的后端上用它，Metal 仍走原路）。`s / A` 也改为单精度。
+- **GPU 上 `A .* B`、`A / B`、`s * A`、`A + s`。** CUDA 的结果矩阵原来先被构造函数填零，再拷贝或填值，然后才计算；现在结果不预先填零，一个内核写完。ROCm 原来先拷贝再原地改，现在同样一个内核。
+- **CPU 上 `max`、`min` 按轴。** `reduce()` 只能把整列交给函数，另一个方向要先转置拷贝整个矩阵；绑定层现在直接读存储，跨存储方向逐列折进结果，顺存储方向用 16 路比较让编译器向量化。GPU 上的 `max` 仍是每列一个线程，没有改。
+- **Windows 上小矩阵的 `sum`。** OpenBLAS 对超过约 9000 个数的 gemv 会唤醒线程，固定花 0.17 毫秒；现在不超过 2^20 个数时用循环直接求和（`sum_direct`）。Linux 上线程版 gemv 本来就不慢，保持不变。
+
+顺带：CPU 上 `s * A` 是单独的乘法循环（原来借用 `s*A + 0`），`A + s` 和 `s - A` 每个元素只做一次运算；这些循环都改成直接用指针，clang 才会向量化。
+
+同一个脚本在 M2 上对 PyTorch 的 Metal 设备（mps）再比了一遍（脚本里 PyTorch 的 GPU 在有 CUDA 时是 CUDA，在 Mac 上是 mps），又找出四处：
+- **Metal 上 `max`、`min` 按轴。** 原来走 `reduce()` 的主机回退：整个矩阵转置拷回主机（4096×4096 要 11 毫秒），再用 CPU 的旧归约。Metal 的缓冲区 CPU 可以直接读，绑定层现在同步之后原地读（`metal_extreme`，和 CPU 共用 `extreme_of_runs`），只把结果传回去。`argmax` 仍走主机回退。
+- **Metal 上 `A @ v`。** `dot` 原来一律用矩阵乘矩阵的内核；右边只有一列时改用矩阵乘向量的内核（`mpsGemv`，原来只有 `sum` 在用），快 7 到 9 倍。`mpsGemv` 同时加上了 `mpsGemm` 已有的自动释放池。
+- **Metal 上 `A / B`。** 补上一遍完成的 `elemdiv`（`matrix_quotient` 内核），四个后端现在都是一遍。
+- **CPU 上 `A += B`、`A -= B`。** `zip_storage` 的循环在输出就是第一个输入时，被编译器的重叠检查送进逐个元素的版本；现在原地的情况单独一个循环，告诉编译器只有另一个操作数是分开的。
+
+本机的 ROCm 也能和 PyTorch 比（conda 环境 `ml-research` 里是带 ROCm 的 PyTorch），结果和 CUDA 上一样，只有按轴的 `max` 差得远。原因在 `reduce()`：它把每个存储列交给一个 GPU 线程从头扫到尾，另一个方向还要先做一份转置拷贝。
+- **CUDA、ROCm 上 `max`、`min`、`argmax` 按轴。** 库里新增 `axis_extreme(M, dim, AxisExtreme::Max|Min|ArgMax)`（`cumatrix.cu`，`hipkernels.cpp` + `hipmatrix.cpp`），两个内核：一组数是一个存储列时，一个线程块里的线程交错着分担这一列；一组数横跨各列时，每个位置由块里的 16 个线程分担，相邻线程读相邻地址，不再拷贝。一组数很长时分段做（横跨时每段 4096 个，沿着列每段 262144 个），每段留下结果和位置，再对这些结果做一遍。
+- **结果和从头扫一遍相同。** 每个线程都从这一组的第一个数开始，只在严格更好时才换，合并时相等的取靠前的：并列、零的正负号、NaN（在第一个位置就留下，在后面就跳过）都和单线程一致。
+- **损失函数也用它。** `loss_detail::column_max`（softmax、交叉熵、`logsumexp`）和 `predict_one_hot` 的按列最大值在 CUDA、ROCm 上改用 `axis_extreme`。区别只在有 NaN 时：`predict_one_hot` 原来跳过所有 NaN，现在一列的第一个数是 NaN 时这一列什么都不标。
+
+按轴求和在 CUDA 上也换成了同样布局的内核（`sumPerRunKernel`、`sumAcrossRunsKernel`），不再用"矩阵乘全 1 向量"：
+- **CUDA。** 原来每次求和要清零结果、建一个全 1 向量再调 cuBLAS 的 gemv。CUDA 上多发一遍内核很便宜，所以分段取得小（横跨时每段 1024 个，沿着列每段 16384 个，`max`、`min`、`argmax` 也一样），每个线程最多看 64 个数；结果少而每组很长的形状因此也有足够多的线程。
+- **ROCm。** 同样的两个内核（`SumPerRunKernel`、`SumAcrossRunsKernel`）。原来调 hipBLAS 的 gemv，它有一个错：横跨存储列求和时，第一个存储列里有无穷大，结果是 NaN（应该是无穷大）；换成自己的内核后这个错没有了。ROCm 上发一次内核要 0.1 毫秒左右，分段仍用大的（4096 和 262144）。
+- **结果的末位会变。** 相加的顺序和 gemv 不同（每个线程先加自己的，再两两合并），和旧版相比在第 6、7 位有效数字上会有差别；固定随机种子的训练不再和旧版逐位相同。

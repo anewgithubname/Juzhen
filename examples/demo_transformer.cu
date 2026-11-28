@@ -284,9 +284,9 @@ int compute() {
         return v;
     };
 
-    LinearLayer<FLOAT> embed(d_model, in_dim, N);
+    LinearLayer<FLOAT> embed(d_model, in_dim, N, Init::normal(0.001f));
     auto blocks = make_blocks(batch);
-    LinearLayer<FLOAT> proj(V, d_model, N);
+    LinearLayer<FLOAT> proj(V, d_model, N, Init::normal(0.001f));
 
     LinearLayer<FLOAT> best_embed(d_model, in_dim, N);
     auto best_blocks = make_blocks(batch);

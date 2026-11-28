@@ -409,6 +409,7 @@ add_test(test26 testUNetScoreCPU)
 add_test(test27 testDiffusionTrainIterCPU)
 add_test(test28 testCNNTrainParity)
 set_tests_properties(test25 test26 test27 test28 PROPERTIES SKIP_RETURN_CODE 77)
+set_tests_properties(test28 PROPERTIES ENVIRONMENT "NVIDIA_TF32_OVERRIDE=0;NVIDIA_TF32=0")
 # word2vec smoke run: tiny config, asserts the loss drops; skips (77) when
 # datasets/text8 is absent. Cache path kept out of datasets/ so a real
 # trained cache is never clobbered.
@@ -468,6 +469,10 @@ GENERATE_PROJ(testSecurityIO tests/testSecurityIO.cu)
 GENERATE_PROJ(testGather tests/testGather.cu)
 add_test(NAME indexed_gather COMMAND testGather)
 set_tests_properties(indexed_gather PROPERTIES LABELS "unit;indexing" ENVIRONMENT "NVIDIA_TF32_OVERRIDE=0;NVIDIA_TF32=0")
+# + - .* ./ on the CPU for every pairing of storage orders.
+GENERATE_PROJ(testElementwiseStorage tests/testElementwiseStorage.cu)
+add_test(NAME elementwise_storage COMMAND testElementwiseStorage)
+set_tests_properties(elementwise_storage PROPERTIES LABELS "unit")
 # Device RNG reseeding (CUDA, ROCm, Metal) and logical slice assignment (CUDA, Metal).
 GENERATE_PROJ(testCUDAMatrixContracts tests/testCUDAMatrixContracts.cu)
 add_test(NAME cuda_rng_reseed COMMAND testCUDAMatrixContracts)
@@ -514,6 +519,19 @@ add_test(NAME training_regression_learning COMMAND demo_training)
 set_tests_properties(training_regression_learning PROPERTIES
     LABELS "unit;training" TIMEOUT 180
     ENVIRONMENT "NVIDIA_TF32_OVERRIDE=0;NVIDIA_TF32=0")
+
+# Token layers (Embedding, positions, tied output) and class-number losses.
+GENERATE_PROJ(testTokenLayers tests/testTokenLayers.cu)
+add_test(NAME token_layers COMMAND testTokenLayers)
+set_tests_properties(token_layers PROPERTIES
+    LABELS "unit;gradient;training;tokens" TIMEOUT 180
+    ENVIRONMENT "NVIDIA_TF32_OVERRIDE=0;NVIDIA_TF32=0;OPENBLAS_NUM_THREADS=1;OMP_NUM_THREADS=1")
+
+GENERATE_PROJ(demo_llm_tokens examples/demo_llm_tokens.cu)
+add_test(NAME llm_token_learning COMMAND demo_llm_tokens)
+set_tests_properties(llm_token_learning PROPERTIES
+    LABELS "unit;training;tokens;learning" TIMEOUT 180
+    ENVIRONMENT "JUZHEN_LLM_STEPS=200;NVIDIA_TF32_OVERRIDE=0;NVIDIA_TF32=0")
 
 # Independent regression coverage for deterministic convolution selection.
 GENERATE_PROJ(testConvDeterministic tests/testConvDeterministic.cu)

@@ -76,3 +76,9 @@ val losses track closely (no overfitting). No divergence or instability.
 - Stanford CS336 Assignment 1: https://github.com/stanford-cs336/assignment1-basics
 - CS336 reproduction w/ TinyStories loss: https://github.com/donglinkang2021/cs336-assignment1-basics
 - Regional Tiny Stories (loss across Indic langs, not bpc): https://arxiv.org/html/2504.07989v1
+
+## Note on reproducibility (2026-11-26)
+
+These numbers were measured before the default weight initialisation changed. The demo keeps its
+embedding and output layers at the old scale (`Init::normal(0.001f)`), but the random-number
+streams shifted, so a seeded run no longer reproduces them exactly.

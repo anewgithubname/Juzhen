@@ -1,12 +1,18 @@
 /**
  * @file testCNNTrainParity.cu
- * @brief CPU vs GPU (cuDNN) training parity for the CNN used in demo_cnn_mnist.
+ * @brief Training parity of the CNN of demo_cnn_mnist between backends.
  *
- * Run this test in the CPU build first (saves a reference loss file), then in
- * the CUDA build (compares against the saved reference).
+ * Every build trains the same network for 100 Adam steps on the same MNIST
+ * batches, starting from the same weights, and compares its 100 losses with
+ * the checked-in reference tests/cnn_train_ref.txt (written by a CPU build).
  *
- *   1. CPU build:  runs 100 iters, writes PROJECT_DIR/tests/cnn_train_ref.txt
- *   2. CUDA build: runs 100 iters, reads the reference file and compares.
+ * The starting weights come from an integer formula, not from the random
+ * generators: those differ between backends and, for std::normal_distribution,
+ * between standard libraries, and a network that learns amplifies a different
+ * start into a different loss curve. The weights have the variance of the
+ * layers' default rule, so the network does learn (loss about 2.35 -> 0.3).
+ *
+ * To regenerate the reference: run a CPU build with JUZHEN_WRITE_CNN_REF=1.
  */
 
 #include "../ml/layer.hpp"
@@ -18,336 +24,137 @@
 #include <fstream>
 #include <iomanip>
 #include <iostream>
-#include <sstream>
+#include <string>
 #include <vector>
 
 using namespace Juzhen;
 
-// Architecture (same as demo_cnn_mnist) ──────────────────────────────────────
-static constexpr int C = 1, H = 28, W = 28;
-static constexpr int kH = 3, kW = 3, pad = 1;
-static constexpr int C1 = 16, S1 = 1;
-static constexpr int H1 = (H + 2*pad - kH)/S1 + 1;
-static constexpr int W1 = (W + 2*pad - kW)/S1 + 1;
-static constexpr int C2 = 32, S2 = 2;
-static constexpr int H2 = (H1 + 2*pad - kH)/S2 + 1;
-static constexpr int W2 = (W1 + 2*pad - kW)/S2 + 1;
-static constexpr int C3 = 64, S3 = 2;
-static constexpr int H3 = (H2 + 2*pad - kH)/S3 + 1;
-static constexpr int W3 = (W2 + 2*pad - kW)/S3 + 1;
-static constexpr int conv_out = C3 * H3 * W3;
-static constexpr int fc_hidden = 256;
-static constexpr int k_classes = 10;
+// the element type of the build's ConvLayer
+#if defined(CUDA) && defined(CUDNN_AVAILABLE)
+using Backend = CUDAfloat;
+static const char* const backend_name = "CUDA";
+#elif defined(ROCM_HIP)
+using Backend = ROCMfloat;
+static const char* const backend_name = "ROCm";
+#elif defined(APPLE_SILICON)
+using Backend = MPSfloat;
+static const char* const backend_name = "Metal";
+#else
+using Backend = float;
+static const char* const backend_name = "CPU";
+#endif
+
 static constexpr int BS = 64;
 static constexpr int N_ITERS = 100;
+// Rounding differences between backends grow as training goes on: the first
+// steps must agree closely, the whole run within a looser bound.
+static constexpr int EARLY_ITERS = 10;
+static constexpr float EARLY_TOLERANCE = 1e-4f;
+static constexpr float TOLERANCE = 5e-3f;
 
-static const std::string REF_FILE =
-    std::string(PROJECT_DIR) + "/tests/cnn_train_ref.txt";
+static const std::string REF_FILE = std::string(PROJECT_DIR) + "/tests/cnn_train_ref.txt";
 
-// Plain Adam (no weight decay) at the layers' default learning rate.
-static AdamWOptions adam_options() {
-    AdamWOptions options;
+// uniform in [-1, 1), the same on every platform: integer arithmetic only (splitmix64)
+static float unit(unsigned long long k, unsigned long long salt) {
+    unsigned long long z = k + salt * 0x9E3779B97F4A7C15ull;
+    z = (z ^ (z >> 30)) * 0xBF58476D1CE4E5B9ull;
+    z = (z ^ (z >> 27)) * 0x94D049BB133111EBull;
+    z = z ^ (z >> 31);
+    return float(double(z >> 40) / 16777216.0 * 2.0 - 1.0);
+}
+
+// weights in storage order (column after column) with the variance of N(0, std^2)
+template <class D>
+static void fill(Matrix<D>& w, double std, int salt) {
+    Matrix<float> host("w", w.num_row(), w.num_col());
+    const float scale = float(std * std::sqrt(3.0));
+    for (size_t j = 0; j < host.num_col(); ++j)
+        for (size_t i = 0; i < host.num_row(); ++i)
+            host.elem(i, j) = scale * unit(j * host.num_row() + i, salt);
+    if constexpr (std::is_same_v<D, float>)
+        w = std::move(host);
+    else
+        w = Matrix<D>(host);
+}
+
+int compute() {
+#ifdef CUDA
+    GPUSampler sampler(42);  // the constructors draw on the device before fill() replaces the weights
+#endif
+    global_rand_gen.seed(42);
+
+    // the architecture of demo_cnn_mnist: 28x28 -> 16@28x28 -> 32@14x14 -> 64@7x7 -> 256 -> 10
+    ConvLayer c1(BS, 1, 28, 28, 16, 3, 3, 1, 1);
+    ConvLayer c2(BS, 16, 28, 28, 32, 3, 3, 1, 2);
+    ConvLayer c3(BS, 32, 14, 14, 64, 3, 3, 1, 2);
+    ReluLayer<Backend> L1(256, 64 * 7 * 7, BS);
+    LinearLayer<Backend> L2(10, 256, BS);
+    fill(c1.W(), std::sqrt(2.0 / 9), 1);
+    fill(c2.W(), std::sqrt(2.0 / 144), 2);
+    fill(c3.W(), std::sqrt(2.0 / 288), 3);
+    fill(L1.W(), std::sqrt(2.0 / 3136), 4);
+    fill(L2.W(), std::sqrt(1.0 / 256), 5);
+
+    std::list<Layer<Backend>*> net{&L2, &L1, &c3, &c2, &c1};
+    AdamWOptions options;  // plain Adam at the default learning rate
     options.weight_decay = 0;
-    return options;
-}
+    AdamW<Backend> optimizer(parameters(net), options);
 
-// One training step: softmax CE gradient of the network output, backward
-// through the network, then one optimizer update. Returns the batch loss.
-template<class D>
-float train_step(const std::list<Layer<D>*>& net, AdamW<D>& optimizer, const Matrix<D>& X, const Matrix<D>& Y) {
-    optimizer.zero_grad();
-    auto [loss, grad] = softmax_cross_entropy(forward(net, X), Y);
-    backward(net, X, std::move(grad));
-    optimizer.step();
-    if constexpr (std::is_same_v<D, float>) return loss.elem(0, 0);
-    else return loss.to_host().elem(0, 0);
-}
-
-// Pre-load N_ITERS batches from MNIST into CPU float matrices.
-static void load_batches(std::vector<Matrix<float>>& Xs,
-                         std::vector<Matrix<float>>& Ys) {
-    std::string mnist_dir = std::string(PROJECT_DIR) + "/datasets/MNIST";
-    DataLoader<float, int> loader(mnist_dir, "train", BS);
-    Xs.reserve(N_ITERS);
-    Ys.reserve(N_ITERS);
-    for (int i = 0; i < N_ITERS; ++i) {
+    DataLoader<float, int> loader(std::string(PROJECT_DIR) + "/datasets/MNIST", "train", BS);
+    std::vector<float> losses;
+    for (int iter = 0; iter < N_ITERS; ++iter) {
         auto [Xb, yb] = loader.next_batch();
         while (Xb.num_col() != BS) std::tie(Xb, yb) = loader.next_batch();
-        Xs.push_back(Xb / 255.0f);
-        Ys.push_back(one_hot(yb, k_classes));
-    }
-}
-
-#if defined(CUDA) && defined(CUDNN_AVAILABLE)
-// ── GPU training path (CUDA/cuDNN) ──────────────────────────────────────────
-int compute() {
-    GPUSampler sampler(42);
-    global_rand_gen.seed(42);
-
-    std::vector<Matrix<float>> Xs, Ys;
-    load_batches(Xs, Ys);
-
-    ConvLayer c1(BS, C,  H,  W,  C1, kH, kW, pad, S1);
-    ConvLayer c2(BS, C1, H1, W1, C2, kH, kW, pad, S2);
-    ConvLayer c3(BS, C2, H2, W2, C3, kH, kW, pad, S3);
-    ReluLayer<CUDAfloat>   L1(fc_hidden, conv_out, BS);
-    LinearLayer<CUDAfloat> L2(k_classes, fc_hidden, BS);
-
-    std::list<Layer<CUDAfloat>*> net;
-    net.push_back(&L2); net.push_back(&L1);
-    net.push_back(&c3); net.push_back(&c2); net.push_back(&c1);
-    AdamW<CUDAfloat> optimizer(parameters(net), adam_options());
-
-    std::vector<float> gpu_losses;
-    gpu_losses.reserve(N_ITERS);
-
-    for (int iter = 0; iter < N_ITERS; ++iter) {
-        auto Xg = Matrix<CUDAfloat>(Xs[iter]);
-        auto Yg = Matrix<CUDAfloat>(Ys[iter]);
-
-        gpu_losses.push_back(train_step(net, optimizer, Xg, Yg));
+        const Matrix<Backend> X(Xb / 255.0f);  // divided on the host in every build
+        optimizer.zero_grad();
+        auto [loss, grad] = softmax_cross_entropy(forward(net, X), yb);  // class numbers from the loader
+        backward(net, X, std::move(grad));
+        optimizer.step();
+        losses.push_back(item(loss));
     }
 
-    // Try to load CPU reference
-    std::ifstream ref(REF_FILE);
-    if (!ref.is_open()) {
-        std::cout << "No CPU reference file found at " << REF_FILE << "\n";
-        std::cout << "Run the CPU build first to generate it.\n";
-        std::cout << "\nGPU losses (100 iters):\n";
-        for (int i = 0; i < N_ITERS; ++i)
-            std::cout << "  iter " << std::setw(3) << i
-                      << " loss=" << std::fixed << std::setprecision(6)
-                      << gpu_losses[i] << "\n";
-        return 77; // ctest SKIP_RETURN_CODE
-    }
-
-    std::vector<float> cpu_losses;
-    std::string line;
-    while (std::getline(ref, line)) {
-        std::istringstream ss(line);
-        float v;  ss >> v;  cpu_losses.push_back(v);
-    }
-
-    float max_diff = 0.0f;
-    std::cout << std::setw(5) << "iter"
-              << std::setw(12) << "loss_cpu"
-              << std::setw(12) << "loss_gpu"
-              << std::setw(12) << "diff" << "\n";
-    for (int i = 0; i < N_ITERS; ++i) {
-        const float diff = std::fabs(cpu_losses[i] - gpu_losses[i]);
-        max_diff = std::max(max_diff, diff);
-        std::cout << std::setw(5) << i
-                  << std::fixed << std::setprecision(6)
-                  << std::setw(12) << cpu_losses[i]
-                  << std::setw(12) << gpu_losses[i]
-                  << std::setw(12) << diff << "\n";
-    }
-
-    std::cout << "\nmax |loss_cpu - loss_gpu| over " << N_ITERS
-              << " iters: " << max_diff << "\n";
-
-    if (max_diff > 5e-2f) {
-        std::cout << "[FAIL] testCNNTrainParity (CUDA)\n";
-        return 1;
-    }
-    std::cout << "[PASS] testCNNTrainParity (CUDA)\n";
-    return 0;
-}
-
-#elif defined(ROCM_HIP)
-// ── GPU training path (ROCm/HIP) ────────────────────────────────────────────
-int compute() {
-    global_rand_gen.seed(42);
-
-    std::vector<Matrix<float>> Xs, Ys;
-    load_batches(Xs, Ys);
-
-    ConvLayer c1(BS, C,  H,  W,  C1, kH, kW, pad, S1);
-    ConvLayer c2(BS, C1, H1, W1, C2, kH, kW, pad, S2);
-    ConvLayer c3(BS, C2, H2, W2, C3, kH, kW, pad, S3);
-    ReluLayer<ROCMfloat>   L1(fc_hidden, conv_out, BS);
-    LinearLayer<ROCMfloat> L2(k_classes, fc_hidden, BS);
-
-    std::list<Layer<ROCMfloat>*> net;
-    net.push_back(&L2); net.push_back(&L1);
-    net.push_back(&c3); net.push_back(&c2); net.push_back(&c1);
-    AdamW<ROCMfloat> optimizer(parameters(net), adam_options());
-
-    std::vector<float> gpu_losses;
-    gpu_losses.reserve(N_ITERS);
-
-    for (int iter = 0; iter < N_ITERS; ++iter) {
-        auto Xg = Matrix<ROCMfloat>(Xs[iter]);
-        auto Yg = Matrix<ROCMfloat>(Ys[iter]);
-
-        gpu_losses.push_back(train_step(net, optimizer, Xg, Yg));
+    const char* write = std::getenv("JUZHEN_WRITE_CNN_REF");
+    if (write && *write && std::string(write) != "0") {
+        if (!std::is_same_v<Backend, float>) {
+            std::cout << "the reference is written by a CPU build; this is a " << backend_name << " build\n";
+            return 1;
+        }
+        std::ofstream out(REF_FILE);
+        for (float v : losses) out << std::setprecision(9) << v << "\n";
+        std::cout << "wrote " << REF_FILE << ": loss " << losses.front() << " -> " << losses.back() << "\n";
+        return out.good() ? 0 : 1;
     }
 
     std::ifstream ref(REF_FILE);
-    if (!ref.is_open()) {
-        std::cout << "No CPU reference file found at " << REF_FILE << "\n";
-        std::cout << "Run the CPU build first to generate it.\n";
-        std::cout << "\nROCm losses (100 iters):\n";
-        for (int i = 0; i < N_ITERS; ++i)
-            std::cout << "  iter " << std::setw(3) << i
-                      << " loss=" << std::fixed << std::setprecision(6)
-                      << gpu_losses[i] << "\n";
-        return 77; // ctest SKIP_RETURN_CODE
+    std::vector<float> reference;
+    for (float v; ref >> v;) reference.push_back(v);
+    if (reference.size() != size_t(N_ITERS)) {
+        std::cout << "no usable reference at " << REF_FILE << " (" << reference.size() << " values); "
+                  << "run a CPU build with JUZHEN_WRITE_CNN_REF=1\n";
+        return 77;  // ctest SKIP_RETURN_CODE
     }
 
-    std::vector<float> cpu_losses;
-    std::string line;
-    while (std::getline(ref, line)) {
-        std::istringstream ss(line);
-        float v;  ss >> v;  cpu_losses.push_back(v);
-    }
-
-    float max_diff = 0.0f;
-    std::cout << std::setw(5) << "iter"
-              << std::setw(12) << "loss_cpu"
-              << std::setw(12) << "loss_rocm"
-              << std::setw(12) << "diff" << "\n";
+    float early = 0, whole = 0;
     for (int i = 0; i < N_ITERS; ++i) {
-        const float diff = std::fabs(cpu_losses[i] - gpu_losses[i]);
-        max_diff = std::max(max_diff, diff);
-        std::cout << std::setw(5) << i
-                  << std::fixed << std::setprecision(6)
-                  << std::setw(12) << cpu_losses[i]
-                  << std::setw(12) << gpu_losses[i]
-                  << std::setw(12) << diff << "\n";
+        const float diff = std::fabs(reference[i] - losses[i]);
+        if (!(diff == diff)) whole = early = INFINITY;  // nan
+        if (i < EARLY_ITERS) early = std::max(early, diff);
+        whole = std::max(whole, diff);
+        if (i % 10 == 0 || i == N_ITERS - 1)
+            std::cout << std::setw(5) << i << std::fixed << std::setprecision(6) << std::setw(12) << reference[i]
+                      << std::setw(12) << losses[i] << std::setw(12) << diff << "\n";
     }
-
-    std::cout << "\nmax |loss_cpu - loss_rocm| over " << N_ITERS
-              << " iters: " << max_diff << "\n";
-
-    if (max_diff > 5e-2f) {
-        std::cout << "[FAIL] testCNNTrainParity (ROCm)\n";
-        return 1;
-    }
-    std::cout << "[PASS] testCNNTrainParity (ROCm)\n";
-    return 0;
-}
-
-#elif defined(APPLE_SILICON)
-// ── GPU training path (Apple Silicon / Metal) ───────────────────────────────
-int compute() {
-    global_rand_gen.seed(42);
-
-    std::vector<Matrix<float>> Xs, Ys;
-    load_batches(Xs, Ys);
-
-    ConvLayer c1(BS, C,  H,  W,  C1, kH, kW, pad, S1);
-    ConvLayer c2(BS, C1, H1, W1, C2, kH, kW, pad, S2);
-    ConvLayer c3(BS, C2, H2, W2, C3, kH, kW, pad, S3);
-    ReluLayer<MPSfloat>   L1(fc_hidden, conv_out, BS);
-    LinearLayer<MPSfloat> L2(k_classes, fc_hidden, BS);
-
-    std::list<Layer<MPSfloat>*> net;
-    net.push_back(&L2); net.push_back(&L1);
-    net.push_back(&c3); net.push_back(&c2); net.push_back(&c1);
-    AdamW<MPSfloat> optimizer(parameters(net), adam_options());
-
-    std::vector<float> gpu_losses;
-    gpu_losses.reserve(N_ITERS);
-
-    for (int iter = 0; iter < N_ITERS; ++iter) {
-        auto Xg = Matrix<MPSfloat>(Xs[iter]);
-        auto Yg = Matrix<MPSfloat>(Ys[iter]);
-
-        gpu_losses.push_back(train_step(net, optimizer, Xg, Yg));
-    }
-
-    std::ifstream ref(REF_FILE);
-    if (!ref.is_open()) {
-        std::cout << "No CPU reference file found at " << REF_FILE << "\n";
-        std::cout << "Run the CPU build first to generate it.\n";
-        std::cout << "\nMPS losses (100 iters):\n";
-        for (int i = 0; i < N_ITERS; ++i)
-            std::cout << "  iter " << std::setw(3) << i
-                      << " loss=" << std::fixed << std::setprecision(6)
-                      << gpu_losses[i] << "\n";
-        return 77; // ctest SKIP_RETURN_CODE
-    }
-
-    std::vector<float> cpu_losses;
-    std::string line;
-    while (std::getline(ref, line)) {
-        std::istringstream ss(line);
-        float v;  ss >> v;  cpu_losses.push_back(v);
-    }
-
-    float max_diff = 0.0f;
-    std::cout << std::setw(5) << "iter"
-              << std::setw(12) << "loss_cpu"
-              << std::setw(12) << "loss_mps"
-              << std::setw(12) << "diff" << "\n";
-    for (int i = 0; i < N_ITERS; ++i) {
-        const float diff = std::fabs(cpu_losses[i] - gpu_losses[i]);
-        max_diff = std::max(max_diff, diff);
-        std::cout << std::setw(5) << i
-                  << std::fixed << std::setprecision(6)
-                  << std::setw(12) << cpu_losses[i]
-                  << std::setw(12) << gpu_losses[i]
-                  << std::setw(12) << diff << "\n";
-    }
-
-    std::cout << "\nmax |loss_cpu - loss_mps| over " << N_ITERS
-              << " iters: " << max_diff << "\n";
-
-    if (max_diff > 5e-2f) {
-        std::cout << "[FAIL] testCNNTrainParity (MPS)\n";
-        return 1;
-    }
-    std::cout << "[PASS] testCNNTrainParity (MPS)\n";
-    return 0;
-}
-
-#else
-// ── CPU training path (generates reference) ──────────────────────────────────
-// Rewriting the checked-in reference is a side effect, so under ctest this
-// path skips (exit 77) unless JUZHEN_WRITE_CNN_REF=1 is set explicitly.
-int compute() {
-    const char* wr = std::getenv("JUZHEN_WRITE_CNN_REF");
-    if (!wr || !*wr || std::string(wr) == "0") {
-        std::cout << "testCNNTrainParity: CPU build regenerates " << REF_FILE << ".\n";
-        std::cout << "Set JUZHEN_WRITE_CNN_REF=1 to rewrite the reference; skipping.\n";
-        return 77; // ctest SKIP_RETURN_CODE
-    }
-
-    global_rand_gen.seed(42);
-
-    std::vector<Matrix<float>> Xs, Ys;
-    load_batches(Xs, Ys);
-
-    ConvLayer c1(BS, C,  H,  W,  C1, kH, kW, pad, S1);
-    ConvLayer c2(BS, C1, H1, W1, C2, kH, kW, pad, S2);
-    ConvLayer c3(BS, C2, H2, W2, C3, kH, kW, pad, S3);
-    ReluLayer<float>   L1(fc_hidden, conv_out, BS);
-    LinearLayer<float> L2(k_classes, fc_hidden, BS);
-
-    std::list<Layer<float>*> net;
-    net.push_back(&L2); net.push_back(&L1);
-    net.push_back(&c3); net.push_back(&c2); net.push_back(&c1);
-    AdamW<float> optimizer(parameters(net), adam_options());
-
-    std::ofstream out(REF_FILE);
-    std::cout << "CPU training (100 iters) — writing reference to " << REF_FILE << "\n";
-    std::cout << std::setw(5) << "iter" << std::setw(12) << "loss_cpu" << "\n";
-
-    for (int iter = 0; iter < N_ITERS; ++iter) {
-        const Matrix<float>& Xh = Xs[iter];
-        const Matrix<float>& Yh = Ys[iter];
-
-        const float lv = train_step(net, optimizer, Xh, Yh);
-        out << lv << "\n";
-
-        std::cout << std::setw(5) << iter
-                  << std::fixed << std::setprecision(6)
-                  << std::setw(12) << lv << "\n";
-    }
-
-    std::cout << "Reference saved to " << REF_FILE << "\n";
-    std::cout << "Now run the CUDA build's testCNNTrainParity to compare.\n";
-    return 0;
-}
+    std::cout << std::defaultfloat << "max |reference - " << backend_name << "| over the first " << EARLY_ITERS
+              << " iterations: " << early << " (allowed " << EARLY_TOLERANCE << "), over all " << N_ITERS << ": "
+              << whole << " (allowed " << TOLERANCE << ")\n";
+    const bool learned = losses.back() < 0.5f * losses.front();
+    if (!learned) std::cout << "the network did not learn: loss " << losses.front() << " -> " << losses.back() << "\n";
+    const bool ok = early <= EARLY_TOLERANCE && whole <= TOLERANCE && learned;
+#ifdef CUDA
+    if (!ok)
+        std::cout << "on Ampere and later GPUs run with NVIDIA_TF32_OVERRIDE=0 (ctest sets it): TensorFloat-32 "
+                     "changes the convolution results by about 1e-4\n";
 #endif
+    std::cout << (ok ? "[PASS]" : "[FAIL]") << " testCNNTrainParity (" << backend_name << ")\n";
+    return ok ? 0 : 1;
+}

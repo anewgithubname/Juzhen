@@ -716,7 +716,7 @@ int compute() {
     vector<unique_ptr<TransformerLayer<CUDAfloat>>> blocks;
     for (int i = 0; i < c.layers; ++i)
         blocks.push_back(make_unique<TransformerLayer<CUDAfloat>>(c.dm, c.dm, 4 * c.dm, N, c.batch, c.heads, true));
-    LayerNormLayer<CUDAfloat> ln(c.dm, cols);
+    LayerNormLayer<CUDAfloat> ln(c.dm);
     ReluLayer<CUDAfloat> out1(c.dm, c.dm, cols);
     out1.W() = Matrix<CUDAfloat>::randn(c.dm, c.dm) * sqrtf(2.0f / c.dm);
     out1.b() = Matrix<CUDAfloat>::zeros(c.dm, 1);

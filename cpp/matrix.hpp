@@ -70,9 +70,60 @@ inline Matrix<D> Matrix<D>::rand(size_t m, size_t n) {
     return M;
 }
 
+// The sum of n numbers kept in 16 running sums, which a compiler turns into
+// SIMD additions without being allowed to reorder floating point.
+template <class D>
+inline D lane_sum(const D *v, size_t n) {
+    constexpr size_t lanes = 16;
+    D part[lanes] = {};
+    size_t i = 0;
+    for (; i + lanes <= n; i += lanes)
+        for (size_t k = 0; k < lanes; k++) part[k] += v[i + k];
+    D total = 0;
+    for (size_t k = 0; k < lanes; k++) total += part[k];
+    for (; i < n; i++) total += v[i];
+    return total;
+}
+
+// sum(M, dim) with plain loops over the storage, on the calling thread.
+template <class D>
+Matrix<D> sum_direct(const Matrix<D> &M, int dim) {
+    const bool per_stored_column = (dim == 0) != M.transpose;
+    const size_t rows = M.numrow, cols = M.numcol;  // of the storage
+    Matrix<D> sumM("sumM", per_stored_column ? cols : rows, 1, 0);
+    const D *p = M.elements.get();
+    D *__restrict out = sumM.elements.get();
+    if (per_stored_column) {
+        for (size_t j = 0; j < cols; j++) out[j] = lane_sum(p + j * rows, rows);
+    } else {
+        for (size_t i = 0; i < rows; i++) out[i] = 0;
+        for (size_t j = 0; j < cols; j++) {
+            const D *column = p + j * rows;
+            for (size_t i = 0; i < rows; i++) out[i] += column[i];
+        }
+    }
+    if (dim == 0) {
+        sumM.transpose = 1;
+    }
+    return sumM;
+}
+
+// On Windows OpenBLAS wakes its threads for a gemv of more than about 9000
+// numbers, and that costs 0.17 ms whatever the size: 30 times the sum of a
+// 256 x 256 matrix. Up to this many numbers the sum is done directly there.
+// On Linux the threaded gemv is as fast or faster at every size, so it stays.
+#ifdef _WIN32
+constexpr size_t direct_sum_limit = size_t(1) << 20;
+#else
+constexpr size_t direct_sum_limit = 0;
+#endif
+
 // sum function as the "sum" in MATLAB
 template <class D>
 Matrix<D> sum(const Matrix<D> &M, int dim) {
+    if (M.numrow * M.numcol <= direct_sum_limit) {
+        return sum_direct(M, dim);
+    }
     int transM = M.transpose;
     if (dim == 0) {
         transM = !transM;
@@ -430,14 +481,14 @@ Matrix<D> hadmd(const Matrix<D> &M1, const Matrix<D> &M2) {
     if (M1.num_row() != M2.num_row() || M1.num_col() != M2.num_col()) {
         throw std::invalid_argument("Matrix dimensions are not compatible");
     }
-    size_t numcol = M1.num_col();
-    size_t numrow = M1.num_row();
-    Matrix<D> result("hadmd", M1.num_row(), M1.num_col());
-    for (size_t j = 0; j < numcol; j++) {
-        for (size_t i = 0; i < numrow; i++) {
-            result.elem(i, j) = M1.elem(i, j) * M2.elem(i, j);
-        }
-    }
+    // stored like the two operands when they are stored alike, and without
+    // the transpose flag otherwise (see Matrix<D>::add)
+    const bool swap = M1.transpose && !M2.transpose;
+    const Matrix<D> &x = swap ? M2 : M1, &y = swap ? M1 : M2;
+    Matrix<D> result("hadmd", x.numrow, x.numcol, x.transpose);
+    zip_storage(result.elements.get(), x.elements.get(), y.elements.get(),
+                x.numrow, x.numcol, x.transpose != y.transpose,
+                [](D p, D q) { return p * q; });
     return result;
 }
 // M2 = M1 .* M2
@@ -447,10 +498,9 @@ Matrix<D> hadmd(const Matrix<D> &M1, Matrix<D> &&M2) {
     if (M1.num_row() != M2.num_row() || M1.num_col() != M2.num_col()) {
         throw std::invalid_argument("Matrix dimensions are not compatible");
     }
-    size_t numcol = M1.num_col();
-    size_t numrow = M1.num_row();
-    for (size_t j = 0; j < numcol; j++)
-        for (size_t i = 0; i < numrow; i++) M2.elem(i, j) *= M1.elem(i, j);
+    zip_storage(M2.elements.get(), M2.elements.get(), M1.elements.get(),
+                M2.numrow, M2.numcol, M1.transpose != M2.transpose,
+                [](D p, D q) { return p * q; });
     return std::move(M2);
 }
 // M1 = M1 .* M2
@@ -460,10 +510,9 @@ Matrix<D> hadmd(Matrix<D> &&M1, const Matrix<D> &M2) {
     if (M1.num_row() != M2.num_row() || M1.num_col() != M2.num_col()) {
         throw std::invalid_argument("Matrix dimensions are not compatible");
     }
-    size_t numcol = M1.num_col();
-    size_t numrow = M1.num_row();
-    for (size_t j = 0; j < numcol; j++)
-        for (size_t i = 0; i < numrow; i++) M1.elem(i, j) *= M2.elem(i, j);
+    zip_storage(M1.elements.get(), M1.elements.get(), M2.elements.get(),
+                M1.numrow, M1.numcol, M1.transpose != M2.transpose,
+                [](D p, D q) { return p * q; });
     return std::move(M1);
 }
 

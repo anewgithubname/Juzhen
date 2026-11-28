@@ -3,11 +3,15 @@
 
 #include "layer.hpp"
 #include <cstdio>
+#include <cstdlib>
 #include <filesystem>
 #include <sstream>
 #include <string>
 #include <vector>
 #include <memory>
+#if defined(__GNUC__)
+#include <cxxabi.h>
+#endif
 #ifdef _WIN32
 #ifndef NOMINMAX
 #define NOMINMAX
@@ -31,6 +35,24 @@ namespace checkpoint_detail {
 constexpr char magic[8] = {'J','Z','C','K','P','T','0','2'};
 constexpr uint32_t version = 2;
 constexpr uint32_t footer = 0x4a5a454e; // JZEN
+
+// A stored type name as a person reads it, for messages only: the file keeps
+// typeid(...).name(), which GCC and clang mangle ("N6Juzhen11LinearLayerIfEE").
+inline std::string readable_type(const std::string& name) {
+    std::string text = name;
+#if defined(__GNUC__)
+    int status = 0;
+    if (char* demangled = abi::__cxa_demangle(name.c_str(), nullptr, nullptr, &status)) {
+        if (status == 0)
+            text = demangled;
+        std::free(demangled);
+    }
+#endif
+    for (const char* drop : {"class ", "struct ", "Juzhen::"})
+        for (size_t at; (at = text.find(drop)) != std::string::npos;)
+            text.erase(at, std::string(drop).size());
+    return text;
+}
 
 // Every helper returns false on any read/write failure.
 
@@ -107,6 +129,7 @@ bool save_checkpoint(const std::list<Layer<D>*>& network, const std::string& pat
     namespace cd = checkpoint_detail;
     if (error)
         error->clear();
+    require_valid_structure(network);  // a tied layer needs its Embedding in the list
 
     const std::string temporary = path + ".tmp";
     std::unique_ptr<FILE, decltype(&fclose)> file(fopen(temporary.c_str(), "wb"), &fclose);
@@ -200,6 +223,16 @@ bool load_checkpoint(const std::list<Layer<D>*>& network, const std::string& pat
         return false;
     }
 
+    require_valid_structure(network);
+    // the first thing that does not match, in words
+    std::string reason;
+    auto fail = [&](const std::string& why) {
+        if (reason.empty())
+            reason = why;
+        return false;
+    };
+    auto shape = [](uint64_t rows, uint64_t cols) { return std::to_string(rows) + " x " + std::to_string(cols); };
+
     TrainingProgress pending_progress;
     auto pending_rng = global_rand_gen;
     std::vector<std::pair<Matrix<D>*, Matrix<D>>> pending_parameters;
@@ -210,31 +243,63 @@ bool load_checkpoint(const std::list<Layer<D>*>& network, const std::string& pat
     uint32_t version = 0;
     uint64_t count = 0;
     std::string rng_state;
-    bool ok = fread(magic, 1, 8, fp) == 8 && memcmp(magic, cd::magic, 8) == 0
-           && cd::get(fp, version) && version == cd::version
-           && cd::get(fp, count) && count == network.size()
-           && cd::get(fp, pending_progress.epoch)
-           && cd::get(fp, pending_progress.step)
-           && cd::get(fp, pending_progress.data_position)
-           && cd::get_string(fp, rng_state);
+    bool ok = (fread(magic, 1, 8, fp) == 8 && memcmp(magic, cd::magic, 8) == 0)
+              || fail("this is not a Juzhen checkpoint file (or it was written by an older version)");
+    ok = ok && ((cd::get(fp, version) && version == cd::version)
+                || fail("the file has checkpoint format " + std::to_string(version) + ", this build reads format " +
+                        std::to_string(cd::version)));
+    ok = ok && (cd::get(fp, count) || fail("the file is truncated"));
+    ok = ok && (count == network.size()
+                || fail("the file holds " + std::to_string(count) + " layers but the network has " +
+                        std::to_string(network.size())));
+    ok = ok && ((cd::get(fp, pending_progress.epoch)
+                 && cd::get(fp, pending_progress.step)
+                 && cd::get(fp, pending_progress.data_position)
+                 && cd::get_string(fp, rng_state)) || fail("the file is truncated"));
 
     // layers: type, parameters and optimizer states must match by name and order
+    // layers are counted from the input, as in the parameter names "layer<k>.<name>"
+    size_t index = network.size();
     for (auto* layer : network) {
+        if (!ok)
+            break;
+        --index;
+        const std::string where = "layer " + std::to_string(index);
         std::string type;
-        ok = ok && cd::get_string(fp, type) && type == typeid(*layer).name();
+        ok = cd::get_string(fp, type) || fail("the file is truncated");
+        ok = ok && (type == typeid(*layer).name()
+                    || fail(where + " is a '" + cd::readable_type(type) + "' in the file but a '" +
+                            cd::readable_type(typeid(*layer).name()) +
+                            "' in the network (a different layer type, or a network on another device)"));
         if (!ok)
             break;
 
         auto parameters = layer->checkpoint_parameters();
         uint64_t parameter_count = 0;
-        ok = ok && cd::get(fp, parameter_count) && parameter_count == parameters.size();
+        ok = (cd::get(fp, parameter_count) || fail("the file is truncated"))
+             && (parameter_count == parameters.size()
+                 || fail(where + " has " + std::to_string(parameter_count) + " parameters in the file but " +
+                         std::to_string(parameters.size()) + " in the network"));
         for (auto& [expected, matrix] : parameters) {
-            std::string name;
-            ok = ok && cd::get_string(fp, name) && name == expected;
             if (!ok)
                 break;
+            std::string name;
+            ok = (cd::get_string(fp, name) || fail("the file is truncated"))
+                 && (name == expected
+                     || fail(where + ": the file has parameter '" + name + "' where the network has '" + expected + "'"));
+            if (!ok)
+                break;
+            // peek at the stored shape for the message
+            fpos_t at;
+            uint64_t rows = 0, cols = 0;
+            if (fgetpos(fp, &at) == 0 && cd::get(fp, rows) && cd::get(fp, cols) && fsetpos(fp, &at) == 0
+                && (rows != matrix->num_row() || cols != matrix->num_col())) {
+                ok = fail(where + ", parameter '" + name + "': the file has shape " + shape(rows, cols) +
+                          " but the network has " + shape(matrix->num_row(), matrix->num_col()));
+                break;
+            }
             pending_parameters.emplace_back(matrix, *matrix);
-            ok = cd::get_matrix(fp, pending_parameters.back().second);
+            ok = cd::get_matrix(fp, pending_parameters.back().second) || fail("the file is truncated or damaged");
         }
 
         auto optimizers = layer->checkpoint_optimizers();
@@ -270,7 +335,7 @@ bool load_checkpoint(const std::list<Layer<D>*>& network, const std::string& pat
     }
 
     if (!ok && error)
-        *error = "invalid, incompatible, or truncated checkpoint";
+        *error = reason.empty() ? "the file is truncated or damaged" : reason;
     return ok;
 } catch (const std::exception& exception) {
     if (error)

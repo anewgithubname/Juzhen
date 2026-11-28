@@ -23,6 +23,8 @@ void mpsGemm(const float* A, const float* B, float* C, int rowA, int colA, int r
 void mpsAdd(const float* A, const float* B, float* C, int rowA, int colA, bool transpose, float a, float b);
 // C = A(optionally transposed) .* B; B and C share a layout. In-place: B == C.
 void mpsProduct(const float* A, const float* B, float* C, int rowA, int colA, bool transpose);
+// C = B ./ A(optionally transposed); B and C share a layout.
+void mpsQuotient(const float* A, const float* B, float* C, int rowA, int colA, bool transpose);
 void mpsAx_b(const float* x, float a, float b, float* y, int N);
 // Elementwise ops write dst from src in one dispatch; in-place: src == dst.
 void mpsTanh(const float* src, float* dst, int N);
