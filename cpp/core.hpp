@@ -103,6 +103,14 @@ inline void zip_storage(D *out, const D *a, const D *b, size_t numrow,
             for (size_t k = 0; k < n; k++) o[k] = f(o[k], q[k]);
             return;
         }
+        if (out == a && out == b) {
+            // In place with itself (A *= A, A -= A): one array, read and
+            // written element by element. Left to the loop below it took
+            // the one-at-a-time version too, three times as long on an M2.
+            D *__restrict o = out;
+            for (size_t k = 0; k < n; k++) o[k] = f(o[k], o[k]);
+            return;
+        }
         for (size_t k = 0; k < n; k++) out[k] = f(a[k], b[k]);
         return;
     }
