@@ -127,6 +127,7 @@ compiled function (`float()`, `.numpy()`, `if A > 0:`): that would happen
 once, while recording, so it is an error that says what to write instead.
 Float arguments may change from call to call; for each new shape, and each
 new value of a whole-number argument, the function is recorded again.
+`step.profile(W, X, Y, 0.1)` prints the time each of its operations takes.
 
 Reading a value back (`.item()`, `.numpy()`) waits for the GPU to finish, so
 in a training loop read the loss every few hundred steps rather than every

@@ -335,6 +335,23 @@ class TestCompile:
         assert "W -= t" in out and "return t" in out
         assert "# 5 new matrices in each call; as written, the function makes 13" in out
 
+    def test_profile(self, device, rng, capsys):
+        compiled = jz.compile(step)
+        W1, W2 = jz.ones(3, 2, device=device) * 0.1, jz.ones(3, 2, device=device) * 0.1
+        X, Y = jz.array(values(rng, (8, 3))[2:], device=device), jz.zeros(6, 2, device=device)
+        ms = compiled.profile(W1, X, Y, 0.1, repeat=3)  # records, then runs the lines three times
+        out = capsys.readouterr().out
+        record, = compiled._records.values()
+        assert len(ms) == len(record.lines) == record.source.count("\n") - 2 and min(ms) >= 0
+        assert "# step, recorded for W: 3 x 2" in out and "tanh_(t1)" in out and "all lines" in out
+        assert out.count(" ms ") == len(ms) and out.count("%") == len(ms)
+        assert compiled.profile(W1, X, Y, 0.1, repeat=1, show=False) and capsys.readouterr().out == ""
+        for _ in range(5):
+            step(W2, X, Y, 0.1)
+        assert bits(W1) == bits(W2)  # five calls in all
+        with pytest.raises(jz.CompileError, match="profile\\(\\) cannot be used inside"):
+            jz.compile(lambda A: compiled.profile(A, X, Y, 0.1))(W1)
+
     def test_an_error_while_recording_leaves_no_record(self, device, rng):
         @jz.compile
         def f(A, B):

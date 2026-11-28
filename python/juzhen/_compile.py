@@ -52,7 +52,9 @@ import linecache
 import math
 import operator
 import os
+import statistics
 import sys
+import time
 import warnings
 
 import numpy as np
@@ -710,7 +712,7 @@ def refuse(name):
 
 class _Record:
     """The function written from one recording."""
-    __slots__ = ("run", "source", "summary", "new", "new_as_written", "holds")
+    __slots__ = ("run", "source", "summary", "new", "new_as_written", "holds", "names", "namespace", "lines")
 
 
 class Compiled:
@@ -738,6 +740,42 @@ class Compiled:
         if record is None:
             return self._record(key, args, kwargs)
         return record.run(*leaves)
+
+    def profile(self, *args, repeat=7, show=True, **kwargs):
+        """Time each line of the record for these arguments, waiting for the GPU after every line.
+
+        Prints the lines with their milliseconds (the median of `repeat` runs) and their share of the
+        total, and returns the milliseconds as a list. The function is run `repeat` times, and once more
+        if it has not been recorded for these arguments, so what it changes in place (W -= ...) changes
+        that often. The sum is more than one call takes on a GPU, where a call does not wait in between.
+        """
+        if _active is not None:
+            raise CompileError("profile() cannot be used inside a function that is being recorded")
+        leaves = []
+        key = (_key(args, leaves), _key(kwargs, leaves)) if kwargs else _key(args, leaves)
+        if self._records.get((key, self._watch()) if self._watched else key) is None:
+            self._record(key, args, kwargs)
+        record = self._records[(key, self._watch()) if self._watched else key]
+        codes = [builtins.compile(line["text"], "<jz.compile profile>", "exec") for line in record.lines]
+        times = [[] for _ in codes]
+        for _ in range(repeat):
+            scope = dict(record.namespace)
+            scope.update(zip(record.names, leaves))
+            for code, taken in zip(codes, times):
+                _core.synchronize()
+                start = time.perf_counter()
+                exec(code, scope)  # noqa: S102 - a line of the record
+                _core.synchronize()
+                taken.append(time.perf_counter() - start)
+        ms = [statistics.median(taken) * 1e3 for taken in times]
+        if show:
+            total = sum(ms) or 1.0
+            width = max([len(line["text"]) for line in record.lines], default=0)
+            print(record.summary)
+            for line, t in zip(record.lines, ms):
+                print(f"    {line['text']:{width}}  {t:9.4f} ms  {100 * t / total:5.1f}%")
+            print(f"    {'all lines':{width}}  {sum(ms):9.4f} ms")
+        return ms
 
     def _watch(self):
         """Which objects the watched variables hold now (as ids; the records keep the objects alive)."""
@@ -819,12 +857,21 @@ class Compiled:
             _active = None
 
         record = _Record()
-        texts, text_of_result, record.new, record.new_as_written = _reuse(rec, returned[1])
+        texts, text_of_result, record.new, record.new_as_written, *more = _reuse(rec, returned[1])
+        returned = returned + tuple(more)  # the names that are returned, and each kept line's operands
         record.summary = f"# {function.__name__}, recorded for " + ("; ".join(described) or "no matrices")
         if record.new != record.new_as_written:
             record.summary += (f"\n# {record.new} new matrices in each call; as written, the function makes "
                                f"{record.new_as_written}")
-        record.source, record.run = _write(function, rec, names, texts, text_of_result, len(self._records))
+        record.source, record.run, record.namespace = _write(function, rec, names, texts, text_of_result,
+                                                              len(self._records))
+        record.names = names
+        # for profile() and for tools that study records: each line with its operation, its operands under
+        # the names they had before any reuse, and the shape of its result
+        record.lines = [{"text": text, "op": line.op, "out": line.out, "args": args, "form": line.form,
+                         "shape": rec.shape.get(line.out if line.out is not None else (args[0] if args else None)),
+                         "returned": line.out in returned[2]}
+                        for (text, line), args in zip(texts, returned[3])]
         record.holds = rec.holds
         watched = [found for found in rec.captured if found not in self._watched]
         if watched:
@@ -1010,7 +1057,7 @@ def _reuse(rec, result):
 
     # ---- a result goes into an operand that nothing reads again ----
     held_by = {}  # the name of a result that took over an operand -> the name of the matrix that holds it
-    texts, new = [], 0
+    texts, operands, new = [], [], 0
 
     def name(a):
         a = first_name(a)
@@ -1051,8 +1098,10 @@ def _reuse(rec, result):
             text = form.format(*[name(a) for a in args])
             held_by[line.out] = name(taken)
         texts.append((text, line))
+        operands.append(args)
     as_written = sum(1 for line in rec.lines if line.out in rec.made)
-    return texts, "".join(name(a) for a in _flat(result)), new, as_written
+    return (texts, "".join(name(a) for a in _flat(result)), new, as_written,
+            {first_name(a) for a in returned}, operands)
 
 
 def _write(function, rec, names, texts, returned, number):
@@ -1075,7 +1124,7 @@ def _write(function, rec, names, texts, returned, number):
     namespace.update(rec.namespace)
     exec(builtins.compile(source, filename, "exec"), namespace)  # noqa: S102 - source written above from the record
     linecache.cache[filename] = (len(source), None, source.splitlines(True), filename)
-    return source, namespace[name]
+    return source, namespace[name], namespace
 
 
 def compile(function):  # noqa: A001 - jz.compile, as torch.compile
